@@ -13,15 +13,17 @@ With DecentraChat:
 - **No Central Server.** Your messages travel directly from your computer to your friend's computer. They aren't stored on some company's cloud server forever. *(We only use a temporary relay if a direct connection isn't possible, but even then, the relay can't read your locked messages!)*
 
 ## ⚙️ How does it work?
-1. **Create an Account:** You click one button to generate your secure, anonymous identity. Your secret "keys" are stored only on your computer.
-2. **Share your Address:** Send your unique address to your friends.
-3. **Start Chatting:** Start a conversation! Messages are sent directly between you and your friends using secure peer-to-peer technology.
+1. **Create an Account:** Make sure you have an account on Metamask (it is essential to make an acc with DecentraChat as well). After downloading the apk, open it and sign in through your metamask app. It will ask you for you digital signature, basically asking you if you trust DecentraChat or not (you can trust us). After which it will ask you to enter a username of your choice (REMEMBER, THE USERNAMES ARE IMMUTABLE   )
+2. **Share your Address:** After the sign up process is done, you'll get an address (your ethereum wallet address), which can be copied after going on the top right of the app home page and copying it from the bottom. Send your unique address to your friends, they can search you up and voila, you can chat with each other now.
+3. **Start Chatting:** Start a conversation! Messages are sent directly between you and your friends using secure peer-to-peer technology, which means, no one can intercept/hack it and even if they do, they can't see the message because only your friend with his private key can access it.
 4. **Group Chats:** Create secure groups, invite your friends, and chat together, all completely encrypted.
+5. **Media Sharing:** You can share images with your friends (more media support coming soon), all completely encrypted as well.
 
 ## 🚀 Get Started
 
 Ready to take back your privacy? Download and install DecentraChat!
 
-**👉 [Download DecentraChat Setup for Windows](https://github.com/mrsarthi/Dicsussion/releases/latest/download/DecentraChat-Setup-1.5.1.exe)**
+** [Download DecentraChat Setup for Windows](https://github.com/mrsarthi/Dicsussion/releases/download/new_version/DecentraChat-Setup-1.6.4.exe)**
+** [Download DecentraChat Setup for Android](https://github.com/mrsarthi/Dicsussion/releases/download/new_version/app-debug.apk)**
 
 *(Alternatively, you can view [All Releases here](https://github.com/mrsarthi/Dicsussion/releases/latest).)*
