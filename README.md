@@ -23,7 +23,9 @@ With DecentraChat:
 
 Ready to take back your privacy? Download and install DecentraChat!
 
-** [Download DecentraChat Setup for Windows](https://github.com/mrsarthi/Dicsussion/releases/download/new_version/DecentraChat-Setup-1.6.4.exe)**
-** [Download DecentraChat Setup for Android](https://github.com/mrsarthi/Dicsussion/releases/download/new_version/app-debug.apk)**
+[Download DecentraChat Setup for Windows](https://github.com/mrsarthi/Dicsussion/releases/download/new_version/DecentraChat-Setup-1.6.4.exe)
+
+
+ [Download DecentraChat Setup for Android](https://github.com/mrsarthi/Dicsussion/releases/download/new_version/app-debug.apk)
 
 *(Alternatively, you can view [All Releases here](https://github.com/mrsarthi/Dicsussion/releases/latest).)*
