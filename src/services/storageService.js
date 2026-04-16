@@ -56,9 +56,13 @@ export async function saveMessage(chatId, message) {
         try {
             const history = (await messageStore.getItem(key)) || [];
 
-            // Deduplicate
-            if (history.some(m => m.id === message.id)) {
-                console.debug('⚠️ Duplicate message ignored:', message.id);
+            // Check if this message already exists — if so, merge/update it
+            const existingIdx = history.findIndex(m => m.id === message.id);
+            if (existingIdx !== -1) {
+                // Merge: update the existing entry (e.g. reactions, status)
+                history[existingIdx] = { ...history[existingIdx], ...message };
+                await messageStore.setItem(key, history);
+                console.debug('🔄 Message updated in storage:', message.id);
                 return;
             }
 
@@ -208,6 +212,8 @@ export async function saveContacts(contacts) {
                 admins: c.admins,   // Crucial for group admin features
                 lastMessageTime: c.lastMessageTime,
                 unreadCount: c.unreadCount,
+                avatar: c.avatar,   // Persist avatar so offline users still show their pfp
+                status: c.status,   // Persist status tagline
                 // Don't save online status, meaningless on reload
             }));
             await messageStore.setItem('visible_contacts', minimized);

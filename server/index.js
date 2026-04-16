@@ -279,6 +279,8 @@ io.on('connection', (socket) => {
                     socket.emit('groupCreated', msg);
                 } else if (msg._isGroupDeleted) {
                     socket.emit('groupDeleted', msg);
+                } else if (msg._isGroupAvatarUpdate) {
+                    socket.emit('groupAvatarUpdated', msg);
                 } else if (msg._isGroupMessage) {
                     socket.emit('groupMessage', msg);
                 } else {
@@ -677,6 +679,45 @@ io.on('connection', (socket) => {
         });
 
         console.log(`[👥-] Group deleted ${groupId?.slice(0, 8)}: ${deliveredCount} notified, ${queuedCount} queued`);
+    });
+
+    // Update group avatar — fan out to all members
+    socket.on('updateGroupAvatar', ({ groupId, avatar, members }) => {
+        if (!groupId || !Array.isArray(members) || members.length === 0) return;
+
+        const payload = {
+            id: `ga_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            groupId,
+            avatar,
+            updatedBy: socket.address,
+            timestamp: Date.now()
+        };
+
+        let deliveredCount = 0;
+        let queuedCount = 0;
+
+        members.forEach(memberAddr => {
+            const toAddress = memberAddr.toLowerCase();
+
+            // Don't send back to the admin who updated
+            if (toAddress === socket.address) return;
+
+            const recipient = users.get(toAddress);
+
+            if (recipient && recipient.online) {
+                io.to(recipient.socketId).emit('groupAvatarUpdated', payload);
+                deliveredCount++;
+            } else {
+                // Queue for offline delivery
+                const pending = offlineMessages.get(toAddress) || [];
+                pending.push({ ...payload, _isGroupAvatarUpdate: true });
+                offlineMessages.set(toAddress, pending);
+                saveOfflineMessagesDb();
+                queuedCount++;
+            }
+        });
+
+        console.log(`[👥🖼] Group avatar updated ${groupId?.slice(0, 8)}: ${deliveredCount} notified, ${queuedCount} queued`);
     });
 
     // React to a message — relay to recipient(s)

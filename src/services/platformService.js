@@ -375,15 +375,28 @@ export async function checkForUpdates() {
             // Use the GitHub Asset ID as the update key — it changes with every new upload
             const remoteAssetId = String(apkAsset.id);
             const localAssetId = localStorage.getItem('last_installed_asset_id') || '';
+            const remoteVersion = data.tag_name || 'v0.0.0';
+            const localVersion = await getCurrentAppVersion();
 
-            console.log(`[NativeUpdater] Remote Asset ID: ${remoteAssetId}`);
-            console.log(`[NativeUpdater] Local Asset ID: ${localAssetId}`);
+            const isVersionNewer = _isNewerVersion(remoteVersion, localVersion);
 
-            if (remoteAssetId !== localAssetId) {
+            console.log(`[NativeUpdater] Remote Asset: ${remoteAssetId}, Local Asset: ${localAssetId}`);
+            console.log(`[NativeUpdater] Remote Version: ${remoteVersion}, Local Version: ${localVersion}`);
+
+            if (isVersionNewer || remoteAssetId !== localAssetId) {
+                // If it's explicitly a newer semantic version, clear the blocked asset ID
+                if (isVersionNewer) {
+                    localStorage.removeItem('last_installed_asset_id');
+                }
+
                 _latestZipUrl = apkAsset.browser_download_url;
                 _latestUpdateVersion = remoteAssetId; // Store the Asset ID as the version marker
-                _capEmit('onAvailable', { version: 'Latest Release' });
+                _capEmit('onAvailable', { version: remoteVersion.replace(/^v/, '') });
             } else {
+                // We're confirmed up-to-date — persist the asset ID now.
+                // This is the ONLY safe place to save it, because reaching here
+                // means the running build.gradle version matches the remote tag.
+                localStorage.setItem('last_installed_asset_id', remoteAssetId);
                 _capEmit('onNotAvailable', {});
             }
         } catch (err) {
@@ -419,8 +432,9 @@ export function installUpdate() {
 export function startNativeUpdate() {
     if (_isCapacitor && _latestZipUrl) {
         try {
-            // Save the new asset ID so we don't prompt again for the same APK
-            localStorage.setItem('last_installed_asset_id', _latestUpdateVersion);
+            // DO NOT save asset ID here — the user hasn't installed yet.
+            // The ID will be saved on the next successful version check
+            // (i.e. after the user actually installs and relaunches the app).
 
             // '_system' fires an Android system intent, bypassing the in-app browser.
             // This lets the OS download the APK and trigger the native Package Installer.

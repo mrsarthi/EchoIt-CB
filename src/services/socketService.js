@@ -17,6 +17,7 @@ let activeAuthSessionId = null; // Track active auth relay session to handle rec
 let groupCreatedCallback = null;
 let groupDeletedCallback = null;
 let reactionCallback = null;
+let groupAvatarUpdatedCallback = null;
 
 /**
  * Initialize socket connection
@@ -139,6 +140,11 @@ export function initSocket() {
     socket.on('groupDeleted', (data) => {
         console.log('👥- Group deleted notification:', data.groupId?.slice(0, 10));
         if (groupDeletedCallback) groupDeletedCallback(data);
+    });
+
+    socket.on('groupAvatarUpdated', (data) => {
+        console.log('👥🖼 Group avatar updated:', data.groupId?.slice(0, 10));
+        if (groupAvatarUpdatedCallback) groupAvatarUpdatedCallback(data);
     });
 
     socket.on('messageReaction', (data) => {
@@ -393,6 +399,22 @@ export function emitReaction(messageId, emoji, action, to, groupId, members) {
  */
 export function onReaction(callback) {
     reactionCallback = callback;
+}
+
+/**
+ * Emit a group avatar update to the server (server fans out to all members)
+ */
+export function emitUpdateGroupAvatar(groupId, avatar, members) {
+    if (!socket?.connected) return;
+    socket.emit('updateGroupAvatar', { groupId, avatar, members });
+}
+
+/**
+ * Subscribe to group avatar update events
+ * @param {Function} callback - ({ groupId, avatar, updatedBy }) => void
+ */
+export function onGroupAvatarUpdated(callback) {
+    groupAvatarUpdatedCallback = callback;
 }
 
 /**

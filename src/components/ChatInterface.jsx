@@ -34,7 +34,8 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
         clearError,
         myAvatar,
         myStatus,
-        saveProfile
+        saveProfile,
+        updateGroupAvatar
     } = useChat(walletAddress);
 
     const [newMessage, setNewMessage] = useState('');
@@ -49,6 +50,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
     const [showSettings, setShowSettings] = useState(false);
     const [showProfileModal, setShowProfileModal] = useState(false);
     const [reactionPickerMsgId, setReactionPickerMsgId] = useState(null);
+    const [reactionDetailModal, setReactionDetailModal] = useState(null); // { emoji, users, msgId }
     const messagesEndRef = useRef(null);
     const inputRef = useRef(null);
     const fileInputRef = useRef(null);
@@ -231,6 +233,15 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
         }
     };
 
+    const handleMessageGroupMember = async (memberAddr) => {
+        setIsSearching(true);
+        const user = await searchAndAddContact(memberAddr);
+        setIsSearching(false);
+        if (user) {
+            openChat(user.address, user);
+        }
+    };
+
     const formatTime = (timestamp) => {
         return new Date(timestamp).toLocaleTimeString([], {
             hour: '2-digit',
@@ -368,7 +379,11 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                     onClick={() => openChat(contact.address)}
                                 >
                                     <div className="avatar" style={{ overflow: 'hidden' }}>
-                                        {contact.isGroup ? '👥' : (
+                                        {contact.isGroup ? (
+                                            contact.avatar ? (
+                                                <img src={contact.avatar} alt="Group Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                            ) : '👥'
+                                        ) : (
                                             contact.avatar ? (
                                                 <img src={contact.avatar} alt="Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                                             ) : contact.address.slice(2, 4).toUpperCase()
@@ -444,6 +459,9 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                 myAddress={walletAddress}
                                 onDeleteGroup={deleteGroup}
                                 onRemoveMember={removeMember}
+                                onUpdateGroupAvatar={updateGroupAvatar}
+                                contacts={contacts}
+                                onMessageMember={handleMessageGroupMember}
                             />
                         )}
 
@@ -458,7 +476,11 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                 title={activeChat.isGroup ? "View Group Details" : ""}
                             >
                                 <div className="avatar" style={{ overflow: 'hidden' }}>
-                                    {activeChat.isGroup ? '👥' : (
+                                    {activeChat.isGroup ? (
+                                        activeChat.info?.avatar ? (
+                                            <img src={activeChat.info.avatar} alt="Group Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                        ) : '👥'
+                                    ) : (
                                         activeChat.info?.avatar ? (
                                             <img src={activeChat.info.avatar} alt="Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                                         ) : activeChat.address.slice(2, 4).toUpperCase()
@@ -502,7 +524,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                         </header>
 
                         {/* Messages Area */}
-                        <div className="messages-container">
+                        <div className="messages-container" onClick={() => { if (reactionPickerMsgId) setReactionPickerMsgId(null); }}>
                             {flushingOutbox && (
                                 <div className="flushing-banner animate-fadeIn">
                                     <span className="spinner-small"></span>
@@ -547,7 +569,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                         >
                                             {/* Emoji reaction picker */}
                                             {reactionPickerMsgId === msg.id && (
-                                                <div className={`reaction-picker ${msg.from?.toLowerCase() === walletAddress?.toLowerCase() ? 'sent' : 'received'}`}>
+                                                <div className={`reaction-picker ${msg.from?.toLowerCase() === walletAddress?.toLowerCase() ? 'sent' : 'received'}`} onClick={(e) => e.stopPropagation()}>
                                                     {QUICK_EMOJIS.map(emoji => (
                                                         <button
                                                             key={emoji}
@@ -625,8 +647,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                                     <button
                                                         key={emoji}
                                                         className={`reaction-pill ${users.some(u => u.toLowerCase() === walletAddress?.toLowerCase()) ? 'mine' : ''}`}
-                                                        onClick={() => toggleReaction(msg.id, emoji)}
-                                                        title={users.map(u => formatAddress(u)).join(', ')}
+                                                        onClick={() => setReactionDetailModal({ emoji, users, msgId: msg.id })}
                                                     >
                                                         <span className="reaction-pill-emoji">{emoji}</span>
                                                         {users.length > 1 && <span className="reaction-pill-count">{users.length}</span>}
@@ -721,6 +742,56 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
             </main>
 
             {/* Lightbox */}
+            {/* Who Reacted Modal */}
+            {reactionDetailModal && (
+                <div className="reaction-detail-overlay" onClick={() => setReactionDetailModal(null)}>
+                    <div className="reaction-detail-modal glass-card animate-scaleIn" onClick={(e) => e.stopPropagation()}>
+                        <div className="reaction-detail-header">
+                            <span className="reaction-detail-emoji">{reactionDetailModal.emoji}</span>
+                            <span className="reaction-detail-title">Reactions</span>
+                            <button className="reaction-detail-close" onClick={() => setReactionDetailModal(null)}>×</button>
+                        </div>
+                        <div className="reaction-detail-list">
+                            {reactionDetailModal.users.map(user => {
+                                const isMe = user.toLowerCase() === walletAddress?.toLowerCase();
+                                const contact = contacts.find(c => c.address.toLowerCase() === user.toLowerCase());
+                                const displayName = isMe ? 'You' : (contact?.username || formatAddress(user));
+                                return (
+                                    <div key={user} className="reaction-detail-user">
+                                        <div className="avatar avatar-sm" style={{ overflow: 'hidden' }}>
+                                            {contact?.avatar ? (
+                                                <img src={contact.avatar} alt="Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                            ) : user.slice(2, 4).toUpperCase()}
+                                        </div>
+                                        <span className="reaction-detail-name">{displayName}</span>
+                                        {isMe && (
+                                            <button
+                                                className="btn btn-ghost reaction-detail-remove"
+                                                onClick={() => {
+                                                    toggleReaction(reactionDetailModal.msgId, reactionDetailModal.emoji);
+                                                    // Close or update the modal
+                                                    if (reactionDetailModal.users.length <= 1) {
+                                                        setReactionDetailModal(null);
+                                                    } else {
+                                                        setReactionDetailModal(prev => ({
+                                                            ...prev,
+                                                            users: prev.users.filter(u => u.toLowerCase() !== walletAddress?.toLowerCase())
+                                                        }));
+                                                    }
+                                                }}
+                                                title="Remove your reaction"
+                                            >
+                                                Remove
+                                            </button>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {lightboxImage && (
                 <div className="lightbox-overlay" onClick={() => setLightboxImage(null)}>
                     <button className="lightbox-close" onClick={(e) => { e.stopPropagation(); setLightboxImage(null); }}>×</button>

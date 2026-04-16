@@ -239,3 +239,83 @@
 .full-width {
     width: 100%;
 }
+
+/* Group Avatar Styles */
+.group-avatar-section {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin-bottom: var(--space-lg);
+}
+
+.group-avatar-preview {
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    background: var(--bg-tertiary);
+    border: 2px solid var(--border-subtle);
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-size: 2.5rem;
+}
+
+.group-avatar-preview.editable {
+    cursor: pointer;
+}
+
+.group-avatar-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.group-avatar-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-size: 1.5rem;
+    color: white;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.group-avatar-preview.editable:hover .group-avatar-overlay {
+    opacity: 1;
+}
+
+/* Member Action Buttons */
+.member-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.btn-message-member {
+    background: none;
+    border: 1px solid rgba(16, 185, 129, 0.3); /* green-500 equivalent */
+    color: #10b981;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.85rem;
+    transition: all 0.2s;
+    flex-shrink: 0;
+}
+
+.btn-message-member:hover {
+    background: rgba(16, 185, 129, 0.15);
+    border-color: #10b981;
+}

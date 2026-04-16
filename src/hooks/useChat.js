@@ -27,6 +27,8 @@ import {
     onGroupDeleted,
     emitReaction,
     onReaction,
+    emitUpdateGroupAvatar,
+    onGroupAvatarUpdated,
     updateProfile as updateSocketProfile,
     fetchOfflineMessages,
     ackOfflineMessages
@@ -532,6 +534,32 @@ export function useChat(myAddress) {
                 }
             });
 
+            // Listen for group avatar updates from admins
+            onGroupAvatarUpdated((data) => {
+                const { id, groupId, avatar } = data;
+                if (!groupId) return;
+
+                // ACK delivery immediately
+                if (id) ackOfflineMessages([id]);
+
+                // Update avatar on the group contact
+                setContacts(prev => prev.map(c =>
+                    c.address === groupId && c.isGroup
+                        ? { ...c, avatar: avatar }
+                        : c
+                ));
+
+                // Update active chat if this group is currently open
+                if (activeChatRef.current?.address === groupId) {
+                    setActiveChat(prev => ({
+                        ...prev,
+                        info: { ...prev.info, avatar: avatar }
+                    }));
+                }
+
+                console.log(`👥🖼 Group avatar updated for ${groupId.slice(0, 10)}`);
+            });
+
             // Listen for incoming reactions from other participants
             onReaction((data) => {
                 const { id, messageId, emoji, from, action } = data;
@@ -590,8 +618,10 @@ export function useChat(myAddress) {
                             ...c, 
                             online, 
                             lastSeen,
-                            ...(avatar !== undefined && { avatar }),
-                            ...(status !== undefined && { status })
+                            // Only overwrite avatar/status if server actually has data.
+                            // When server restarts, these come back as null/undefined — don't erase local cache.
+                            ...(avatar && { avatar }),
+                            ...(status && { status })
                         };
                     }
                     return c;
@@ -603,8 +633,8 @@ export function useChat(myAddress) {
                         ...prev, 
                         online, 
                         lastSeen,
-                        ...(avatar !== undefined && { avatar }),
-                        ...(status !== undefined && { status })
+                        ...(avatar && { avatar }),
+                        ...(status && { status })
                     }));
                 }
 
@@ -919,14 +949,18 @@ export function useChat(myAddress) {
             }
 
             setMessages(merged.map(m => {
-                // Send explicit read receipts for missed messages that we are now opening
-                if (m.from?.toLowerCase() === address.toLowerCase() && m.status !== 'read') {
-                    sendReadReceipt(m.from, m.id);
+                // Send explicit read receipts for missed incoming messages that we are now opening
+                if (m.from?.toLowerCase() === address.toLowerCase()) {
+                    if (m.status !== 'read') {
+                        sendReadReceipt(m.from, m.id);
+                    }
+                    return {
+                        ...m,
+                        status: 'read'
+                    };
                 }
-                return {
-                    ...m,
-                    status: 'read'
-                };
+                // Preserve the original status for messages we sent
+                return m;
             }));
         } catch (err) {
             console.error('Error loading chat:', err);
@@ -965,6 +999,32 @@ export function useChat(myAddress) {
             console.error('Search failed:', err);
             return null;
         }
+    }, [contacts]);
+
+    const updateGroupAvatar = useCallback((groupId, avatarBase64) => {
+        if (!groupId) return;
+
+        // Find the group to get its members
+        const group = contacts.find(c => c.address === groupId && c.isGroup);
+        if (!group) return;
+
+        // Update local state
+        setContacts(prev => prev.map(c =>
+            c.address === groupId && c.isGroup
+                ? { ...c, avatar: avatarBase64 }
+                : c
+        ));
+
+        // Update active chat if viewing this group
+        if (activeChatRef.current?.address === groupId) {
+            setActiveChat(prev => ({
+                ...prev,
+                info: { ...prev.info, avatar: avatarBase64 }
+            }));
+        }
+
+        // Broadcast to all members via server
+        emitUpdateGroupAvatar(groupId, avatarBase64, group.members || []);
     }, [contacts]);
 
     const saveProfile = useCallback((newAvatar, newStatus) => {
@@ -1014,6 +1074,7 @@ export function useChat(myAddress) {
         myAvatar,
         myStatus,
         saveProfile,
+        updateGroupAvatar,
         clearError: () => setError(null),
     };
 }
