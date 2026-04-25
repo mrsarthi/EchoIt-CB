@@ -1,0 +1,294 @@
+/* ====== Profile Preview Modal ====== */
+
+.profile-preview-card {
+    position: relative;
+    width: 380px;
+    max-width: 92vw;
+    padding: 0;
+    border-radius: 24px;
+    overflow: hidden;
+    background: linear-gradient(145deg, rgba(30, 30, 50, 0.95), rgba(20, 20, 35, 0.98));
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 25px 80px rgba(0, 0, 0, 0.6), 0 0 40px rgba(99, 102, 241, 0.1);
+    animation: profileSlideUp 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes profileSlideUp {
+    from {
+        opacity: 0;
+        transform: translateY(30px) scale(0.95);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+/* Avatar Section */
+.profile-preview-avatar-section {
+    display: flex;
+    justify-content: center;
+    padding: 32px 0 16px;
+    background: linear-gradient(180deg, rgba(99, 102, 241, 0.15) 0%, transparent 100%);
+}
+
+.profile-preview-avatar-ring {
+    position: relative;
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    padding: 3px;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6, #a78bfa);
+    box-shadow: 0 0 30px rgba(99, 102, 241, 0.3);
+}
+
+.profile-preview-avatar-img {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 3px solid rgba(20, 20, 35, 1);
+}
+
+.profile-preview-avatar-placeholder {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.9);
+    background: linear-gradient(135deg, #4f46e5, #7c3aed);
+    border: 3px solid rgba(20, 20, 35, 1);
+}
+
+.profile-preview-status-dot {
+    position: absolute;
+    bottom: 6px;
+    right: 6px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 3px solid rgba(20, 20, 35, 1);
+    transition: background 0.3s ease;
+}
+
+.profile-preview-status-dot.online {
+    background: #22c55e;
+    box-shadow: 0 0 8px rgba(34, 197, 94, 0.5);
+}
+
+.profile-preview-status-dot.offline {
+    background: #6b7280;
+}
+
+/* User Info */
+.profile-preview-info {
+    text-align: center;
+    padding: 8px 24px 16px;
+}
+
+.profile-preview-name {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: #f1f5f9;
+    margin: 0 0 2px;
+    letter-spacing: -0.02em;
+}
+
+.profile-preview-username {
+    font-size: 0.85rem;
+    color: #8b5cf6;
+    margin: 0 0 12px;
+    font-weight: 500;
+}
+
+.profile-preview-discussion-id {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border-radius: 20px;
+    background: rgba(99, 102, 241, 0.12);
+    border: 1px solid rgba(99, 102, 241, 0.2);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    margin-bottom: 10px;
+}
+
+.profile-preview-discussion-id:hover {
+    background: rgba(99, 102, 241, 0.2);
+    border-color: rgba(99, 102, 241, 0.4);
+}
+
+.discussion-id-label {
+    font-size: 0.8rem;
+}
+
+.discussion-id-value {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #a5b4fc;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    letter-spacing: 0.5px;
+}
+
+.copy-id-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 0.75rem;
+    padding: 0;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+}
+
+.copy-id-btn:hover {
+    opacity: 1;
+}
+
+.profile-preview-tagline {
+    font-size: 0.85rem;
+    color: #94a3b8;
+    font-style: italic;
+    margin: 8px 0 0;
+}
+
+/* Stats Row */
+.profile-preview-stats {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    padding: 16px 20px;
+    margin: 0 20px;
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.stat-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 16px;
+}
+
+.stat-icon {
+    font-size: 1.1rem;
+}
+
+.stat-text {
+    display: flex;
+    flex-direction: column;
+}
+
+.stat-label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #64748b;
+    font-weight: 600;
+}
+
+.stat-value {
+    font-size: 0.85rem;
+    color: #e2e8f0;
+    font-weight: 600;
+}
+
+.stat-divider {
+    width: 1px;
+    height: 32px;
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.trust-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    height: 24px;
+    padding: 0 6px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    color: #fff;
+    font-size: 0.75rem;
+    font-weight: 700;
+}
+
+/* Action Buttons */
+.profile-preview-actions {
+    padding: 20px 24px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.btn-start-chat {
+    width: 100%;
+    padding: 14px;
+    font-size: 1rem;
+    font-weight: 600;
+    border-radius: 14px;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    color: #fff;
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    letter-spacing: 0.3px;
+    box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
+}
+
+.btn-start-chat:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 25px rgba(99, 102, 241, 0.4);
+    background: linear-gradient(135deg, #7c7ff7, #9d78fa);
+}
+
+.btn-start-chat:active {
+    transform: translateY(0);
+}
+
+.btn-close-preview {
+    width: 100%;
+    padding: 10px;
+    font-size: 0.9rem;
+    border-radius: 14px;
+    background: transparent;
+    color: #94a3b8;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.btn-close-preview:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: #e2e8f0;
+}
+
+/* Responsive */
+@media (max-width: 420px) {
+    .profile-preview-card {
+        width: 100%;
+        max-width: 100vw;
+        border-radius: 20px 20px 0 0;
+        margin-top: auto;
+    }
+
+    .profile-preview-stats {
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .stat-divider {
+        width: 80%;
+        height: 1px;
+    }
+
+    .stat-item {
+        padding: 4px 0;
+    }
+}

@@ -228,6 +228,23 @@ export function lookupByUsername(username) {
 }
 
 /**
+ * Lookup user by Discussion ID (word-based)
+ * @param {string} discussionId - e.g., "COSMIC-PHOENIX-42"
+ * @returns {Promise<{address, username, publicKey, online, avatar, status, discussionId, registeredAt} | null>}
+ */
+export function lookupByDiscussionId(discussionId) {
+    if (!socket?.connected) {
+        return Promise.resolve(null);
+    }
+
+    return new Promise((resolve) => {
+        socket.emit('lookupByDiscussionId', { discussionId }, (response) => {
+            resolve(response);
+        });
+    });
+}
+
+/**
  * Send an encrypted message
  * @param {string} to - Recipient address
  * @param {Object} messageData - Encrypted message data

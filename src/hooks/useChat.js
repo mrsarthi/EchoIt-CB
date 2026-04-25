@@ -36,10 +36,16 @@ import {
 import {
     saveMessage,
     getLocalHistory,
+    getMessagesPaginated,
     saveMessagesBulk,
     saveContacts,
     getSavedContacts,
-    clearHistory
+    clearHistory,
+    migrateOldHistory,
+    saveMedia,
+    getMedia,
+    setJoinedAt,
+    getJoinedAt
 } from '../services/storageService';
 
 export function useChat(myAddress) {
@@ -47,6 +53,8 @@ export function useChat(myAddress) {
     const [contacts, setContacts] = useState([]);
     const [activeChat, setActiveChat] = useState(null);
     const [isLoading, setIsLoading] = useState(false);
+    const [isLoadingMore, setIsLoadingMore] = useState(false);
+    const [hasMoreMessages, setHasMoreMessages] = useState(true);
     const [error, setError] = useState(null);
     const [connectionType, setConnectionType] = useState('offline');
     const [serverConnected, setServerConnected] = useState(false);
@@ -252,6 +260,12 @@ export function useChat(myAddress) {
         (async () => {
             // ... (Init logic remains same, but we hook into onTypingStatus too)
             await initMessaging();
+
+            // Run V2 Storage Migration (one-time, no-op if already done)
+            await migrateOldHistory();
+
+            // Set "Member Since" date (first-time only)
+            await setJoinedAt(Date.now());
 
             // Load persist contacts immediately
             const cachedContacts = await getSavedContacts();
@@ -799,7 +813,7 @@ export function useChat(myAddress) {
 
     // ... (UseEffect for updates remains similar) ...
 
-    const sendMessage = useCallback(async (content, replyTo = null, type = 'text') => {
+    const sendMessage = useCallback(async (content, replyTo = null, type = 'text', metadata = {}) => {
         if (!activeChat || !myAddress) {
             setError('No active chat');
             return;
@@ -835,7 +849,8 @@ export function useChat(myAddress) {
                     status: 'sent',
                     groupId: activeChat.address,
                     isGroup: true,
-                    type: type
+                    type: type,
+                    ...metadata // Spread mediaId etc.
                 };
 
                 await saveMessage(activeChat.address, sentMessage); // Persist
@@ -852,9 +867,11 @@ export function useChat(myAddress) {
                     { type: type },
                     activeChat.publicKey // Inject caller-level fallback key
                 );
-                await saveMessage(activeChat.address, sentMessage); // Persist
-                setMessages(prev => [...prev, sentMessage]);
-                return sentMessage;
+                // Attach metadata (mediaId) to the persisted message
+                const enrichedMessage = { ...sentMessage, ...metadata };
+                await saveMessage(activeChat.address, enrichedMessage); // Persist
+                setMessages(prev => [...prev, enrichedMessage]);
+                return enrichedMessage;
             }
         } catch (err) {
             setError({ message: err.message, level: err.level || 'error' });
@@ -901,6 +918,7 @@ export function useChat(myAddress) {
         // Load messages for this chat
         setMessages([]);
         setIsLoading(true);
+        setHasMoreMessages(true); // Reset pagination for new chat
 
         try {
             // 1. Load Local History
@@ -975,6 +993,42 @@ export function useChat(myAddress) {
             // connection logic handled by effect
         }
     }, [contacts, myAddress]);
+
+    // Load older messages (scroll-to-load pagination)
+    const loadMoreMessages = useCallback(async () => {
+        if (!activeChat || isLoadingMore || !hasMoreMessages) return;
+
+        const chatId = activeChat.address;
+        const oldestMsg = messages[0]; // First message = oldest visible
+        if (!oldestMsg) return;
+
+        setIsLoadingMore(true);
+
+        try {
+            const PAGE_SIZE = 50;
+            const olderMessages = await getMessagesPaginated(
+                chatId,
+                PAGE_SIZE,
+                oldestMsg.savedAt || oldestMsg.timestamp
+            );
+
+            if (olderMessages.length === 0) {
+                setHasMoreMessages(false);
+            } else {
+                // Deduplicate and prepend
+                const existingIds = new Set(messages.map(m => m.id));
+                const uniqueOlder = olderMessages.filter(m => !existingIds.has(m.id));
+                if (uniqueOlder.length < PAGE_SIZE) {
+                    setHasMoreMessages(false); // Got less than a full page
+                }
+                setMessages(prev => [...uniqueOlder, ...prev]);
+            }
+        } catch (err) {
+            console.error('Error loading more messages:', err);
+        } finally {
+            setIsLoadingMore(false);
+        }
+    }, [activeChat, messages, isLoadingMore, hasMoreMessages]);
 
     const searchAndAddContact = useCallback(async (query) => {
         try {
@@ -1057,6 +1111,8 @@ export function useChat(myAddress) {
         messages,
         contacts,
         isLoading,
+        isLoadingMore,
+        hasMoreMessages,
         error,
         connectionType,
         serverConnected,
@@ -1071,6 +1127,7 @@ export function useChat(myAddress) {
         removeMember,
         searchAndAddContact,
         toggleReaction,
+        loadMoreMessages,
         myAvatar,
         myStatus,
         saveProfile,

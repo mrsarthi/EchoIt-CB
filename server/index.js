@@ -7,6 +7,26 @@ const cors = require('cors');
 
 const path = require('path');
 const admin = require('firebase-admin');
+const sqlite3 = require('sqlite3').verbose();
+
+// ===== SQLite Database Setup =====
+const dbPath = path.join(__dirname, 'users.db');
+const db = new sqlite3.Database(dbPath);
+
+// Create users table
+db.serialize(() => {
+    db.run(`CREATE TABLE IF NOT EXISTS users (
+        address TEXT PRIMARY KEY,
+        username TEXT,
+        discussion_id TEXT UNIQUE,
+        public_key TEXT,
+        avatar TEXT,
+        status TEXT,
+        registered_at INTEGER
+    )`);
+    // Index for fast lookups by catchy ID
+    db.run(`CREATE INDEX IF NOT EXISTS idx_discussion_id ON users (discussion_id)`);
+});
 
 // Initialize Firebase Admin for Push Notifications
 let fcmReady = false;
@@ -43,9 +63,9 @@ async function pushOfflineNotification(toAddress, payload, type) {
         try {
             let title = 'DecentraChat';
             let body = 'You have a new notification';
-            
+
             const senderName = users.get(payload.from)?.username || payload.from.slice(0, 6);
-            
+
             if (type === 'dm') {
                 title = `New message from ${senderName}`;
                 body = 'Sent you a message'; // Keep content private in notifications
@@ -59,7 +79,7 @@ async function pushOfflineNotification(toAddress, payload, type) {
                 title = `Added to a group`;
                 body = `${senderName} added you to a group`;
             }
-            
+
             await admin.messaging().send({
                 token: user.pushToken,
                 notification: { title, body },
@@ -92,6 +112,127 @@ const users = new Map(); // address -> { socketId, publicKey, online, username }
 const fs = require('fs');
 
 const usernames = new Map(); // username -> address (for lookup)
+const discussionIds = new Map(); // discussionId -> address (for lookup)
+
+// ===== Discussion ID Generator (Word-based) =====
+const DID_ADJECTIVES = [
+    'SWIFT', 'BRIGHT', 'COSMIC', 'SILENT', 'GOLDEN', 'MYSTIC', 'SHADOW', 'CRYSTAL',
+    'NEON', 'LUNAR', 'SOLAR', 'FROST', 'EMBER', 'STORM', 'WILD', 'IRON',
+    'AZURE', 'VIOLET', 'CORAL', 'SAGE', 'NOBLE', 'ROGUE', 'BRAVE', 'CALM',
+    'DARK', 'DEEP', 'FERAL', 'GHOST', 'HYPER', 'IVORY', 'JADE', 'KEEN',
+    'LUCID', 'MIST', 'NOVA', 'OMEGA', 'PIXEL', 'RAPID', 'SABLE', 'TITAN',
+    'ULTRA', 'VIVID', 'WIRED', 'XENON', 'ZEAL', 'ALPHA', 'BLAZE', 'CYBER',
+    'DELTA', 'ECHO', 'FLUX', 'GLOW', 'HAZE', 'IONIC', 'JEWEL', 'KNIGHTL',
+    'LUMEN', 'MACRO', 'NEXUS', 'ONYX', 'PRISM', 'QUARTZ', 'RIFT', 'SONIC'
+];
+
+const DID_NOUNS = [
+    'WOLF', 'HAWK', 'PHOENIX', 'DRAGON', 'TIGER', 'FALCON', 'PANTHER', 'RAVEN',
+    'VIPER', 'COBRA', 'SPARK', 'BLADE', 'COMET', 'ORBIT', 'PULSE', 'WAVE',
+    'CREST', 'PEAK', 'FROST', 'FLAME', 'STONE', 'STEEL', 'DRIFT', 'SURGE',
+    'ROVER', 'SCOUT', 'PILOT', 'RIDER', 'FORGE', 'VAULT', 'TOWER', 'GATE',
+    'STAR', 'MOON', 'DAWN', 'DUSK', 'SHADE', 'LIGHT', 'STORM', 'BOLT',
+    'ARROW', 'LANCE', 'SHIELD', 'CROWN', 'SAGE', 'MAGE', 'KNIGHT', 'MONK',
+    'CIPHER', 'NODE', 'MATRIX', 'GRID', 'CORE', 'LINK', 'NEXUS', 'SHARD',
+    'ATLAS', 'AEGIS', 'PRISM', 'APEX', 'ZENITH', 'VERTEX', 'HELIX', 'QUASAR'
+];
+
+function simpleHash(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        const char = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash;
+    }
+    return Math.abs(hash);
+}
+
+/**
+ * Check if a Discussion ID is taken by someone else
+ */
+function isDiscussionIdTaken(dId, currentAddress) {
+    return new Promise((resolve) => {
+        db.get(`SELECT address FROM users WHERE discussion_id = ?`, [dId], (err, row) => {
+            if (err) return resolve(false);
+            if (!row) return resolve(false);
+            // Taken if the address is different from the requester
+            resolve(row.address.toLowerCase() !== currentAddress.toLowerCase());
+        });
+    });
+}
+
+/**
+ * Claim a unique Discussion ID for a wallet
+ * If the generated ID is taken, increments the suffix until free.
+ */
+async function claimDiscussionId(walletAddress) {
+    const normalizedAddress = walletAddress.toLowerCase();
+    
+    // 1. Check if user already has an ID assigned in DB
+    const existing = await new Promise(resolve => {
+        db.get(`SELECT discussion_id FROM users WHERE address = ?`, [normalizedAddress], (err, row) => {
+            resolve(row ? row.discussion_id : null);
+        });
+    });
+    if (existing) return existing;
+
+    // 2. Generate base ID components
+    const normalized = normalizedAddress.toLowerCase();
+    const hash1 = simpleHash(normalized.slice(0, 21));
+    const hash2 = simpleHash(normalized.slice(21));
+    const hash3 = simpleHash(normalized);
+    
+    const adjective = DID_ADJECTIVES[hash1 % DID_ADJECTIVES.length];
+    const noun = DID_NOUNS[hash2 % DID_NOUNS.length];
+    let number = (hash3 % 8999) + 1000; // 4 digits
+
+    // 3. Collision Resolution Loop
+    let dId = `${adjective}-${noun}-${number}`;
+    let attempts = 0;
+    while (await isDiscussionIdTaken(dId, normalizedAddress) && attempts < 100) {
+        number++; // Simple increment for collision resolution
+        if (number > 9999) number = 1000;
+        dId = `${adjective}-${noun}-${number}`;
+        attempts++;
+    }
+
+    return dId;
+}
+
+// ===== User Metadata Persistence (registeredAt, discussionId) =====
+const USERS_META_PATH = path.join(__dirname, 'users_meta.json');
+let usersMeta = new Map(); // address -> { registeredAt, discussionId }
+
+try {
+    if (fs.existsSync(USERS_META_PATH)) {
+        const data = fs.readFileSync(USERS_META_PATH, 'utf8');
+        const parsed = JSON.parse(data);
+        for (const address in parsed) {
+            usersMeta.set(address, parsed[address]);
+            // Rebuild discussionIds lookup
+            if (parsed[address].discussionId) {
+                discussionIds.set(parsed[address].discussionId.toUpperCase(), address);
+            }
+        }
+        console.log(`[🆔] Loaded user metadata for ${Object.keys(parsed).length} users from disk.`);
+    }
+} catch (err) {
+    console.error('[🆔] Error loading users_meta.json:', err);
+}
+
+let metaSaveTimeout = null;
+function saveUsersMeta() {
+    if (metaSaveTimeout) clearTimeout(metaSaveTimeout);
+    metaSaveTimeout = setTimeout(() => {
+        const obj = {};
+        for (const [address, meta] of usersMeta.entries()) {
+            obj[address] = meta;
+        }
+        fs.writeFile(USERS_META_PATH, JSON.stringify(obj), 'utf8', (err) => {
+            if (err) console.error('[🆔] Error saving users_meta.json:', err);
+        });
+    }, 500);
+}
 
 // Offline Messages setup with File Persistence
 const OFFLINE_DB_PATH = path.join(__dirname, 'offline_messages.json');
@@ -217,44 +358,60 @@ io.on('connection', (socket) => {
     socket.on('leave_auth_room', ({ sessionId }) => {
         socket.leave(`auth_${sessionId}`);
     });
-    socket.on('register', ({ address, publicKey, username, avatar, status }) => {
+    socket.on('register', async ({ address, publicKey, username, avatar, status, registeredAt }) => {
         const normalizedAddress = address.toLowerCase();
 
-        // Get existing username for this user if any
-        const existingUser = users.get(normalizedAddress);
-        const existingUsername = existingUser?.username || username;
-        
-        // Use incoming avatar/status or preserve existing ones
-        const finalAvatar = avatar !== undefined ? avatar : existingUser?.avatar;
-        const finalStatus = status !== undefined ? status : existingUser?.status;
+        // 1. Get existing info (prefer existing DB data)
+        const dbUser = await new Promise(resolve => {
+            db.get(`SELECT * FROM users WHERE address = ?`, [normalizedAddress], (err, row) => resolve(row));
+        });
 
-        // Store user info
+        const finalUsername = dbUser?.username || username;
+        const finalAvatar = avatar !== undefined ? avatar : dbUser?.avatar;
+        const finalStatus = status !== undefined ? status : dbUser?.status;
+        const finalRegisteredAt = dbUser?.registered_at || (registeredAt || Date.now());
+
+        // 2. Claim/Generate Unique Discussion ID
+        const dId = await claimDiscussionId(normalizedAddress);
+
+        // 3. Persist to SQLite
+        db.run(`INSERT OR REPLACE INTO users (address, username, discussion_id, public_key, avatar, status, registered_at) 
+                VALUES (?, ?, ?, ?, ?, ?, ?)`, 
+                [normalizedAddress, finalUsername, dId, publicKey, finalAvatar, finalStatus, finalRegisteredAt]);
+
+        // Register in-memory for fast presence logic
+        discussionIds.set(dId.toUpperCase(), normalizedAddress);
+
+        // Store user info in memory for presence
         users.set(normalizedAddress, {
             socketId: socket.id,
             publicKey,
             online: true,
             lastSeen: Date.now(),
-            username: existingUsername,
+            username: finalUsername,
             avatar: finalAvatar,
-            status: finalStatus
+            status: finalStatus,
+            discussionId: dId,
+            registeredAt: finalRegisteredAt
         });
 
         // Also add to usernames lookup map if username exists
-        if (existingUsername) {
-            usernames.set(existingUsername.toLowerCase(), normalizedAddress);
+        if (finalUsername) {
+            usernames.set(finalUsername.toLowerCase(), normalizedAddress);
         }
 
         socket.address = normalizedAddress;
         socket.join(normalizedAddress);
 
-        console.log(`[✓] Registered: ${normalizedAddress.slice(0, 10)}...${existingUsername ? ` (@${existingUsername})` : ''}`);
+        console.log(`[✓] Registered: ${normalizedAddress.slice(0, 10)}...${existingUsername ? ` (@${existingUsername})` : ''} [${dId}]`);
 
         // Notify sender about successful registration FIRST
-        // (so client's registerUser() promise resolves and handlers are set up)
         socket.emit('registered', {
             address: normalizedAddress,
             publicKey,
-            username: existingUsername
+            username: existingUsername,
+            discussionId: dId,
+            registeredAt: meta.registeredAt
         });
 
         // Broadcast online status to everyone else
@@ -293,19 +450,19 @@ io.on('connection', (socket) => {
 
     socket.on('ackOfflineMessages', ({ messageIds }) => {
         if (!socket.address || !Array.isArray(messageIds) || messageIds.length === 0) return;
-        
+
         const pending = offlineMessages.get(socket.address) || [];
         const originalLength = pending.length;
-        
+
         // Filter out the messages that the client successfully acknowledged
         const remaining = pending.filter(msg => !messageIds.includes(msg.id || msg.messageId));
-        
+
         if (remaining.length === 0) {
             offlineMessages.delete(socket.address);
         } else {
             offlineMessages.set(socket.address, remaining);
         }
-        
+
         saveOfflineMessagesDb();
         console.log(`[✔️] Client ${socket.address.slice(0, 6)} ACKed ${originalLength - remaining.length} messages. ${remaining.length} remaining.`);
     });
@@ -318,7 +475,7 @@ io.on('connection', (socket) => {
             if (avatar !== undefined) user.avatar = avatar;
             if (status !== undefined) user.status = status;
             users.set(address, user);
-            
+
             // Broadcast the profile update to everyone
             socket.broadcast.emit('userStatus', {
                 address: address,
@@ -403,6 +560,47 @@ io.on('connection', (socket) => {
     socket.on('getPublicKey', ({ address }, callback) => {
         const user = users.get(address.toLowerCase());
         callback(user ? { publicKey: user.publicKey, online: user.online } : null);
+    });
+
+    // Lookup by Discussion ID (word-based)
+    socket.on('lookupByDiscussionId', ({ discussionId }, callback) => {
+        const normalizedId = discussionId.trim().toUpperCase();
+        
+        // Try in-memory first for performance
+        let address = discussionIds.get(normalizedId);
+        
+        const deliverUser = (addr) => {
+            db.get(`SELECT * FROM users WHERE address = ?`, [addr], (err, row) => {
+                if (row) {
+                    const memoryUser = users.get(addr);
+                    callback({
+                        address: addr,
+                        username: row.username,
+                        publicKey: row.public_key,
+                        online: memoryUser?.online || false,
+                        avatar: row.avatar,
+                        status: row.status,
+                        discussionId: row.discussion_id,
+                        registeredAt: row.registered_at
+                    });
+                } else {
+                    callback(null);
+                }
+            });
+        };
+
+        if (address) {
+            deliverUser(address);
+        } else {
+            // Fallback: check DB directly
+            db.get(`SELECT address FROM users WHERE discussion_id = ?`, [normalizedId], (err, row) => {
+                if (row) {
+                    deliverUser(row.address);
+                } else {
+                    callback(null);
+                }
+            });
+        }
     });
 
     // WebRTC Signaling: Offer
@@ -536,6 +734,7 @@ io.on('connection', (socket) => {
     // Get user info
     socket.on('getUser', ({ address }, callback) => {
         const user = users.get(address.toLowerCase());
+        const meta = usersMeta.get(address.toLowerCase());
         if (user) {
             callback({
                 address: address.toLowerCase(),
@@ -543,7 +742,9 @@ io.on('connection', (socket) => {
                 online: user.online,
                 lastSeen: user.lastSeen,
                 avatar: user.avatar,
-                status: user.status
+                status: user.status,
+                discussionId: user.discussionId,
+                registeredAt: meta?.registeredAt
             });
         } else {
             callback(null);

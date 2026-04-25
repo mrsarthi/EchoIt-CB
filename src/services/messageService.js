@@ -361,6 +361,12 @@ export async function searchUser(query) {
         return await socketService.getUser(trimmed);
     }
 
+    // Search by Discussion ID (WORD-WORD-NN format)
+    if (/^[A-Z]+-[A-Z]+-\d{1,2}$/i.test(trimmed)) {
+        const result = await socketService.lookupByDiscussionId(trimmed.toUpperCase());
+        if (result) return result;
+    }
+
     // Search by username
     if (trimmed.length >= 3) {
         const username = trimmed.startsWith('@') ? trimmed.slice(1) : trimmed;

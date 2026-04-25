@@ -596,6 +596,19 @@
     margin-bottom: var(--space-sm);
 }
 
+/* Load More Indicator (scroll-to-load pagination) */
+.load-more-indicator {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.625rem 1rem;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    user-select: none;
+}
+
 .spinner-small {
     width: 0.875rem;
     height: 0.875rem;

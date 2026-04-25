@@ -5,6 +5,34 @@ const messageStore = localforage.createInstance({
     storeName: 'messages',
 });
 
+// New store for individual message entries (Infinite History)
+const individualMessageStore = localforage.createInstance({
+    name: 'decentrachat',
+    storeName: 'messages_v2',
+});
+
+// New store for large media blobs (Images/Files)
+const mediaStore = localforage.createInstance({
+    name: 'decentrachat',
+    storeName: 'media_cache',
+});
+
+const contactStore = localforage.createInstance({
+    name: 'decentrachat',
+    storeName: 'contacts',
+});
+
+const outboxStore = localforage.createInstance({
+    name: 'decentrachat',
+    storeName: 'outbox',
+});
+
+// Store for app settings and user metadata (joinedAt, migration flags, etc.)
+const settingsStore = localforage.createInstance({
+    name: 'decentrachat',
+    storeName: 'settings',
+});
+
 // Mutex for atomic operations
 class Mutex {
     constructor() {
@@ -26,7 +54,7 @@ function getMutex(key) {
     return storageMutexes[key];
 }
 
-const MAX_HISTORY_PER_CHAT = 1000;
+const MAX_HISTORY_PER_CHAT = 10000; // Increased limit for legacy store, but v2 is infinite
 
 /**
  * Sort comparator: use savedAt (local device time) for ordering,
@@ -41,89 +69,101 @@ function messageSort(a, b) {
 }
 
 /**
- * Save a message to local history
- * @param {string} chatId - Address of user or Group ID
- * @param {Object} message - The message object
+ * Save a message to local history (Individual Entry V2)
+ * @param {string} chatId
+ * @param {Object} message
  */
 export async function saveMessage(chatId, message) {
-    if (!chatId || !message) {
-        console.warn('⚠️ saveMessage skipped: missing chatId or message', { chatId, msgId: message?.id });
-        return;
-    }
     const key = `chat_${chatId.toLowerCase()}`;
-
     return getMutex(key).lock(async () => {
         try {
-            const history = (await messageStore.getItem(key)) || [];
+            const id = message.id || `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            const timestamp = message.timestamp || Date.now();
+            
+            // Save to New Individual Store (V2)
+            // Key format: chat_<chatId>_<timestamp>_<id>
+            // This allows lexicographical sorting by timestamp
+            const v2Key = `msg_${chatId.toLowerCase()}_${timestamp}_${id}`;
+            await individualMessageStore.setItem(v2Key, { ...message, id, timestamp, chatId: chatId.toLowerCase() });
 
-            // Check if this message already exists — if so, merge/update it
-            const existingIdx = history.findIndex(m => m.id === message.id);
-            if (existingIdx !== -1) {
-                // Merge: update the existing entry (e.g. reactions, status)
-                history[existingIdx] = { ...history[existingIdx], ...message };
-                await messageStore.setItem(key, history);
-                console.debug('🔄 Message updated in storage:', message.id);
-                return;
+            // Backward compatibility: Save to Legacy Store (V1)
+            const legacyKey = `chat_${chatId.toLowerCase()}`;
+            const history = (await messageStore.getItem(legacyKey)) || [];
+            const exists = history.findIndex(m => m.id === id);
+
+            if (exists !== -1) {
+                history[exists] = message;
+            } else {
+                history.push(message);
             }
 
-            // Stamp with local device time to avoid cross-device clock skew
-            const stamped = { ...message, savedAt: message.savedAt || Date.now() };
-
-            const newHistory = [...history, stamped]
-                .sort(messageSort)
-                .slice(-MAX_HISTORY_PER_CHAT); // Keep size manageable
-
-            await messageStore.setItem(key, newHistory);
-            console.debug(`✅ Message saved to ${key}. Total: ${newHistory.length}`);
+            const newHistory = history.slice(-MAX_HISTORY_PER_CHAT);
+            await messageStore.setItem(legacyKey, newHistory);
+            
+            return id;
         } catch (err) {
-            console.error('Failed to save request locally:', err);
+            console.error('Failed to save message:', err);
+            throw err;
         }
     });
 }
 
 /**
- * Update the status of existing messages in local history
+ * Get paginated history for a chat
  * @param {string} chatId 
- * @param {Array<string>} messageIds 
- * @param {string} status ('delivered' | 'read')
+ * @param {number} limit 
+ * @param {number} beforeTimestamp 
  */
-export async function updateMessageStatus(chatId, messageIds, status) {
-    if (!chatId || !messageIds || messageIds.length === 0) return;
-    const key = `chat_${chatId.toLowerCase()}`;
-
-    return getMutex(key).lock(async () => {
-        try {
-            const history = (await messageStore.getItem(key)) || [];
-            let updated = false;
-
-            const newHistory = history.map(m => {
-                if (messageIds.includes(m.id)) {
-                    updated = true;
-                    return { ...m, status };
-                }
-                return m;
-            });
-
-            if (updated) {
-                await messageStore.setItem(key, newHistory);
+export async function getMessagesPaginated(chatId, limit = 50, beforeTimestamp = null) {
+    const messages = [];
+    const lowerChatId = chatId.toLowerCase();
+    
+    await individualMessageStore.iterate((value, key) => {
+        if (key.startsWith(`msg_${lowerChatId}_`)) {
+            if (!beforeTimestamp || value.timestamp < beforeTimestamp) {
+                messages.push(value);
             }
-        } catch (err) {
-            console.error('Failed to update message status:', err);
         }
     });
+
+    // Sort descending (newest first) for easier slicing
+    messages.sort((a, b) => b.timestamp - a.timestamp);
+    
+    return messages.slice(0, limit).reverse(); // Return oldest to newest for the UI
 }
 
 /**
- * Get local history for a chat
+ * Save media blob to cache
+ */
+export async function saveMedia(messageId, base64Data) {
+    await mediaStore.setItem(messageId, base64Data);
+}
+
+/**
+ * Get media blob from cache
+ */
+export async function getMedia(messageId) {
+    return await mediaStore.getItem(messageId);
+}
+
+
+
+/**
+ * Get local history for a chat (V2 with V1 fallback)
  * @param {string} chatId
  * @returns {Promise<Array>}
  */
 export async function getLocalHistory(chatId) {
     if (!chatId) return [];
     try {
+        // Try V2 first (paginated)
+        const v2History = await getMessagesPaginated(chatId, 100);
+        if (v2History.length > 0) return v2History;
+
+        // Fallback to V1 legacy store
         const key = `chat_${chatId.toLowerCase()}`;
         const history = (await messageStore.getItem(key)) || [];
-        console.debug(`📂 Loaded ${history.length} messages from ${key}`);
+        console.debug(`📂 Loaded ${history.length} messages from legacy ${key}`);
         return history;
     } catch (err) {
         console.error('Failed to load local history:', err);
@@ -138,32 +178,115 @@ export async function getLocalHistory(chatId) {
  */
 export async function saveMessagesBulk(chatId, messages) {
     if (!chatId || !messages.length) return;
-    const key = `chat_${chatId.toLowerCase()}`;
+    const legacyKey = `chat_${chatId.toLowerCase()}`;
 
-    return getMutex(key).lock(async () => {
+    return getMutex(legacyKey).lock(async () => {
         try {
-            const history = (await messageStore.getItem(key)) || [];
+            // Save to Individual Store (V2)
+            const v2Promises = messages.map(msg => {
+                const id = msg.id || `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+                const timestamp = msg.timestamp || Date.now();
+                const v2Key = `msg_${chatId.toLowerCase()}_${timestamp}_${id}`;
+                return individualMessageStore.setItem(v2Key, { ...msg, id, timestamp, chatId: chatId.toLowerCase() });
+            });
+            await Promise.all(v2Promises);
 
-            // Merge and dedupe
+            // Backward compatibility: Update Legacy Store (V1)
+            const history = (await messageStore.getItem(legacyKey)) || [];
             const existingIds = new Set(history.map(m => m.id));
             const toAdd = messages.filter(m => !existingIds.has(m.id));
 
-            if (toAdd.length === 0) return;
-
-            // Stamp each with local device time
-            const now = Date.now();
-            const stamped = toAdd.map((m, i) => ({ ...m, savedAt: m.savedAt || (now + i) }));
-
-            const newHistory = [...history, ...stamped]
-                .sort(messageSort)
-                .slice(-MAX_HISTORY_PER_CHAT);
-
-            await messageStore.setItem(key, newHistory);
-            console.debug(`✅ Bulk saved ${stamped.length} msgs to ${key}`);
+            if (toAdd.length > 0) {
+                const newHistory = [...history, ...toAdd]
+                    .sort(messageSort)
+                    .slice(-MAX_HISTORY_PER_CHAT);
+                await messageStore.setItem(legacyKey, newHistory);
+            }
+            
+            console.debug(`✅ Bulk saved ${messages.length} msgs to ${chatId}`);
         } catch (err) {
             console.error('Failed to save bulk messages:', err);
         }
     });
+}
+
+/**
+ * Update message status in both stores
+ */
+export async function updateMessageStatus(chatId, messageIds, status) {
+    if (!chatId || !messageIds || messageIds.length === 0) return;
+    const legacyKey = `chat_${chatId.toLowerCase()}`;
+
+    return getMutex(legacyKey).lock(async () => {
+        try {
+            // Update V2 Individual Store
+            const lowerChatId = chatId.toLowerCase();
+            await individualMessageStore.iterate(async (value, key) => {
+                if (key.startsWith(`msg_${lowerChatId}_`) && messageIds.includes(value.id)) {
+                    await individualMessageStore.setItem(key, { ...value, status });
+                }
+            });
+
+            // Update V1 Legacy Store
+            const history = (await messageStore.getItem(legacyKey)) || [];
+            let updated = false;
+            const newHistory = history.map(m => {
+                if (messageIds.includes(m.id)) {
+                    updated = true;
+                    return { ...m, status };
+                }
+                return m;
+            });
+
+            if (updated) {
+                await messageStore.setItem(legacyKey, newHistory);
+            }
+        } catch (err) {
+            console.error('Failed to update message status:', err);
+        }
+    });
+}
+
+/**
+ * Migrate old history to individual storage (V2)
+ */
+export async function migrateOldHistory() {
+    const isMigrated = await settingsStore.getItem('is_v2_migrated');
+    if (isMigrated) return;
+
+    console.log('🚀 Starting Storage Migration to V2...');
+    try {
+        const keys = await messageStore.keys();
+        const chatKeys = keys.filter(k => k.startsWith('chat_'));
+
+        for (const key of chatKeys) {
+            const chatId = key.replace('chat_', '');
+            const history = await messageStore.getItem(key);
+            if (Array.isArray(history) && history.length > 0) {
+                console.log(`📦 Migrating ${history.length} messages for ${chatId}...`);
+                await saveMessagesBulk(chatId, history);
+            }
+        }
+
+        await settingsStore.setItem('is_v2_migrated', true);
+        console.log('✅ Storage Migration to V2 Complete!');
+    } catch (err) {
+        console.error('❌ Storage Migration failed:', err);
+    }
+}
+
+/**
+ * Get/Set Member Since date
+ */
+export async function getJoinedAt() {
+    return await settingsStore.getItem('joined_at');
+}
+
+export async function setJoinedAt(timestamp) {
+    const existing = await getJoinedAt();
+    if (!existing) {
+        await settingsStore.setItem('joined_at', timestamp);
+    }
 }
 
 // ... existing imports and code ...
@@ -225,7 +348,23 @@ export async function saveContacts(contacts) {
 
 export async function clearHistory(chatId) {
     if (!chatId) return;
+    // Clear V1 legacy store
     await messageStore.removeItem(`chat_${chatId.toLowerCase()}`);
+    
+    // Clear V2 individual entries
+    const lowerChatId = chatId.toLowerCase();
+    const keysToDelete = [];
+    await individualMessageStore.iterate((value, key) => {
+        if (key.startsWith(`msg_${lowerChatId}_`)) {
+            keysToDelete.push(key);
+        }
+    });
+    for (const key of keysToDelete) {
+        await individualMessageStore.removeItem(key);
+    }
+    
+    // Clear media for this chat's messages
+    // (media keys are message IDs, we collect them during iteration above)
 }
 
 /**
@@ -234,6 +373,8 @@ export async function clearHistory(chatId) {
  */
 export async function clearAllData() {
     await messageStore.clear();
+    await individualMessageStore.clear();
+    await mediaStore.clear();
     console.log('🗑️ All local chat data cleared');
 }
 

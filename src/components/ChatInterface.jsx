@@ -5,7 +5,9 @@ import { formatAddress } from '../blockchain/web3Provider';
 import { CreateGroupModal } from './CreateGroupModal';
 import { GroupDetailsModal } from './GroupDetailsModal';
 import { ProfileModal } from './ProfileModal';
+import { ProfilePreviewModal } from './ProfilePreviewModal';
 import { SettingsModal } from './SettingsModal';
+import { generateDiscussionId } from '../services/identityService';
 import { App as CapacitorApp } from '@capacitor/app';
 import { platform } from '../services/platformService';
 import QuickPinchZoom, { make3dTransformValue } from 'react-quick-pinch-zoom';
@@ -17,6 +19,8 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
         messages,
         contacts,
         isLoading,
+        isLoadingMore,
+        hasMoreMessages,
         error,
         connectionType,
         serverConnected,
@@ -32,6 +36,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
         searchAndAddContact,
         toggleReaction,
         clearError,
+        loadMoreMessages,
         myAvatar,
         myStatus,
         saveProfile,
@@ -52,17 +57,55 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
     const [reactionPickerMsgId, setReactionPickerMsgId] = useState(null);
     const [reactionDetailModal, setReactionDetailModal] = useState(null); // { emoji, users, msgId }
     const messagesEndRef = useRef(null);
+    const messagesContainerRef = useRef(null);
     const inputRef = useRef(null);
     const fileInputRef = useRef(null);
     const typingTimeoutRef = useRef(null);
     const longPressTimerRef = useRef(null);
+    const imageMediaIdRef = useRef(null); // Stash mediaId for image send
+    const [profilePreview, setProfilePreview] = useState(null); // User object for preview modal
 
     const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
-    // Auto-scroll to bottom when new messages arrive
+    // Auto-scroll to bottom when new messages arrive (only if already near bottom)
+    const prevMessagesLenRef = useRef(0);
     useEffect(() => {
+        const container = messagesContainerRef.current;
+        // Always scroll on first load or when a new message is added at end
+        if (!container || messages.length === 0) return;
+        
+        // If messages were prepended (load-more), don't scroll
+        if (messages.length > prevMessagesLenRef.current + 1) {
+            // Likely a bulk prepend from loadMore — keep position
+            prevMessagesLenRef.current = messages.length;
+            return;
+        }
+        prevMessagesLenRef.current = messages.length;
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
+
+    // Scroll-to-top: load more messages
+    useEffect(() => {
+        const container = messagesContainerRef.current;
+        if (!container) return;
+
+        const handleScroll = () => {
+            // Trigger when scrolled within 80px of the top
+            if (container.scrollTop < 80 && hasMoreMessages && !isLoadingMore) {
+                const prevHeight = container.scrollHeight;
+                loadMoreMessages().then(() => {
+                    // Restore scroll position after prepending
+                    requestAnimationFrame(() => {
+                        const newHeight = container.scrollHeight;
+                        container.scrollTop = newHeight - prevHeight;
+                    });
+                });
+            }
+        };
+
+        container.addEventListener('scroll', handleScroll, { passive: true });
+        return () => container.removeEventListener('scroll', handleScroll);
+    }, [hasMoreMessages, isLoadingMore, loadMoreMessages]);
 
     // Hardware Back Button logic for Android
     useEffect(() => {
@@ -157,26 +200,42 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
         setReplyingTo(null);
     };
 
-    // Image handling
+    // Image handling — produces a small thumbnail for inline display
+    // and optionally saves full-res to media store
     const resizeImage = (file, maxWidth = 1280) => {
         return new Promise((resolve) => {
             const reader = new FileReader();
             reader.onload = (e) => {
                 const img = new Image();
                 img.onload = () => {
+                    // Full-res version (capped at maxWidth)
                     const canvas = document.createElement('canvas');
                     let { width, height } = img;
-
                     if (width > maxWidth) {
                         height = (height * maxWidth) / width;
                         width = maxWidth;
                     }
-
                     canvas.width = width;
                     canvas.height = height;
                     const ctx = canvas.getContext('2d');
                     ctx.drawImage(img, 0, 0, width, height);
-                    resolve(canvas.toDataURL('image/jpeg', 0.8));
+                    const fullRes = canvas.toDataURL('image/jpeg', 0.85);
+
+                    // Thumbnail version (320px wide for inline chat bubbles)
+                    const thumbCanvas = document.createElement('canvas');
+                    const thumbMaxWidth = 320;
+                    let thumbW = width, thumbH = height;
+                    if (thumbW > thumbMaxWidth) {
+                        thumbH = (thumbH * thumbMaxWidth) / thumbW;
+                        thumbW = thumbMaxWidth;
+                    }
+                    thumbCanvas.width = thumbW;
+                    thumbCanvas.height = thumbH;
+                    const thumbCtx = thumbCanvas.getContext('2d');
+                    thumbCtx.drawImage(img, 0, 0, thumbW, thumbH);
+                    const thumbnail = thumbCanvas.toDataURL('image/jpeg', 0.6);
+
+                    resolve({ fullRes, thumbnail });
                 };
                 img.src = e.target.result;
             };
@@ -189,8 +248,15 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
         if (!file) return;
         if (!file.type.startsWith('image/')) return;
 
-        const dataUrl = await resizeImage(file);
-        setImagePreview(dataUrl);
+        const { fullRes, thumbnail } = await resizeImage(file);
+        // Store full-res in media cache, display thumbnail as preview
+        const mediaId = `img_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+        const { saveMedia } = await import('../services/storageService');
+        await saveMedia(mediaId, fullRes);
+        // Store mediaId on the preview so we can retrieve full-res later
+        setImagePreview(thumbnail);
+        // Stash the mediaId for sendImage to use
+        imageMediaIdRef.current = mediaId;
         // Reset file input so same file can be re-selected
         e.target.value = '';
     };
@@ -198,16 +264,21 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
     const handleSendImage = async () => {
         if (!imagePreview || isLoading) return;
         const imgData = imagePreview;
+        const mediaId = imageMediaIdRef.current;
         setImagePreview(null);
+        imageMediaIdRef.current = null;
         try {
-            await sendMessage(imgData, null, 'image');
+            // Send thumbnail as the message content, attach mediaId for full-res retrieval
+            await sendMessage(imgData, null, 'image', { mediaId });
         } catch (err) {
             setImagePreview(imgData); // Restore on error
+            imageMediaIdRef.current = mediaId;
         }
     };
 
     const cancelImagePreview = () => {
         setImagePreview(null);
+        imageMediaIdRef.current = null;
     };
 
     const scrollToMessage = (msgId) => {
@@ -228,9 +299,15 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
         setIsSearching(false);
 
         if (user) {
-            openChat(user.address, user);
+            // Show Profile Preview instead of directly opening chat
+            setProfilePreview(user);
             setSearchQuery('');
         }
+    };
+
+    const handleStartChatFromPreview = (user) => {
+        setProfilePreview(null);
+        openChat(user.address, user);
     };
 
     const handleMessageGroupMember = async (memberAddr) => {
@@ -524,7 +601,19 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                         </header>
 
                         {/* Messages Area */}
-                        <div className="messages-container" onClick={() => { if (reactionPickerMsgId) setReactionPickerMsgId(null); }}>
+                        <div className="messages-container" ref={messagesContainerRef} onClick={() => { if (reactionPickerMsgId) setReactionPickerMsgId(null); }}>
+                            {/* Load More Indicator */}
+                            {isLoadingMore && (
+                                <div className="load-more-indicator">
+                                    <div className="spinner-small"></div>
+                                    <span>Loading older messages...</span>
+                                </div>
+                            )}
+                            {!hasMoreMessages && messages.length > 0 && (
+                                <div className="load-more-indicator" style={{ opacity: 0.5 }}>
+                                    <span>Beginning of conversation</span>
+                                </div>
+                            )}
                             {flushingOutbox && (
                                 <div className="flushing-banner animate-fadeIn">
                                     <span className="spinner-small"></span>
@@ -610,7 +699,19 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                                 </div>
                                             )}
                                             {msg.type === 'image' ? (
-                                                <div className="message-image-wrapper" onClick={() => setLightboxImage(msg.content)}>
+                                                <div className="message-image-wrapper" onClick={async () => {
+                                                    // Try to load full-res from media store
+                                                    if (msg.mediaId) {
+                                                        const { getMedia } = await import('../services/storageService');
+                                                        const fullRes = await getMedia(msg.mediaId);
+                                                        if (fullRes) {
+                                                            setLightboxImage(fullRes);
+                                                            return;
+                                                        }
+                                                    }
+                                                    // Fallback to inline content
+                                                    setLightboxImage(msg.content);
+                                                }}>
                                                     <img src={msg.content} alt="Sent image" className="message-image" loading="lazy" />
                                                 </div>
                                             ) : (
@@ -825,6 +926,16 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                 <SettingsModal
                     onClose={() => setShowSettings(false)}
                     onDeleteAccount={onDeleteAccount}
+                />
+            )}
+
+            {/* Profile Preview Modal (shown after search) */}
+            {profilePreview && (
+                <ProfilePreviewModal
+                    user={profilePreview}
+                    onClose={() => setProfilePreview(null)}
+                    onStartChat={handleStartChatFromPreview}
+                    myAddress={walletAddress}
                 />
             )}
         </div>

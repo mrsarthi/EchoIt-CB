@@ -9,6 +9,7 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
+    "test": "vitest run",
     "preview": "vite preview",
     "electron": "electron .",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
@@ -18,7 +19,7 @@
     "cap:sync": "node -e \"process.argv=['node','capacitor','sync','android'];require('@capacitor/cli/bin/capacitor')\"",
     "cap:open": "node -e \"process.argv=['node','capacitor','open','android'];require('@capacitor/cli/bin/capacitor')\"",
     "cap:run": "node -e \"process.argv=['node','capacitor','run','android','-l'];require('@capacitor/cli/bin/capacitor')\"",
-    "android:build": "npm run build && npm run cap:sync",
+    "android:build": "npm run build; npm run cap:sync",
     "android:release": "node build-android-ota.js"
   },
   "repository": {
@@ -95,6 +96,7 @@
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
+    "@vitest/ui": "^4.1.5",
     "concurrently": "^9.2.1",
     "electron": "^40.1.0",
     "electron-builder": "^26.7.0",
@@ -106,6 +108,7 @@
     "terser": "^5.46.0",
     "typescript": "^5.9.3",
     "vite": "^7.2.4",
+    "vitest": "^4.1.5",
     "wait-on": "^7.2.0"
   }
 }
