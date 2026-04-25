@@ -111,9 +111,12 @@ app.get('/', (req, res) => {
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: "*", // Allow all origins for development
-        methods: ["GET", "POST"]
-    }
+        origin: true, // Dynamically allow the origin
+        methods: ["GET", "POST"],
+        credentials: true,
+        allowedHeaders: ["*"]
+    },
+    allowEIO3: true // Support older clients if necessary
 });
 
 // In-memory stores (use Redis/SQLite for production persistence)
