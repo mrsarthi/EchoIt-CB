@@ -415,15 +415,15 @@ io.on('connection', (socket) => {
         socket.address = normalizedAddress;
         socket.join(normalizedAddress);
 
-        console.log(`[✓] Registered: ${normalizedAddress.slice(0, 10)}...${existingUsername ? ` (@${existingUsername})` : ''} [${dId}]`);
+        console.log(`[✓] Registered: ${normalizedAddress.slice(0, 10)}...${finalUsername ? ` (@${finalUsername})` : ''} [${dId}]`);
 
         // Notify sender about successful registration FIRST
         socket.emit('registered', {
             address: normalizedAddress,
             publicKey,
-            username: existingUsername,
+            username: finalUsername,
             discussionId: dId,
-            registeredAt: meta.registeredAt
+            registeredAt: finalRegisteredAt
         });
 
         // Broadcast online status to everyone else
