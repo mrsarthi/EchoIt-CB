@@ -99,6 +99,15 @@ app.use(express.json());
 // Serve static Auth Page for Mobile Deep Linking
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Root route for health checks and "waking up" the server
+app.get('/', (req, res) => {
+    res.json({ 
+        status: 'online', 
+        service: 'DecentraChat Signaling Server',
+        timestamp: Date.now() 
+    });
+});
+
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
