@@ -221,7 +221,7 @@ export async function appExit() {
 // Capacitor:  OTA web bundle downloads via Capgo CapacitorUpdater
 // Browser:    no updates
 
-const GITHUB_API_LATEST_RELEASE = 'https://api.github.com/repos/mrsarthi/Dicsussion/releases/latest';
+const GITHUB_API_LATEST_RELEASE = 'https://api.github.com/repos/mrsarthi/Dicsussion-app/releases/tags/Production';
 
 // ── Internal state for Capacitor updater ──
 let _capUpdateCallbacks = {

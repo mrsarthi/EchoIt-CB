@@ -1,7 +1,7 @@
 {
   "name": "decentrachat",
   "private": true,
-  "version": "1.4.7",
+  "version": "1.7.0",
   "description": "Decentralized end-to-end encrypted messaging app with blockchain identity",
   "author": "DecentraChat",
   "main": "electron/main.js",
@@ -24,7 +24,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/mrsarthi/Dicsussion.git"
+    "url": "https://github.com/mrsarthi/Dicsussion-app.git"
   },
   "build": {
     "appId": "com.decentrachat.app",
@@ -62,7 +62,7 @@
       {
         "provider": "github",
         "owner": "mrsarthi",
-        "repo": "Dicsussion"
+        "repo": "Dicsussion-app"
       }
     ]
   },

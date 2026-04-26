@@ -86,7 +86,7 @@ export function ProfileModal({
 
     return (
         <div className="modal-overlay animate-fadeIn" onClick={onClose}>
-            <div className="modal-content glass-card zoomIn" onClick={e => e.stopPropagation()}>
+            <div className="modal-content profile-modal glass-card zoomIn" onClick={e => e.stopPropagation()}>
                 <div className="modal-header">
                     <h2>Profile Settings</h2>
                     <button className="btn-icon" onClick={onClose}>✕</button>

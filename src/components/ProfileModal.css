@@ -1,8 +1,29 @@
+.profile-modal {
+    width: 50vw;
+    min-width: 500px;
+    max-width: 800px;
+    max-height: 92vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* Mobile overrides to match settings/WA style */
+.platform-capacitor .profile-modal,
+.platform-android .profile-modal {
+    width: 95vw;
+    min-width: 0;
+    max-width: none;
+    max-height: 95vh;
+}
+
 .profile-form {
     display: flex;
     flex-direction: column;
     gap: 1.25rem;
     margin-top: 1rem;
+    overflow-y: auto;
+    padding-right: 4px; /* Space for scrollbar */
 }
 
 .profile-avatar-section {

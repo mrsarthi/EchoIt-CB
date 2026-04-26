@@ -30,12 +30,18 @@ export function initSocket() {
     fetch(SERVER_URL, { method: 'GET', mode: 'no-cors' }).catch(() => {});
 
     socket = io(SERVER_URL, {
-        transports: ['websocket', 'polling'],
+        withCredentials: true,
         reconnection: true,
         reconnectionAttempts: Infinity,  // Never give up
         reconnectionDelay: 1000,
         reconnectionDelayMax: 10000,     // Cap at 10s between attempts
         timeout: 30000,                  // 30s connection timeout for cold starts
+    });
+
+    socket.on('connect_error', (err) => {
+        console.error('❌ Socket Connection Error:', err.message);
+        console.error('Target URL:', SERVER_URL);
+        console.error('Error Details:', err);
     });
 
     socket.on('connect', () => {
