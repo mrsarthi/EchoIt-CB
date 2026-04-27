@@ -19,13 +19,4 @@ With DecentraChat:
 4. **Group Chats:** Create secure groups, invite your friends, and chat together, all completely encrypted.
 5. **Media Sharing:** You can share images with your friends (more media support coming soon), all completely encrypted as well.
 
-## Get Started
 
-Ready to take back your privacy? Download and install DecentraChat!
-
-[Download DecentraChat Setup for Windows](https://github.com/mrsarthi/Dicsussion/releases/download/new_version/DecentraChat-Setup-1.6.4.exe)
-
-
- [Download DecentraChat Setup for Android](https://github.com/mrsarthi/Dicsussion/releases/download/new_version/app-debug.apk)
-
-*(Alternatively, you can view [All Releases here](https://github.com/mrsarthi/Dicsussion/releases/latest).)*
