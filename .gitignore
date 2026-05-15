@@ -3,10 +3,12 @@ radata/
 *.tmp
 radata-*.tmp
 
-# Test scripts
+# Test & Local Utility Scripts
 check-relays.js
 relay-server.js
 test-connection.js
+build-android-ota.js
+server/test_*.js
 
 # Electron build output
 release/
@@ -77,3 +79,14 @@ android/app/google-services.json
 Architecture.md
 Technical_Architecture.md
 .agents/
+
+# Server Databases & Loose Output Logs
+server/*.db
+server/*.sqlite
+*.db
+*.sqlite
+build_error*.*
+*.txt
+
+# Duplicate/Separate Standalone Codebases
+media-relay-server/

@@ -129,3 +129,57 @@ export function deriveKeysFromSignature(signature) {
     secretKey: encodeBase64(keyPair.secretKey),
   };
 }
+
+/**
+ * Generate a symmetric key for media chunk encryption
+ * @returns {string} The symmetric key (base64)
+ */
+export function generateSymmetricKey() {
+  return encodeBase64(nacl.randomBytes(nacl.secretbox.keyLength));
+}
+
+/**
+ * Encrypt a payload symmetrically
+ * @param {string|Uint8Array} payload - Data to encrypt (string or Uint8Array)
+ * @param {string} secretKey - Symmetric key (base64)
+ * @returns {Object} { encrypted, nonce } both as base64 strings
+ */
+export function encryptSymmetric(payload, secretKey) {
+  const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
+  const payloadUint8 = typeof payload === 'string' ? decodeUTF8(payload) : payload;
+  const secKey = decodeBase64(secretKey);
+
+  const encrypted = nacl.secretbox(payloadUint8, nonce, secKey);
+
+  return {
+    encrypted: encodeBase64(encrypted),
+    nonce: encodeBase64(nonce),
+  };
+}
+
+/**
+ * Decrypt a symmetrically encrypted payload
+ * @param {string} encryptedPayload - Encrypted data (base64)
+ * @param {string} nonce - The nonce (base64)
+ * @param {string} secretKey - Symmetric key (base64)
+ * @param {boolean} returnString - If true, returns decoded string. If false, returns Uint8Array.
+ * @returns {string|Uint8Array|null} Decrypted payload or null if failed
+ */
+export function decryptSymmetric(encryptedPayload, nonce, secretKey, returnString = true) {
+  try {
+    const encryptedUint8 = decodeBase64(encryptedPayload);
+    const nonceUint8 = decodeBase64(nonce);
+    const secKey = decodeBase64(secretKey);
+
+    const decrypted = nacl.secretbox.open(encryptedUint8, nonceUint8, secKey);
+
+    if (!decrypted) {
+      return null;
+    }
+
+    return returnString ? encodeUTF8(decrypted) : decrypted;
+  } catch (error) {
+    console.error('Symmetric decryption failed:', error);
+    return null;
+  }
+}

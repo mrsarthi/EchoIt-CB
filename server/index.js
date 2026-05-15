@@ -18,14 +18,13 @@ db.serialize(() => {
     db.run(`CREATE TABLE IF NOT EXISTS users (
         address TEXT PRIMARY KEY,
         username TEXT,
-        discussion_id TEXT UNIQUE,
         public_key TEXT,
         avatar TEXT,
         status TEXT,
         registered_at INTEGER
     )`);
-    // Index for fast lookups by catchy ID
-    db.run(`CREATE INDEX IF NOT EXISTS idx_discussion_id ON users (discussion_id)`);
+    // Create index for fast, case-insensitive username lookups
+    db.run(`CREATE INDEX IF NOT EXISTS idx_username ON users (username)`);
 });
 
 // Initialize Firebase Admin for Push Notifications
@@ -124,96 +123,12 @@ const users = new Map(); // address -> { socketId, publicKey, online, username }
 const fs = require('fs');
 
 const usernames = new Map(); // username -> address (for lookup)
-const discussionIds = new Map(); // discussionId -> address (for lookup)
 
-// ===== Discussion ID Generator (Word-based) =====
-const DID_ADJECTIVES = [
-    'SWIFT', 'BRIGHT', 'COSMIC', 'SILENT', 'GOLDEN', 'MYSTIC', 'SHADOW', 'CRYSTAL',
-    'NEON', 'LUNAR', 'SOLAR', 'FROST', 'EMBER', 'STORM', 'WILD', 'IRON',
-    'AZURE', 'VIOLET', 'CORAL', 'SAGE', 'NOBLE', 'ROGUE', 'BRAVE', 'CALM',
-    'DARK', 'DEEP', 'FERAL', 'GHOST', 'HYPER', 'IVORY', 'JADE', 'KEEN',
-    'LUCID', 'MIST', 'NOVA', 'OMEGA', 'PIXEL', 'RAPID', 'SABLE', 'TITAN',
-    'ULTRA', 'VIVID', 'WIRED', 'XENON', 'ZEAL', 'ALPHA', 'BLAZE', 'CYBER',
-    'DELTA', 'ECHO', 'FLUX', 'GLOW', 'HAZE', 'IONIC', 'JEWEL', 'KNIGHTL',
-    'LUMEN', 'MACRO', 'NEXUS', 'ONYX', 'PRISM', 'QUARTZ', 'RIFT', 'SONIC'
-];
 
-const DID_NOUNS = [
-    'WOLF', 'HAWK', 'PHOENIX', 'DRAGON', 'TIGER', 'FALCON', 'PANTHER', 'RAVEN',
-    'VIPER', 'COBRA', 'SPARK', 'BLADE', 'COMET', 'ORBIT', 'PULSE', 'WAVE',
-    'CREST', 'PEAK', 'FROST', 'FLAME', 'STONE', 'STEEL', 'DRIFT', 'SURGE',
-    'ROVER', 'SCOUT', 'PILOT', 'RIDER', 'FORGE', 'VAULT', 'TOWER', 'GATE',
-    'STAR', 'MOON', 'DAWN', 'DUSK', 'SHADE', 'LIGHT', 'STORM', 'BOLT',
-    'ARROW', 'LANCE', 'SHIELD', 'CROWN', 'SAGE', 'MAGE', 'KNIGHT', 'MONK',
-    'CIPHER', 'NODE', 'MATRIX', 'GRID', 'CORE', 'LINK', 'NEXUS', 'SHARD',
-    'ATLAS', 'AEGIS', 'PRISM', 'APEX', 'ZENITH', 'VERTEX', 'HELIX', 'QUASAR'
-];
 
-function simpleHash(str) {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-        const char = str.charCodeAt(i);
-        hash = ((hash << 5) - hash) + char;
-        hash = hash & hash;
-    }
-    return Math.abs(hash);
-}
-
-/**
- * Check if a Discussion ID is taken by someone else
- */
-function isDiscussionIdTaken(dId, currentAddress) {
-    return new Promise((resolve) => {
-        db.get(`SELECT address FROM users WHERE discussion_id = ?`, [dId], (err, row) => {
-            if (err) return resolve(false);
-            if (!row) return resolve(false);
-            // Taken if the address is different from the requester
-            resolve(row.address.toLowerCase() !== currentAddress.toLowerCase());
-        });
-    });
-}
-
-/**
- * Claim a unique Discussion ID for a wallet
- * If the generated ID is taken, increments the suffix until free.
- */
-async function claimDiscussionId(walletAddress) {
-    const normalizedAddress = walletAddress.toLowerCase();
-    
-    // 1. Check if user already has an ID assigned in DB
-    const existing = await new Promise(resolve => {
-        db.get(`SELECT discussion_id FROM users WHERE address = ?`, [normalizedAddress], (err, row) => {
-            resolve(row ? row.discussion_id : null);
-        });
-    });
-    if (existing) return existing;
-
-    // 2. Generate base ID components
-    const normalized = normalizedAddress.toLowerCase();
-    const hash1 = simpleHash(normalized.slice(0, 21));
-    const hash2 = simpleHash(normalized.slice(21));
-    const hash3 = simpleHash(normalized);
-    
-    const adjective = DID_ADJECTIVES[hash1 % DID_ADJECTIVES.length];
-    const noun = DID_NOUNS[hash2 % DID_NOUNS.length];
-    let number = (hash3 % 8999) + 1000; // 4 digits
-
-    // 3. Collision Resolution Loop
-    let dId = `${adjective}-${noun}-${number}`;
-    let attempts = 0;
-    while (await isDiscussionIdTaken(dId, normalizedAddress) && attempts < 100) {
-        number++; // Simple increment for collision resolution
-        if (number > 9999) number = 1000;
-        dId = `${adjective}-${noun}-${number}`;
-        attempts++;
-    }
-
-    return dId;
-}
-
-// ===== User Metadata Persistence (registeredAt, discussionId) =====
+// ===== User Metadata Persistence (registeredAt) =====
 const USERS_META_PATH = path.join(__dirname, 'users_meta.json');
-let usersMeta = new Map(); // address -> { registeredAt, discussionId }
+let usersMeta = new Map(); // address -> { registeredAt }
 
 try {
     if (fs.existsSync(USERS_META_PATH)) {
@@ -221,10 +136,6 @@ try {
         const parsed = JSON.parse(data);
         for (const address in parsed) {
             usersMeta.set(address, parsed[address]);
-            // Rebuild discussionIds lookup
-            if (parsed[address].discussionId) {
-                discussionIds.set(parsed[address].discussionId.toUpperCase(), address);
-            }
         }
         console.log(`[🆔] Loaded user metadata for ${Object.keys(parsed).length} users from disk.`);
     }
@@ -383,16 +294,10 @@ io.on('connection', (socket) => {
         const finalStatus = status !== undefined ? status : dbUser?.status;
         const finalRegisteredAt = dbUser?.registered_at || (registeredAt || Date.now());
 
-        // 2. Claim/Generate Unique Discussion ID
-        const dId = await claimDiscussionId(normalizedAddress);
-
-        // 3. Persist to SQLite
-        db.run(`INSERT OR REPLACE INTO users (address, username, discussion_id, public_key, avatar, status, registered_at) 
-                VALUES (?, ?, ?, ?, ?, ?, ?)`, 
-                [normalizedAddress, finalUsername, dId, publicKey, finalAvatar, finalStatus, finalRegisteredAt]);
-
-        // Register in-memory for fast presence logic
-        discussionIds.set(dId.toUpperCase(), normalizedAddress);
+        // 2. Persist to SQLite
+        db.run(`INSERT OR REPLACE INTO users (address, username, public_key, avatar, status, registered_at) 
+                VALUES (?, ?, ?, ?, ?, ?)`, 
+                [normalizedAddress, finalUsername, publicKey, finalAvatar, finalStatus, finalRegisteredAt]);
 
         // Store user info in memory for presence
         users.set(normalizedAddress, {
@@ -403,7 +308,6 @@ io.on('connection', (socket) => {
             username: finalUsername,
             avatar: finalAvatar,
             status: finalStatus,
-            discussionId: dId,
             registeredAt: finalRegisteredAt
         });
 
@@ -415,14 +319,13 @@ io.on('connection', (socket) => {
         socket.address = normalizedAddress;
         socket.join(normalizedAddress);
 
-        console.log(`[✓] Registered: ${normalizedAddress.slice(0, 10)}...${finalUsername ? ` (@${finalUsername})` : ''} [${dId}]`);
+        console.log(`[✓] Registered: ${normalizedAddress.slice(0, 10)}...${finalUsername ? ` (@${finalUsername})` : ''}`);
 
         // Notify sender about successful registration FIRST
         socket.emit('registered', {
             address: normalizedAddress,
             publicKey,
             username: finalUsername,
-            discussionId: dId,
             registeredAt: finalRegisteredAt
         });
 
@@ -510,7 +413,7 @@ io.on('connection', (socket) => {
     });
 
     // Set username for a user
-    socket.on('setUsername', ({ username }, callback) => {
+    socket.on('setUsername', async ({ username }, callback) => {
         if (!socket.address) {
             callback({ success: false, error: 'Not registered' });
             return;
@@ -528,44 +431,80 @@ io.on('connection', (socket) => {
             return;
         }
 
-        // Check if username is taken (by someone else)
-        const existingAddress = usernames.get(normalizedUsername);
-        if (existingAddress && existingAddress !== socket.address) {
-            callback({ success: false, error: 'Username already taken' });
-            return;
+        try {
+            // 1. Verify database-level uniqueness (critical for accuracy across server reboots)
+            const existingOwner = await new Promise((resolve, reject) => {
+                db.get(`SELECT address FROM users WHERE LOWER(username) = ?`, [normalizedUsername], (err, row) => {
+                    if (err) return reject(err);
+                    resolve(row ? row.address : null);
+                });
+            });
+
+            if (existingOwner && existingOwner.toLowerCase() !== socket.address.toLowerCase()) {
+                callback({ success: false, error: 'Username already taken' });
+                return;
+            }
+
+            // 2. Persist new username setting directly to SQLite source-of-truth
+            await new Promise((resolve, reject) => {
+                db.run(`UPDATE users SET username = ? WHERE address = ?`, [username, socket.address], (err) => {
+                    if (err) return reject(err);
+                    resolve();
+                });
+            });
+
+            // 3. Remove old mappings in-memory if necessary
+            const user = users.get(socket.address);
+            if (user?.username) {
+                usernames.delete(user.username.toLowerCase());
+            }
+
+            // 4. Commit to memory stores for quick presence lookups
+            usernames.set(normalizedUsername, socket.address);
+            if (user) {
+                user.username = username;
+                users.set(socket.address, user);
+            }
+
+            console.log(`[@] Username persisted & set: ${socket.address.slice(0, 10)}... -> @${username}`);
+            callback({ success: true, username });
+
+        } catch (err) {
+            console.error('[@] Failed to save username to DB:', err.message);
+            callback({ success: false, error: 'Internal server error' });
         }
-
-        // Remove old username mapping if user had one
-        const user = users.get(socket.address);
-        if (user?.username) {
-            usernames.delete(user.username.toLowerCase());
-        }
-
-        // Set new username
-        usernames.set(normalizedUsername, socket.address);
-        user.username = username; // Keep original casing
-        users.set(socket.address, user);
-
-        console.log(`[@] Username set: ${socket.address.slice(0, 10)}... -> @${username}`);
-        callback({ success: true, username });
     });
 
     // Lookup user by username
     socket.on('lookupByUsername', ({ username }, callback) => {
         const normalizedUsername = username.toLowerCase().trim().replace('@', '');
+        
+        // 1. Quick Check: check memory first (online users)
         const address = usernames.get(normalizedUsername);
-
         if (address) {
             const user = users.get(address);
             callback({
                 address,
                 username: user?.username,
                 publicKey: user?.publicKey,
-                online: user?.online
+                online: user?.online || false
             });
-        } else {
-            callback(null);
+            return;
         }
+
+        // 2. Database Fallback: Check SQLite (for offline user discovery)
+        db.get(`SELECT * FROM users WHERE LOWER(username) = ?`, [normalizedUsername], (err, row) => {
+            if (err || !row) {
+                callback(null);
+                return;
+            }
+            callback({
+                address: row.address,
+                username: row.username,
+                publicKey: row.public_key,
+                online: false // Offline if not in-memory Map
+            });
+        });
     });
 
     // Get user's public key
@@ -574,46 +513,7 @@ io.on('connection', (socket) => {
         callback(user ? { publicKey: user.publicKey, online: user.online } : null);
     });
 
-    // Lookup by Discussion ID (word-based)
-    socket.on('lookupByDiscussionId', ({ discussionId }, callback) => {
-        const normalizedId = discussionId.trim().toUpperCase();
-        
-        // Try in-memory first for performance
-        let address = discussionIds.get(normalizedId);
-        
-        const deliverUser = (addr) => {
-            db.get(`SELECT * FROM users WHERE address = ?`, [addr], (err, row) => {
-                if (row) {
-                    const memoryUser = users.get(addr);
-                    callback({
-                        address: addr,
-                        username: row.username,
-                        publicKey: row.public_key,
-                        online: memoryUser?.online || false,
-                        avatar: row.avatar,
-                        status: row.status,
-                        discussionId: row.discussion_id,
-                        registeredAt: row.registered_at
-                    });
-                } else {
-                    callback(null);
-                }
-            });
-        };
 
-        if (address) {
-            deliverUser(address);
-        } else {
-            // Fallback: check DB directly
-            db.get(`SELECT address FROM users WHERE discussion_id = ?`, [normalizedId], (err, row) => {
-                if (row) {
-                    deliverUser(row.address);
-                } else {
-                    callback(null);
-                }
-            });
-        }
-    });
 
     // WebRTC Signaling: Offer
     socket.on('signal', ({ to, signal }) => {
@@ -755,7 +655,6 @@ io.on('connection', (socket) => {
                 lastSeen: user.lastSeen,
                 avatar: user.avatar,
                 status: user.status,
-                discussionId: user.discussionId,
                 registeredAt: meta?.registeredAt
             });
         } else {
@@ -788,7 +687,7 @@ io.on('connection', (socket) => {
     });
 
     // Handle message receipts (delivered/read)
-    socket.on('messageReceipt', ({ messageId, to, type }) => {
+    socket.on('messageReceipt', ({ messageId, to, type, chatId }) => {
         const toAddress = to.toLowerCase();
         const recipient = users.get(toAddress);
 
@@ -806,9 +705,10 @@ io.on('connection', (socket) => {
             io.to(recipient.socketId).emit('messageReceipt', {
                 messageId,
                 type,
-                from: socket.address
+                from: socket.address,
+                chatId // Propagate conversation scope back to the sender
             });
-            console.log(`[✓] ${type} receipt: ${messageId.slice(0, 15)}... to ${toAddress.slice(0, 6)}`);
+            console.log(`[✓] ${type} receipt: ${messageId.slice(0, 15)}... for chat ${chatId?.slice(0, 6)}`);
         }
     });
 

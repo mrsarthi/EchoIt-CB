@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { App as CapacitorApp } from '@capacitor/app';
 import {
     initMessaging,
     sendEncryptedMessage,
@@ -350,6 +352,14 @@ export function useChat(myAddress) {
                     content: msg.content?.slice(0, 20)
                 });
 
+                // Determine if the chat is actively open to mark it read instantly in storage
+                const isActive = activeChatRef.current?.address?.toLowerCase() === contactId?.toLowerCase();
+                if (msg.from && msg.from.toLowerCase() !== myAddress.toLowerCase()) {
+                    if (isActive) {
+                        msg.status = 'read'; 
+                    }
+                }
+
                 // Save to local storage immediately
                 try {
                     await saveMessage(contactId, msg);
@@ -359,12 +369,11 @@ export function useChat(myAddress) {
                     console.error('❌ Failed to persist incoming message:', err);
                 }
 
-                // Send delivery receipt (only for DMs to avoid storm)
-                if (!msg.groupId && msg.from && msg.from.toLowerCase() !== myAddress.toLowerCase()) {
-                    sendDeliveryReceipt(msg.from, msg.id);
-                    // Check if chat is actively open
-                    if (activeChatRef.current?.address?.toLowerCase() === msg.from.toLowerCase()) {
-                        sendReadReceipt(msg.from, msg.id);
+                // Send delivery receipts (for DMs and Groups)
+                if (msg.from && msg.from.toLowerCase() !== myAddress.toLowerCase()) {
+                    sendDeliveryReceipt(msg.from, msg.id, contactId);
+                    if (isActive) {
+                        sendReadReceipt(msg.from, msg.id, contactId);
                     }
                 }
 
@@ -604,13 +613,22 @@ export function useChat(myAddress) {
 
             // ... (rest of init - receipts, connection, status) ...
             // Copying existing receipt/connection logic...
-            onMessageReceipt(({ messageId, type, from }) => {
-                setMessages(prev => prev.map(m => m.id === messageId ? { ...m, status: type } : m));
+            onMessageReceipt(({ messageId, type, from, chatId }) => {
+                // Update local state if the chat is currently active
+                setMessages(prev => prev.map(m => {
+                    if (m.id === messageId) {
+                        const newReceipts = { ...(m.receipts || {}) };
+                        newReceipts[from.toLowerCase()] = type;
+                        return { ...m, receipts: newReceipts };
+                    }
+                    return m;
+                }));
                 
                 // Persist the receipt into storage so it survives app restarts
                 if (from && messageId) {
                     import('../services/storageService').then(s => {
-                         s.updateMessageStatus(from, [messageId], type).catch(err => console.debug('Failed updating receipt:', err));
+                         // Pass chatId to enable localized high-performance writes to both DB versions
+                         s.updateMessageReceipt(chatId, [messageId], from, type).catch(err => console.debug('Failed updating receipt:', err));
                     });
                 }
             });
@@ -765,27 +783,42 @@ export function useChat(myAddress) {
             });
         })();
 
-        // Send read receipts when window gains focus
+        // Send read receipts when window gains focus OR Android app is resumed from background
         const handleFocus = () => {
             const chat = activeChatRef.current;
-            if (!chat || chat.isGroup) return;
+            if (!chat) return;
 
-            // Get current messages and send read receipts for unread incoming ones
+            // Get current messages and send read receipts for all unread incoming messages
             setMessages(prev => {
                 const unread = prev.filter(m =>
-                    m.from?.toLowerCase() === chat.address?.toLowerCase() &&
+                    m.from?.toLowerCase() !== myAddress?.toLowerCase() &&
                     m.status !== 'read'
                 );
-                unread.forEach(m => sendReadReceipt(m.from, m.id));
+                // Pass active conversation address as the chatId scope
+                unread.forEach(m => sendReadReceipt(m.from, m.id, chat.address));
                 return prev;
             });
         };
+
         window.addEventListener('focus', handleFocus);
 
+        // Bridge native Android Capacitor app state wake cycles to handleFocus
+        let nativeListener = null;
+        if (Capacitor.isNativePlatform()) {
+            nativeListener = CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+                if (isActive) {
+                    console.log('📱 Android App Wake detected. Refreshing read receipts.');
+                    handleFocus();
+                }
+            });
+        }
 
         return () => {
             mounted = false;
             window.removeEventListener('focus', handleFocus);
+            if (nativeListener) {
+                nativeListener.then(l => l.remove()).catch(() => {});
+            }
             if (statusUnsubscribeRef.current) statusUnsubscribeRef.current();
             if (reconnectUnsubscribeRef.current) reconnectUnsubscribeRef.current();
             // Clear typing timeouts
@@ -834,17 +867,23 @@ export function useChat(myAddress) {
                             groupId: activeChat.address,
                             groupName: activeChat.info?.username || 'Group',
                             members: activeChat.members, // Propagate members list
-                            type: type
+                            type: type,
+                            ...metadata // Forward mediaId, manifest, etc.
                         }
                     ));
 
-                await Promise.all(promises);
+                const results = await Promise.allSettled(promises);
+                const failedCount = results.filter(r => r.status === 'rejected').length;
+                if (failedCount > 0) {
+                    console.warn(`[Group] Message delivery failed for ${failedCount} members (they may be offline), but proceeded for the rest.`);
+                }
 
                 // Add to local state
                 const sentMessage = {
                     id: `msg_${start}_${myAddress}`, // Pseudo ID
                     from: myAddress,
                     content,
+                    replyTo, // Link parent message context for proper threaded rendering locally
                     timestamp: start,
                     status: 'sent',
                     groupId: activeChat.address,
@@ -864,7 +903,7 @@ export function useChat(myAddress) {
                     activeChat.address,
                     content,
                     replyTo,
-                    { type: type },
+                    { type: type, ...metadata }, // Forward mediaId, manifest, etc.
                     activeChat.publicKey // Inject caller-level fallback key
                 );
                 // Attach metadata (mediaId) to the persisted message
@@ -966,20 +1005,29 @@ export function useChat(myAddress) {
                 merged = merged.filter(m => !m.groupId);
             }
 
-            setMessages(merged.map(m => {
-                // Send explicit read receipts for missed incoming messages that we are now opening
-                if (m.from?.toLowerCase() === address.toLowerCase()) {
-                    if (m.status !== 'read') {
-                        sendReadReceipt(m.from, m.id);
-                    }
+            const unreadIds = [];
+            const mappedMessages = merged.map(m => {
+                // Send explicit read receipts for missed incoming messages (Groups or DMs) that we are now opening
+                const isIncoming = m.from?.toLowerCase() !== myAddress?.toLowerCase();
+                if (isIncoming && m.status !== 'read') {
+                    // Pass active conversation address as the chatId scope for direct writes
+                    sendReadReceipt(m.from, m.id, address);
+                    unreadIds.push(m.id);
                     return {
                         ...m,
                         status: 'read'
                     };
                 }
-                // Preserve the original status for messages we sent
                 return m;
-            }));
+            });
+
+            setMessages(mappedMessages);
+
+            // Persist the read status locally so we don't re-emit receipts next session
+            if (unreadIds.length > 0) {
+                const { updateMessageReceipt } = await import('../services/storageService');
+                updateMessageReceipt(address, unreadIds, myAddress, 'read').catch(e => console.debug('Local status persistence failed', e));
+            }
         } catch (err) {
             console.error('Error loading chat:', err);
         } finally {

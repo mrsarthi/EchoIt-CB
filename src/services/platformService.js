@@ -379,24 +379,26 @@ export async function checkForUpdates() {
             const localVersion = await getCurrentAppVersion();
 
             const isVersionNewer = _isNewerVersion(remoteVersion, localVersion);
+            const isSameVersion = remoteVersion.replace(/^v/, '') === localVersion.replace(/^v/, '');
 
             console.log(`[NativeUpdater] Remote Asset: ${remoteAssetId}, Local Asset: ${localAssetId}`);
             console.log(`[NativeUpdater] Remote Version: ${remoteVersion}, Local Version: ${localVersion}`);
 
-            if (isVersionNewer || remoteAssetId !== localAssetId) {
-                // If it's explicitly a newer semantic version, clear the blocked asset ID
-                if (isVersionNewer) {
-                    localStorage.removeItem('last_installed_asset_id');
-                }
-
+            if (isVersionNewer) {
+                // Case 1: Remote version is explicitly newer. Show update banner!
+                localStorage.removeItem('last_installed_asset_id'); // Clear old lock to prepare for transition
                 _latestZipUrl = apkAsset.browser_download_url;
-                _latestUpdateVersion = remoteAssetId; // Store the Asset ID as the version marker
+                _latestUpdateVersion = remoteAssetId;
                 _capEmit('onAvailable', { version: remoteVersion.replace(/^v/, '') });
-            } else {
-                // We're confirmed up-to-date — persist the asset ID now.
-                // This is the ONLY safe place to save it, because reaching here
-                // means the running build.gradle version matches the remote tag.
+            } 
+            else if (isSameVersion) {
+                // Case 2: Perfect SemVer match! (User successfully updated and booted).
+                // Immediately commit the Remote Asset ID to local storage to permanently break the deadlock loop.
                 localStorage.setItem('last_installed_asset_id', remoteAssetId);
+                _capEmit('onNotAvailable', {});
+            } 
+            else {
+                // Case 3: Remote version is older (or local was altered). Treat as up-to-date.
                 _capEmit('onNotAvailable', {});
             }
         } catch (err) {

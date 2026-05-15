@@ -78,8 +78,8 @@ export function initSocket() {
     });
 
     socket.on('connect_error', (error) => {
-        console.error('Connection error:', error.message);
-        alert(`Network Error: ${error.message}`);
+        console.warn('Connection error (auto-reconnecting):', error.message);
+        // Removed aggressive alert, rely on connectionChangeCallback for UI state
     });
 
     // Handle incoming messages
@@ -233,22 +233,7 @@ export function lookupByUsername(username) {
     });
 }
 
-/**
- * Lookup user by Discussion ID (word-based)
- * @param {string} discussionId - e.g., "COSMIC-PHOENIX-42"
- * @returns {Promise<{address, username, publicKey, online, avatar, status, discussionId, registeredAt} | null>}
- */
-export function lookupByDiscussionId(discussionId) {
-    if (!socket?.connected) {
-        return Promise.resolve(null);
-    }
 
-    return new Promise((resolve) => {
-        socket.emit('lookupByDiscussionId', { discussionId }, (response) => {
-            resolve(response);
-        });
-    });
-}
 
 /**
  * Send an encrypted message
@@ -360,9 +345,9 @@ export function onReconnect(callback) {
  * @param {string} to - Original sender's address
  * @param {'delivered' | 'read'} type - Receipt type
  */
-export function sendReceipt(messageId, to, type) {
+export function sendReceipt(messageId, to, type, chatId = null) {
     if (!socket?.connected) return;
-    socket.emit('messageReceipt', { messageId, to, type });
+    socket.emit('messageReceipt', { messageId, to, type, chatId });
 }
 
 /**
@@ -541,7 +526,13 @@ export function getUsersStatus(addresses) {
             resolve({});
             return;
         }
+        const timer = setTimeout(() => {
+            console.warn('⚠️ getUsersStatus timed out');
+            resolve({});
+        }, 7000);
+
         socket.emit('getUsersStatus', { addresses }, (statuses) => {
+            clearTimeout(timer);
             resolve(statuses);
         });
     });
@@ -557,7 +548,14 @@ export function getPublicKey(address) {
             resolve(null);
             return;
         }
+        // Hard deadline to prevent infinite promise deadlock if socket stalls
+        const timer = setTimeout(() => {
+            console.warn(`⚠️ getPublicKey timeout for ${address?.slice(0, 8)}`);
+            resolve(null); // Fail gracefully so app enters offline queue mode
+        }, 7000);
+
         socket.emit('getPublicKey', { address }, (result) => {
+            clearTimeout(timer);
             resolve(result?.publicKey || null);
         });
     });
@@ -574,8 +572,15 @@ export function getHistory(peerAddress) {
             resolve([]);
             return;
         }
+        // Hard deadline to prevent infinite spinner on stalled load
+        const timer = setTimeout(() => {
+            console.warn(`⚠️ getHistory timeout for ${peerAddress?.slice(0, 8)}`);
+            resolve([]);
+        }, 7000);
+
         socket.emit('getHistory', { peerAddress }, (history) => {
-            console.log(`📜 Received ${history.length} historical messages`);
+            clearTimeout(timer);
+            console.log(`📜 Received ${history?.length || 0} historical messages`);
             resolve(history || []);
         });
     });

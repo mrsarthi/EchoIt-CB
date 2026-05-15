@@ -1,12 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { formatAddress } from '../blockchain/web3Provider';
-import { generateDiscussionId, formatDiscussionId } from '../services/identityService';
 import './ProfilePreviewModal.css';
 
 export function ProfilePreviewModal({ user, onClose, onStartChat, myAddress }) {
     if (!user) return null;
 
-    const discussionId = generateDiscussionId(user.address);
+
     const displayName = user.username || formatAddress(user.address);
     const isOnline = user.online;
     const memberSince = user.registeredAt || user.joinedAt;
@@ -17,17 +16,7 @@ export function ProfilePreviewModal({ user, onClose, onStartChat, myAddress }) {
         return date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
     };
 
-    const handleCopyId = () => {
-        navigator.clipboard.writeText(discussionId).then(() => {
-            // Brief visual feedback
-            const btn = document.getElementById('copy-discussion-id-btn');
-            if (btn) {
-                const original = btn.textContent;
-                btn.textContent = 'Copied!';
-                setTimeout(() => { btn.textContent = original; }, 1500);
-            }
-        });
-    };
+
 
     return (
         <div className="modal-overlay animate-fadeIn" onClick={onClose}>
@@ -57,12 +46,7 @@ export function ProfilePreviewModal({ user, onClose, onStartChat, myAddress }) {
                         <p className="profile-preview-username">@{user.username}</p>
                     )}
                     
-                    {/* Discussion ID */}
-                    <div className="profile-preview-discussion-id" onClick={handleCopyId} title="Click to copy">
-                        <span className="discussion-id-label">🆔</span>
-                        <span className="discussion-id-value">{formatDiscussionId(discussionId)}</span>
-                        <button id="copy-discussion-id-btn" className="copy-id-btn">📋</button>
-                    </div>
+
 
                     {/* Status tagline */}
                     {user.status && (

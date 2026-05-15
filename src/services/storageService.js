@@ -248,6 +248,66 @@ export async function updateMessageStatus(chatId, messageIds, status) {
 }
 
 /**
+ * Update message receipt for a specific user (Group Chats & DMs)
+ */
+export async function updateMessageReceipt(chatId, messageIds, fromAddress, type) {
+    if (!messageIds || messageIds.length === 0 || !fromAddress) return;
+    const lowerFrom = fromAddress.toLowerCase();
+    const lowerChatId = chatId?.toLowerCase();
+
+    const legacyKey = lowerChatId ? `chat_${lowerChatId}` : null;
+    const mutex = legacyKey ? getMutex(legacyKey) : null;
+
+    const runUpdate = async () => {
+        try {
+            // 1. Sync Legacy V1 Store
+            if (legacyKey) {
+                const history = (await messageStore.getItem(legacyKey)) || [];
+                let updated = false;
+                const newHistory = history.map(m => {
+                    if (messageIds.includes(m.id)) {
+                        updated = true;
+                        const receipts = m.receipts || {};
+                        receipts[lowerFrom] = type;
+                        return { ...m, receipts };
+                    }
+                    return m;
+                });
+                if (updated) {
+                    await messageStore.setItem(legacyKey, newHistory);
+                }
+            }
+
+            // 2. Sync Modern V2 Store (Robust, sequential scan preventing write collisions)
+            const allKeys = await individualMessageStore.keys();
+            const targetKeys = allKeys.filter(key => {
+                if (lowerChatId) {
+                    return key.startsWith(`msg_${lowerChatId}_`);
+                }
+                return key.startsWith('msg_'); // Extreme fallback only
+            });
+
+            for (const key of targetKeys) {
+                const msg = await individualMessageStore.getItem(key);
+                if (msg && messageIds.includes(msg.id)) {
+                    const receipts = msg.receipts || {};
+                    receipts[lowerFrom] = type;
+                    await individualMessageStore.setItem(key, { ...msg, receipts });
+                }
+            }
+        } catch (err) {
+            console.error('Failed atomic write for message receipt:', err);
+        }
+    };
+
+    if (mutex) {
+        return mutex.lock(runUpdate);
+    } else {
+        return runUpdate();
+    }
+}
+
+/**
  * Migrate old history to individual storage (V2)
  */
 export async function migrateOldHistory() {

@@ -94,12 +94,9 @@ function AppContent() {
               updatePushToken(token);
           });
 
-          // Check if we need to show username setup
+          // Force show username setup if missing
           if (!storedUsername) {
-            const hasSkipped = localStorage.getItem('decentrachat_username_skipped');
-            if (!hasSkipped) {
-              setShowUsernameSetup(true);
-            }
+            setShowUsernameSetup(true);
           }
         }
       } catch (err) {
@@ -117,10 +114,7 @@ function AppContent() {
     setShowUsernameSetup(false);
   };
 
-  const handleUsernameSkip = () => {
-    localStorage.setItem('decentrachat_username_skipped', 'true');
-    setShowUsernameSetup(false);
-  };
+
 
   const handleDeleteAccount = async () => {
     const confirmed = window.confirm(
@@ -141,7 +135,6 @@ function AppContent() {
       // 3. Clear localStorage items
       localStorage.removeItem('decentrachat_address');
       localStorage.removeItem('decentrachat_username');
-      localStorage.removeItem('decentrachat_username_skipped');
       // 4. Disconnect from server
       disconnect();
       // 5. Reload app to reset to login
@@ -169,7 +162,7 @@ function AppContent() {
     }
 
     if (showUsernameSetup) {
-      return <UsernameSetup onComplete={handleUsernameComplete} onSkip={handleUsernameSkip} />;
+      return <UsernameSetup onComplete={handleUsernameComplete} />;
     }
 
     return (
