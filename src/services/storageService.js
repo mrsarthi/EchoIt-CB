@@ -115,21 +115,35 @@ export async function saveMessage(chatId, message) {
  * @param {number} beforeTimestamp 
  */
 export async function getMessagesPaginated(chatId, limit = 50, beforeTimestamp = null) {
-    const messages = [];
     const lowerChatId = chatId.toLowerCase();
-    
-    await individualMessageStore.iterate((value, key) => {
-        if (key.startsWith(`msg_${lowerChatId}_`)) {
-            if (!beforeTimestamp || value.timestamp < beforeTimestamp) {
-                messages.push(value);
-            }
-        }
-    });
+    const allKeys = await individualMessageStore.keys();
 
-    // Sort descending (newest first) for easier slicing
-    messages.sort((a, b) => b.timestamp - a.timestamp);
-    
-    return messages.slice(0, limit).reverse(); // Return oldest to newest for the UI
+    // Filter for this chat's keys (msg_chatid_timestamp_id)
+    let chatKeys = allKeys.filter(k => k.startsWith(`msg_${lowerChatId}_`));
+
+    // If beforeTimestamp is provided, filter keys by the timestamp segment.
+    // Key format after the known prefix is: {timestamp}_{messageId}
+    // We strip the prefix and parse the first underscore-delimited segment as the timestamp.
+    if (beforeTimestamp) {
+        const prefix = `msg_${lowerChatId}_`;
+        chatKeys = chatKeys.filter(k => {
+            const suffix = k.substring(prefix.length); // e.g. "1716820000000_msg_1716821001000_xyz"
+            const ts = parseInt(suffix.split('_')[0]);  // first segment is always the timestamp
+            return ts < beforeTimestamp;
+        });
+    }
+
+    // Sort descending (newest first)
+    chatKeys.sort().reverse();
+
+    // Slice to the requested limit
+    const pageKeys = chatKeys.slice(0, limit);
+
+    // Fetch only the messages we need
+    const messages = await Promise.all(pageKeys.map(k => individualMessageStore.getItem(k)));
+
+    // Return sorted oldest to newest for UI
+    return messages.filter(m => m !== null).reverse();
 }
 
 /**
@@ -221,11 +235,27 @@ export async function updateMessageStatus(chatId, messageIds, status) {
         try {
             // Update V2 Individual Store
             const lowerChatId = chatId.toLowerCase();
-            await individualMessageStore.iterate(async (value, key) => {
-                if (key.startsWith(`msg_${lowerChatId}_`) && messageIds.includes(value.id)) {
+            const allKeys = await individualMessageStore.keys();
+            const chatKeys = allKeys.filter(k => k.startsWith(`msg_${lowerChatId}_`));
+            
+            // Find keys that match our message IDs.
+            // Key format after prefix: {timestamp}_{messageId}. The messageId itself
+            // contains underscores (e.g. msg_1234_xyz), so we must strip the prefix
+            // and skip past the first underscore-segment (the timestamp) to get the full ID.
+            const prefix = `msg_${lowerChatId}_`;
+            const keysToUpdate = chatKeys.filter(k => {
+                const suffix = k.substring(prefix.length);       // "{timestamp}_{messageId}"
+                const firstUnderscore = suffix.indexOf('_');
+                const id = suffix.substring(firstUnderscore + 1); // full messageId
+                return messageIds.includes(id);
+            });
+
+            await Promise.all(keysToUpdate.map(async (key) => {
+                const value = await individualMessageStore.getItem(key);
+                if (value) {
                     await individualMessageStore.setItem(key, { ...value, status });
                 }
-            });
+            }));
 
             // Update V1 Legacy Store
             const history = (await messageStore.getItem(legacyKey)) || [];
@@ -280,16 +310,22 @@ export async function updateMessageReceipt(chatId, messageIds, fromAddress, type
 
             // 2. Sync Modern V2 Store (Robust, sequential scan preventing write collisions)
             const allKeys = await individualMessageStore.keys();
-            const targetKeys = allKeys.filter(key => {
-                if (lowerChatId) {
-                    return key.startsWith(`msg_${lowerChatId}_`);
-                }
-                return key.startsWith('msg_'); // Extreme fallback only
+            const chatPrefix = lowerChatId ? `msg_${lowerChatId}_` : 'msg_';
+            const targetKeys = allKeys.filter(key => key.startsWith(chatPrefix));
+            
+            // Find specific keys that match the message IDs.
+            // The messageId contains underscores, so we strip the prefix and skip
+            // the timestamp segment to correctly extract the full message ID.
+            const keysToUpdate = targetKeys.filter(key => {
+                const suffix = key.substring(chatPrefix.length);  // "{timestamp}_{messageId}"
+                const firstUnderscore = suffix.indexOf('_');
+                const id = suffix.substring(firstUnderscore + 1); // full messageId
+                return messageIds.includes(id);
             });
 
-            for (const key of targetKeys) {
+            for (const key of keysToUpdate) {
                 const msg = await individualMessageStore.getItem(key);
-                if (msg && messageIds.includes(msg.id)) {
+                if (msg) {
                     const receipts = msg.receipts || {};
                     receipts[lowerFrom] = type;
                     await individualMessageStore.setItem(key, { ...msg, receipts });
@@ -397,6 +433,7 @@ export async function saveContacts(contacts) {
                 unreadCount: c.unreadCount,
                 avatar: c.avatar,   // Persist avatar so offline users still show their pfp
                 status: c.status,   // Persist status tagline
+                isVerified: c.isVerified, // Task 10: Cryptographic verification status
                 // Don't save online status, meaningless on reload
             }));
             await messageStore.setItem('visible_contacts', minimized);
@@ -408,23 +445,22 @@ export async function saveContacts(contacts) {
 
 export async function clearHistory(chatId) {
     if (!chatId) return;
+    const lowerChatId = chatId.toLowerCase();
+
     // Clear V1 legacy store
-    await messageStore.removeItem(`chat_${chatId.toLowerCase()}`);
+    await messageStore.removeItem(`chat_${lowerChatId}`);
     
     // Clear V2 individual entries
-    const lowerChatId = chatId.toLowerCase();
-    const keysToDelete = [];
-    await individualMessageStore.iterate((value, key) => {
-        if (key.startsWith(`msg_${lowerChatId}_`)) {
-            keysToDelete.push(key);
-        }
-    });
-    for (const key of keysToDelete) {
-        await individualMessageStore.removeItem(key);
-    }
+    const allKeys = await individualMessageStore.keys();
+    const keysToDelete = allKeys.filter(k => k.startsWith(`msg_${lowerChatId}_`));
+    
+    await Promise.all(keysToDelete.map(k => individualMessageStore.removeItem(k)));
     
     // Clear media for this chat's messages
-    // (media keys are message IDs, we collect them during iteration above)
+    const messageIds = keysToDelete.map(k => k.split('_').pop());
+    await Promise.all(messageIds.map(id => mediaStore.removeItem(id)));
+    
+    console.debug(`🗑️ History and media cleared for ${lowerChatId}`);
 }
 
 /**

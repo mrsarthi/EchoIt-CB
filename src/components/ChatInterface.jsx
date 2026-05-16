@@ -1,12 +1,14 @@
 // ChatInterface - Main chat UI component
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { useChat } from '../hooks/useChat';
+import { useWallet } from '../context/WalletContext';
 import { formatAddress } from '../blockchain/web3Provider';
 import { CreateGroupModal } from './CreateGroupModal';
 import { GroupDetailsModal } from './GroupDetailsModal';
 import { ProfileModal } from './ProfileModal';
 import { ProfilePreviewModal } from './ProfilePreviewModal';
 import { SettingsModal } from './SettingsModal';
+import SafetyNumbers from './SafetyNumbers'; // Task 10
 
 import { App as CapacitorApp } from '@capacitor/app';
 import { platform } from '../services/platformService';
@@ -40,7 +42,8 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
         myAvatar,
         myStatus,
         saveProfile,
-        updateGroupAvatar
+        updateGroupAvatar,
+        verifyContact
     } = useChat(walletAddress);
 
     const [newMessage, setNewMessage] = useState('');
@@ -50,6 +53,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
     const [showDebug, setShowDebug] = useState(false);
     const [showGroupModal, setShowGroupModal] = useState(false);
     const [showGroupDetails, setShowGroupDetails] = useState(false);
+    const [showSafetyNumbers, setShowSafetyNumbers] = useState(false); // Task 10
     const [imagePreview, setImagePreview] = useState(null); // base64 data URL
     const [lightboxMedia, setLightboxMedia] = useState(null); // { src, type }
     const [showSettings, setShowSettings] = useState(false);
@@ -816,6 +820,14 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                             <span className="encrypted-badge">
                                                 🔒 Encrypted
                                             </span>
+                                            {!activeChat.isGroup && (
+                                                <button 
+                                                    className="verify-identity-link"
+                                                    onClick={() => setShowSafetyNumbers(true)}
+                                                >
+                                                    {activeChat.info?.isVerified ? '✅ Verified' : '🛡️ Verify Identity'}
+                                                </button>
+                                            )}
                                         </div>
                                     )}
                                 </div>
@@ -875,8 +887,9 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                     >
                                         <div
                                         className="message-bubble"
-                                            onDoubleClick={() => handleReply(msg)}
+                                            onDoubleClick={() => !msg.decryptionFailed && handleReply(msg)}
                                             onTouchStart={(e) => {
+                                                if (msg.decryptionFailed) return;
                                                 longPressTimerRef.current = setTimeout(() => {
                                                     setReactionPickerMsgId(msg.id);
                                                 }, 500);
@@ -884,6 +897,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                             onTouchEnd={() => clearTimeout(longPressTimerRef.current)}
                                             onTouchMove={() => clearTimeout(longPressTimerRef.current)}
                                             onContextMenu={(e) => {
+                                                if (msg.decryptionFailed) return;
                                                 e.preventDefault();
                                                 setReactionPickerMsgId(msg.id);
                                             }}
@@ -913,7 +927,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                                 </div>
                                             )}
 
-                                            {msg.replyTo && (
+                                            {msg.replyTo && !msg.decryptionFailed && (
                                                 <div
                                                     className="message-reply-context clickable"
                                                     onClick={() => msg.replyTo.id && scrollToMessage(msg.replyTo.id)}
@@ -930,7 +944,15 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                                     </div>
                                                 </div>
                                             )}
-                                            {(msg.type === 'image' || msg.type === 'video') ? (
+
+                                            {msg.decryptionFailed ? (
+                                                <div className="decryption-failed-content">
+                                                    <span className="decryption-failed-icon">🔒</span>
+                                                    <p className="message-content italic opacity-75">
+                                                        {msg.content || 'This message could not be decrypted. The sender may have reset their account.'}
+                                                    </p>
+                                                </div>
+                                            ) : (msg.type === 'image' || msg.type === 'video') ? (
                                                 <div className="message-image-wrapper" onClick={async () => {
                                                     // Already downloading?
                                                     if (mediaProgress[msg.id]) return;
@@ -1249,6 +1271,17 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                     onClose={() => setProfilePreview(null)}
                     onStartChat={handleStartChatFromPreview}
                     myAddress={walletAddress}
+                />
+            )}
+
+            {/* Task 10: Safety Numbers Modal */}
+            {showSafetyNumbers && activeChat && !activeChat.isGroup && (
+                <SafetyNumbers
+                    contact={activeChat.info}
+                    myKeys={useWallet().keys} // Fetch keys from WalletContext via hook
+                    isVerified={activeChat.info?.isVerified}
+                    onVerify={(status) => verifyContact(activeChat.address, status)}
+                    onClose={() => setShowSafetyNumbers(false)}
                 />
             )}
         </div>

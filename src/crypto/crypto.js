@@ -183,3 +183,91 @@ export function decryptSymmetric(encryptedPayload, nonce, secretKey, returnStrin
     return null;
   }
 }
+
+/**
+ * --- TASK 12: X3DH / Double Ratchet Primitives ---
+ */
+
+/**
+ * Generate a bundle of ephemeral pre-keys for X3DH
+ */
+export function generatePreKeyBundle(count = 20) {
+    const signedPreKey = nacl.box.keyPair();
+    const oneTimePreKeys = [];
+
+    for (let i = 0; i < count; i++) {
+        const key = nacl.box.keyPair();
+        oneTimePreKeys.push({
+            id: i,
+            publicKey: encodeBase64(key.publicKey),
+            secretKey: encodeBase64(key.secretKey) // Client stores secret, uploads public
+        });
+    }
+
+    return {
+        signedPreKey: {
+            publicKey: encodeBase64(signedPreKey.publicKey),
+            secretKey: encodeBase64(signedPreKey.secretKey)
+        },
+        oneTimePreKeys
+    };
+}
+
+/**
+ * X3DH Initial Shared Secret Derivation
+ */
+export function deriveX3DHSecret(myIK, myEK, peerIK, peerSPK, peerOPK = null) {
+    // DH1 = myIK + peerSPK
+    const dh1 = nacl.box.before(decodeBase64(peerSPK), decodeBase64(myIK.secretKey));
+    // DH2 = myEK + peerIK
+    const dh2 = nacl.box.before(decodeBase64(peerIK), decodeBase64(myEK.secretKey));
+    // DH3 = myEK + peerSPK
+    const dh3 = nacl.box.before(decodeBase64(peerSPK), decodeBase64(myEK.secretKey));
+    
+    let combined = new Uint8Array([...dh1, ...dh2, ...dh3]);
+
+    if (peerOPK) {
+        // DH4 = myEK + peerOPK
+        const dh4 = nacl.box.before(decodeBase64(peerOPK), decodeBase64(myEK.secretKey));
+        combined = new Uint8Array([...combined, ...dh4]);
+    }
+
+    return combined; // This is the initial root secret
+}
+
+/**
+ * Generate a human-readable "Safety Number" (fingerprint) from a public key.
+ * This is a 60-digit numeric string formatted into 12 blocks of 5.
+ * @param {string} publicKey - Base64 public key
+ * @returns {Promise<string>} Formatted fingerprint
+ */
+export async function getFingerprint(publicKey) {
+  if (!publicKey) return '00000-00000-00000-00000-00000-00000-00000-00000-00000-00000-00000-00000';
+
+  try {
+    // 1. Decode base64 to Uint8Array
+    const data = decodeBase64(publicKey);
+    
+    // 2. Hash using SHA-256
+    const hashBuffer = await window.crypto.subtle.digest('SHA-256', data);
+    const hashArray = new Uint8Array(hashBuffer);
+    
+    // 3. Convert first 30 bytes to a large numeric string
+    // (We use 30 bytes to get enough entropy for 60 digits)
+    let numericString = '';
+    for (let i = 0; i < 30; i += 2) {
+      // Combine 2 bytes to get a number between 0-65535
+      const val = (hashArray[i] << 8) | hashArray[i+1];
+      // Pad to 5 digits
+      numericString += val.toString().padStart(5, '0');
+    }
+
+    // 4. Slice to exactly 60 digits and format into blocks of 5
+    const finalDigits = numericString.substring(0, 60);
+    const blocks = finalDigits.match(/.{1,5}/g);
+    return blocks.join('-');
+  } catch (err) {
+    console.error('Failed to generate fingerprint:', err);
+    return 'Error generating fingerprint';
+  }
+}

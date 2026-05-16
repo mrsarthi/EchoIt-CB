@@ -1,5 +1,6 @@
 import { generateSymmetricKey, encryptSymmetric, decryptSymmetric } from '../crypto/crypto';
 import { uploadChunkWithRetry, fetchChunkWithTimeout, wakeUpRelays } from './customRelayService';
+import { getUploadToken } from './socketService';
 
 const CHUNK_SIZE = 256 * 1024; // 256 KB chunks
 const CONCURRENCY_LIMIT = 4; // limit simultaneous relay network calls
@@ -74,11 +75,24 @@ export async function sliceAndTransmitMedia(base64Data, mimeType, onProgress) {
         console.warn('[MediaTransport] Relay wake-up had issues, proceeding anyway:', e.message);
     }
 
+    // --- TASK 9: Fetch Upload Token ---
+    let uploadToken = null;
+    try {
+        uploadToken = await getUploadToken();
+        if (uploadToken) {
+            console.log('[MediaTransport] Obtained media upload token.');
+        } else {
+            console.warn('[MediaTransport] Failed to obtain upload token, upload may fail.');
+        }
+    } catch (err) {
+        console.error('[MediaTransport] Error fetching upload token:', err.message);
+    }
+
     console.log(`[MediaTransport] Uploading ${totalChunks} chunks to relays (Concurrency: ${CONCURRENCY_LIMIT})...`);
     let uploadedCount = 0;
 
     const uploadTasks = chunks.map(chunk => async () => {
-        const success = await uploadChunkWithRetry(chunk.id, chunk.data);
+        const success = await uploadChunkWithRetry(chunk.id, chunk.data, uploadToken);
         if (!success) {
             throw new Error(`Failed to upload chunk ${chunk.id}`);
         }

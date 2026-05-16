@@ -85,9 +85,9 @@ export async function openAuthBrowser() {
         try {
             const result = await authPromise;
             if (_walletAuthCallback) {
-                _walletAuthCallback({ address: result.address, signature: result.signature });
+                _walletAuthCallback({ address: result.address, signature: result.signature, sessionId });
             }
-            return result;
+            return { ...result, sessionId };
         } catch (e) {
             console.error("WebSocket auth error", e);
             return null;

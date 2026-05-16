@@ -32,10 +32,11 @@ export async function wakeUpRelays() {
  * Uploads a chunk to a specific relay server, with fallback to others on failure.
  * @param {string} chunkId - Unique identifier/hash for this chunk
  * @param {string} base64Data - The encrypted chunk payload
+ * @param {string} [token] - Optional JWT authorization token (Task 9)
  * @param {number} maxRetries - Maximum number of retry attempts
  * @returns {Promise<boolean>} True if successfully acknowledged
  */
-export async function uploadChunkWithRetry(chunkId, base64Data, maxRetries = 3) {
+export async function uploadChunkWithRetry(chunkId, base64Data, token = null, maxRetries = 3) {
     let attempt = 0;
     
     while (attempt < maxRetries) {
@@ -46,9 +47,14 @@ export async function uploadChunkWithRetry(chunkId, base64Data, maxRetries = 3) 
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
             
+            const headers = { 'Content-Type': 'application/json' };
+            if (token) {
+                headers['Authorization'] = `Bearer ${token}`;
+            }
+
             const response = await fetch(`${relayUrl}/upload/${chunkId}`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers,
                 body: JSON.stringify({ data: base64Data }),
                 signal: controller.signal
             });
@@ -57,6 +63,9 @@ export async function uploadChunkWithRetry(chunkId, base64Data, maxRetries = 3) 
             
             if (response.ok) {
                 return true; // Success
+            } else if (response.status === 401 || response.status === 403) {
+                console.error(`[Relay] Auth failed on ${relayUrl}: ${response.status}`);
+                return false; // Don't retry on auth failure
             } else {
                 throw new Error(`Server returned ${response.status}`);
             }

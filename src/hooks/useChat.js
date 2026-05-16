@@ -112,7 +112,7 @@ export function useChat(myAddress) {
         setActiveChat({ address: groupId, info: groupContact, isGroup: true, members: groupContact.members });
 
         // Notify all members via the server so it shows up on their devices
-        emitCreateGroup(groupId, groupName, allMembers, [myAddress]);
+        emitCreateGroup(groupId, groupName, allMembers, [myAddress], null);
 
         return groupContact;
     }, [myAddress]);
@@ -153,9 +153,13 @@ export function useChat(myAddress) {
             await deleteGroup(groupId);
             return;
         }
+
+        let currentMembers = [];
+
         // Update the members list in contacts
         setContacts(prev => prev.map(c => {
             if (c.address === groupId && c.isGroup) {
+                currentMembers = c.members || [];
                 return {
                     ...c,
                     members: (c.members || []).filter(
@@ -165,6 +169,12 @@ export function useChat(myAddress) {
             }
             return c;
         }));
+
+        // Notify server to update registry and broadcast
+        import('../services/socketService').then(({ emitRemoveGroupMember }) => {
+            emitRemoveGroupMember(groupId, memberAddress, currentMembers);
+        });
+
         // Also update active chat if this group is open
         if (activeChatRef.current?.address === groupId) {
             setActiveChat(prev => ({
@@ -269,6 +279,84 @@ export function useChat(myAddress) {
             // Set "Member Since" date (first-time only)
             await setJoinedAt(Date.now());
 
+            // --- TASK 6: Group Syncing from Server Registry ---
+            const syncGroups = async () => {
+                try {
+                    const { getMyGroups } = await import('../services/socketService');
+                    const serverGroups = await getMyGroups();
+                    if (serverGroups && serverGroups.length > 0) {
+                        setContacts(prev => {
+                            const newContacts = [...prev];
+                            let changed = false;
+
+                            serverGroups.forEach(sg => {
+                                const existing = prev.find(c => c.address.toLowerCase() === sg.address.toLowerCase());
+                                if (!existing) {
+                                    newContacts.push(sg);
+                                    changed = true;
+                                } else if (JSON.stringify(existing.members) !== JSON.stringify(sg.members)) {
+                                    // Update member list if changed
+                                    const idx = newContacts.findIndex(c => c.address.toLowerCase() === sg.address.toLowerCase());
+                                    newContacts[idx] = { ...existing, members: sg.members };
+                                    changed = true;
+                                }
+                            });
+
+                            return changed ? newContacts : prev;
+                        });
+                        console.log(`👥 Synced ${serverGroups.length} groups from server registry.`);
+                    }
+                } catch (err) {
+                    console.error('Failed to sync groups:', err);
+                }
+            };
+
+            // Sync immediately and on every reconnection
+            syncGroups();
+            const unsubReconnectGroups = onReconnect(syncGroups);
+
+            // --- TASK 11: Group History Catch-up ---
+            const catchUpGroups = async () => {
+                const currentContacts = await getSavedContacts();
+                const groupChats = currentContacts.filter(c => c.isGroup);
+                
+                for (const group of groupChats) {
+                    try {
+                        const { getMessagesPaginated } = await import('../services/storageService');
+                        const localMsgs = await getMessagesPaginated(group.address, 1);
+                        const lastSeq = localMsgs.length > 0 ? (localMsgs[0].sequence_no || 0) : 0;
+                        
+                        console.log(`🔄 Catching up group ${group.address.slice(0, 8)} from seq ${lastSeq}...`);
+                        const missed = await socketService.syncGroup(group.address, lastSeq);
+                        
+                        if (missed && missed.length > 0) {
+                            console.log(`📥 Integrating ${missed.length} missed messages for group ${group.address.slice(0, 8)}`);
+                            for (const msg of missed) {
+                                await saveMessage(group.address, msg);
+                            }
+                            
+                            // If this is the active chat, update the UI
+                            if (activeChatRef.current?.address?.toLowerCase() === group.address.toLowerCase()) {
+                                setMessages(prev => {
+                                    const newMsgs = [...prev];
+                                    missed.forEach(m => {
+                                        if (!newMsgs.some(em => em.id === m.id)) {
+                                            newMsgs.push(m);
+                                        }
+                                    });
+                                    return newMsgs.sort((a, b) => a.timestamp - b.timestamp);
+                                });
+                            }
+                        }
+                    } catch (err) {
+                        console.error(`Catch-up failed for group ${group.address}:`, err);
+                    }
+                }
+            };
+
+            catchUpGroups();
+            const unsubReconnectCatchup = onReconnect(catchUpGroups);
+
             // Load persist contacts immediately
             const cachedContacts = await getSavedContacts();
             if (mounted && cachedContacts.length > 0) {
@@ -343,44 +431,68 @@ export function useChat(myAddress) {
 
             subscribeToMessages(async (msg) => {
                 const contactId = msg.groupId || msg.from;
+                
+                // Task 3: Emergency Key Refresh for decryption failures
+                let processedMsg = msg;
+                if (processedMsg.decryptionFailed && !processedMsg.isRetry && !processedMsg.groupId) {
+                    console.log(`🔍 Decryption failed for message from ${processedMsg.from?.slice(0, 10)}. Triggering emergency key refresh...`);
+                    try {
+                        const { verifyRecipientKey, decryptReceivedMessage } = await import('../services/messageService');
+                        const contact = contacts.find(c => c.address.toLowerCase() === processedMsg.from?.toLowerCase());
+                        const changed = await verifyRecipientKey(processedMsg.from, contact);
+                        
+                        if (changed) {
+                            // If key changed, try one more time (though if they used our old key, this still fails)
+                            // But if WE are the sender loading history, this is crucial.
+                            const retried = await decryptReceivedMessage({ ...processedMsg, isRetry: true }, keysRef.current, myAddress);
+                            if (!retried.decryptionFailed) {
+                                processedMsg = retried;
+                                console.log('✅ Emergency key refresh recovered the message!');
+                            }
+                        }
+                    } catch (err) {
+                        console.error('Emergency key refresh failed:', err);
+                    }
+                }
+
                 console.log('📨 Received message:', {
-                    id: msg.id,
-                    from: msg.from,
-                    to: msg.to,
-                    groupId: msg.groupId,
+                    id: processedMsg.id,
+                    from: processedMsg.from,
+                    to: processedMsg.to,
+                    groupId: processedMsg.groupId,
                     contactId,
-                    content: msg.content?.slice(0, 20)
+                    content: processedMsg.content?.slice(0, 20)
                 });
 
                 // Determine if the chat is actively open to mark it read instantly in storage
                 const isActive = activeChatRef.current?.address?.toLowerCase() === contactId?.toLowerCase();
-                if (msg.from && msg.from.toLowerCase() !== myAddress.toLowerCase()) {
+                if (processedMsg.from && processedMsg.from.toLowerCase() !== myAddress.toLowerCase()) {
                     if (isActive) {
-                        msg.status = 'read'; 
+                        processedMsg.status = 'read'; 
                     }
                 }
 
                 // Save to local storage immediately
                 try {
-                    await saveMessage(contactId, msg);
-                    if (msg.id) ackOfflineMessages([msg.id]);
+                    await saveMessage(contactId, processedMsg);
+                    if (processedMsg.id) ackOfflineMessages([processedMsg.id]);
                     console.log(`💾 Persisted incoming message from ${contactId}`);
                 } catch (err) {
                     console.error('❌ Failed to persist incoming message:', err);
                 }
 
                 // Send delivery receipts (for DMs and Groups)
-                if (msg.from && msg.from.toLowerCase() !== myAddress.toLowerCase()) {
-                    sendDeliveryReceipt(msg.from, msg.id, contactId);
+                if (processedMsg.from && processedMsg.from.toLowerCase() !== myAddress.toLowerCase()) {
+                    sendDeliveryReceipt(processedMsg.from, processedMsg.id, contactId);
                     if (isActive) {
-                        sendReadReceipt(msg.from, msg.id, contactId);
+                        sendReadReceipt(processedMsg.from, processedMsg.id, contactId);
                     }
                 }
 
                 // Handle incoming message
                 setMessages(prev => {
-                    const exists = prev.some(m => m.id === msg.id);
-                    if (exists) return prev.map(m => m.id === msg.id ? msg : m);
+                    const exists = prev.some(m => m.id === processedMsg.id);
+                    if (exists) return prev.map(m => m.id === processedMsg.id ? processedMsg : m);
 
                     // Filter: Only add if it belongs to current active chat
                     const activeAddress = activeChatRef.current?.address?.toLowerCase();
@@ -391,23 +503,18 @@ export function useChat(myAddress) {
 
                     if (isActiveGroup) {
                         // Active chat is Group. Msg must match group ID.
-                        isRelevant = msg.groupId === activeAddress;
+                        isRelevant = processedMsg.groupId === activeAddress;
                     } else {
                         // Active chat is DM. Msg must be DM (no groupId) and match contact address.
                         // Either from contact OR sent by me to contact
-                        if (!msg.groupId) {
-                            isRelevant = (msg.from?.toLowerCase() === activeAddress) ||
-                                (msg.to?.toLowerCase() === activeAddress);
+                        if (!processedMsg.groupId) {
+                            isRelevant = (processedMsg.from?.toLowerCase() === activeAddress) ||
+                                (processedMsg.to?.toLowerCase() === activeAddress);
                         }
                     }
 
-                    // Note: We usually add all messages to state? No, standard pattern here 
-                    // seems to be determining if we should show it. 
-                    // Actually, the original code loaded history on open. 
-                    // `messages` state IS only for the active chat.
-
                     if (isRelevant) {
-                        return [...prev, msg];
+                        return [...prev, processedMsg];
                     }
                     return prev;
                 });
@@ -954,6 +1061,26 @@ export function useChat(myAddress) {
             members: contact?.members || []
         });
 
+        // Task 3: Proactive Key Verification (Ghost Key Shield)
+        if (contact && !contact.isGroup) {
+            import('../services/messageService').then(async ({ verifyRecipientKey }) => {
+                const changed = await verifyRecipientKey(address, contact);
+                if (changed) {
+                    // Update local contact record with the fresh key if we can
+                    const { getUser } = await import('../services/socketService');
+                    const freshUser = await getUser(address);
+                    if (freshUser) {
+                        setContacts(prev => prev.map(c => 
+                            c.address.toLowerCase() === address.toLowerCase() 
+                                ? { ...c, publicKey: freshUser.publicKey, isVerified: false } 
+                                : c
+                        ));
+                        console.log(`🔐 Contact ${address?.slice(0, 10)} public key updated proactively. RESETTING verification.`);
+                    }
+                }
+            }).catch(err => console.debug('Key verification failed:', err));
+        }
+
         // Load messages for this chat
         setMessages([]);
         setIsLoading(true);
@@ -1153,6 +1280,30 @@ export function useChat(myAddress) {
         setTypingStatus({});
     }, []);
 
+    // --- Task 10: Verify Peer Identity ---
+    const verifyContact = useCallback(async (address, isVerified) => {
+        if (!address) return;
+        
+        setContacts(prev => {
+            const next = prev.map(c => 
+                c.address.toLowerCase() === address.toLowerCase() 
+                    ? { ...c, isVerified } 
+                    : c
+            );
+            return next;
+        });
+
+        // Update active chat if it matches
+        if (activeChatRef.current?.address?.toLowerCase() === address.toLowerCase()) {
+            setActiveChat(prev => ({
+                ...prev,
+                info: { ...prev.info, isVerified }
+            }));
+        }
+
+        console.log(`🛡️ Verification status for ${address.slice(0, 10)} set to: ${isVerified}`);
+    }, []);
+
 
     return {
         activeChat,
@@ -1180,6 +1331,7 @@ export function useChat(myAddress) {
         myStatus,
         saveProfile,
         updateGroupAvatar,
+        verifyContact, // Task 10
         clearError: () => setError(null),
     };
 }

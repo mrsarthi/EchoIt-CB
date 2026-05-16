@@ -14,7 +14,7 @@ let dataCallback = null;
 let initialized = false;
 
 // STUN servers for NAT traversal (free Google servers)
-const ICE_SERVERS = [
+let iceServers = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
@@ -25,6 +25,21 @@ const ICE_SERVERS = [
  */
 export async function init() {
     if (initialized) return;
+
+    // --- TASK 7: WebRTC TURN Infrastructure ---
+    // Fetch ephemeral credentials from the signaling server
+    try {
+        console.log('📡 WebRTC: Fetching TURN credentials...');
+        const response = await fetch(`${socketService.SERVER_URL}/api/turn`);
+        const servers = await response.json();
+        
+        if (Array.isArray(servers) && servers.length > 0) {
+            iceServers = servers;
+            console.log('✅ WebRTC: Loaded TURN/ICE servers from registry');
+        }
+    } catch (err) {
+        console.warn('⚠️ WebRTC: Failed to fetch TURN servers, using public STUN fallback:', err.message);
+    }
 
     // Dynamically import SimplePeer to avoid SSR/initialization issues
     try {
@@ -82,7 +97,7 @@ function createPeer(peerAddress, initiator) {
         initiator,
         trickle: true,
         config: {
-            iceServers: ICE_SERVERS
+            iceServers: iceServers // Task 7: Use dynamic ICE servers
         }
     });
 
