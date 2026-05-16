@@ -2,7 +2,7 @@
 import { io } from 'socket.io-client';
 
 // Deployed server URL - uses Render.com
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'https://decentrachat-singnalling.onrender.com';
+export const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'https://decentrachat-singnalling.onrender.com';
 
 let socket = null;
 let messageCallback = null;
@@ -46,10 +46,24 @@ export function initSocket() {
 
     socket.on('connect', () => {
         console.log('🔌 Connected to signaling server');
-        // Re-register if we were previously registered (handles reconnects)
+        // Re-register if we were previously registered (handles reconnects).
+        // We call the full register() function to attempt a signed challenge-response.
+        // If the signer (MetaMask) is unavailable, it falls back to the legacy
+        // unsigned emit which the server's grace period accepts.
         if (currentUser) {
-            console.log('🔄 Re-registering session...');
-            socket.emit('register', currentUser);
+            console.log('🔄 Re-registering session with challenge-response...');
+            register(
+                currentUser.address,
+                currentUser.publicKey,
+                currentUser.username,
+                currentUser.avatar,
+                currentUser.status,
+                currentUser.signMessage // may be undefined on Electron/mobile reconnects
+            ).catch(err => {
+                // Fallback: emit directly if full registration flow fails (e.g., wallet locked)
+                console.warn('⚠️ Challenge-response re-registration failed, using legacy path:', err.message);
+                socket.emit('register', currentUser);
+            });
         }
 
         // Re-join auth room if we were waiting for login (crucial for mobile backgrounding)
@@ -78,8 +92,8 @@ export function initSocket() {
     });
 
     socket.on('connect_error', (error) => {
-        console.error('Connection error:', error.message);
-        alert(`Network Error: ${error.message}`);
+        console.warn('Connection error (auto-reconnecting):', error.message);
+        // Removed aggressive alert, rely on connectionChangeCallback for UI state
     });
 
     // Handle incoming messages
@@ -157,6 +171,12 @@ export function initSocket() {
         if (reactionCallback) reactionCallback(data);
     });
 
+    // Handle registration errors
+    socket.on('registrationError', (data) => {
+        console.error('❌ Registration Error:', data.error);
+        alert(`Registration Error: ${data.error}`);
+    });
+
     return socket;
 }
 
@@ -165,19 +185,124 @@ export function initSocket() {
 
 
 /**
+ * Request a random challenge from the server for cryptographic verification
+ * @returns {Promise<string>}
+ */
+export function requestChallenge() {
+    if (!socket) initSocket();
+    
+    return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+            reject(new Error('Timeout waiting for registration challenge'));
+        }, 7000);
+
+        socket.emit('requestChallenge', (challenge) => {
+            clearTimeout(timeout);
+            resolve(challenge);
+        });
+    });
+}
+
+/**
+ * Get a time-limited authorization token for media relay uploads
+ * @returns {Promise<string>}
+ */
+export function getUploadToken() {
+    if (!socket?.connected) return Promise.resolve(null);
+
+    return new Promise((resolve) => {
+        socket.emit('getUploadToken', (response) => {
+            resolve(response?.token || null);
+        });
+    });
+}
+
+/**
+ * Get all groups for the current user from the server registry
+ * @returns {Promise<Array>}
+ */
+export function getMyGroups() {
+    if (!socket?.connected) return Promise.resolve([]);
+
+    return new Promise((resolve) => {
+        socket.emit('getMyGroups', (groups) => {
+            resolve(groups);
+        });
+    });
+}
+
+/**
+ * Sync missed group messages from the server registry (Task 11)
+ * @param {string} groupId 
+ * @param {number} lastSequenceNo 
+ * @returns {Promise<Array>}
+ */
+export function syncGroup(groupId, lastSequenceNo) {
+    if (!socket?.connected) return Promise.resolve([]);
+
+    return new Promise((resolve) => {
+        socket.emit('getGroupHistory', { groupId, lastSequenceNo }, (messages) => {
+            resolve(messages);
+        });
+    });
+}
+
+/**
+ * --- TASK 12: Double Ratchet Pre-Key Management ---
+ */
+
+/**
+ * Upload a bundle of one-time pre-keys to the server
+ */
+export function uploadPreKeys(preKeys) {
+    if (!socket?.connected) return;
+    socket.emit('uploadPreKeys', { preKeys });
+}
+
+/**
+ * Fetch a one-time pre-key for a peer (consumed on fetch)
+ */
+export function fetchPreKey(address) {
+    if (!socket?.connected) return Promise.resolve(null);
+
+    return new Promise((resolve) => {
+        socket.emit('fetchPreKey', { address }, (preKey) => {
+            resolve(preKey);
+        });
+    });
+}
+
+/**
  * Send static registration data to the server (pub key, username, etc)
  * @param {string} address User's wallet address
  * @param {string} publicKey User's public key for encryption
  * @param {string} [username] Optional username
  * @param {string} [avatar] Optional base64 avatar
  * @param {string} [status] Optional status text
+ * @param {Function} [signMessage] Optional function to sign the challenge
  * @returns {Promise<{address: string, username?: string}>}
  */
-export function register(address, publicKey, username, avatar, status) {
+export async function register(address, publicKey, username, avatar, status, signMessage) {
     if (!socket) initSocket();
 
     // Store credentials so they persist across socket disconnects/reconnects
-    currentUser = { address, publicKey, username, avatar, status };
+    currentUser = { address, publicKey, username, avatar, status, signMessage };
+
+    let challenge = null;
+    let signature = null;
+
+    // If a signMessage function is provided, we perform the challenge-response handshake
+    if (signMessage) {
+        try {
+            console.log('🛡️ Requesting registration challenge...');
+            challenge = await requestChallenge();
+            const message = `Authorize DecentraChat Registration: ${challenge}`;
+            console.log('🛡️ Signing registration challenge...');
+            signature = await signMessage(message);
+        } catch (err) {
+            console.warn('⚠️ Challenge-response failed, falling back to legacy registration:', err.message);
+        }
+    }
 
     return new Promise((resolve, reject) => {
         let isResolved = false;
@@ -189,7 +314,7 @@ export function register(address, publicKey, username, avatar, status) {
             }
         }, 15000);
 
-        socket.emit('register', { address, publicKey, username, avatar, status });
+        socket.emit('register', { address, publicKey, username, avatar, status, challenge, signature });
         socket.once('registered', (data) => {
             isResolved = true;
             clearTimeout(timeout);
@@ -233,22 +358,7 @@ export function lookupByUsername(username) {
     });
 }
 
-/**
- * Lookup user by Discussion ID (word-based)
- * @param {string} discussionId - e.g., "COSMIC-PHOENIX-42"
- * @returns {Promise<{address, username, publicKey, online, avatar, status, discussionId, registeredAt} | null>}
- */
-export function lookupByDiscussionId(discussionId) {
-    if (!socket?.connected) {
-        return Promise.resolve(null);
-    }
 
-    return new Promise((resolve) => {
-        socket.emit('lookupByDiscussionId', { discussionId }, (response) => {
-            resolve(response);
-        });
-    });
-}
 
 /**
  * Send an encrypted message
@@ -360,9 +470,9 @@ export function onReconnect(callback) {
  * @param {string} to - Original sender's address
  * @param {'delivered' | 'read'} type - Receipt type
  */
-export function sendReceipt(messageId, to, type) {
+export function sendReceipt(messageId, to, type, chatId = null) {
     if (!socket?.connected) return;
-    socket.emit('messageReceipt', { messageId, to, type });
+    socket.emit('messageReceipt', { messageId, to, type, chatId });
 }
 
 /**
@@ -380,9 +490,9 @@ export function sendSignal(to, signal) {
 /**
  * Notify server about new group creation (server fans out to members)
  */
-export function emitCreateGroup(groupId, groupName, members, admins) {
+export function emitCreateGroup(groupId, groupName, members, admins, avatar = null) {
     if (!socket?.connected) return;
-    socket.emit('createGroup', { groupId, groupName, members, admins });
+    socket.emit('createGroup', { groupId, groupName, members, admins, avatar });
 }
 
 /**
@@ -391,6 +501,14 @@ export function emitCreateGroup(groupId, groupName, members, admins) {
 export function emitDeleteGroup(groupId, members) {
     if (!socket?.connected) return;
     socket.emit('deleteGroup', { groupId, members });
+}
+
+/**
+ * Notify server to remove a member from a group
+ */
+export function emitRemoveGroupMember(groupId, memberAddress, members) {
+    if (!socket?.connected) return;
+    socket.emit('removeGroupMember', { groupId, memberAddress, members });
 }
 
 /**
@@ -541,7 +659,13 @@ export function getUsersStatus(addresses) {
             resolve({});
             return;
         }
+        const timer = setTimeout(() => {
+            console.warn('⚠️ getUsersStatus timed out');
+            resolve({});
+        }, 7000);
+
         socket.emit('getUsersStatus', { addresses }, (statuses) => {
+            clearTimeout(timer);
             resolve(statuses);
         });
     });
@@ -557,7 +681,14 @@ export function getPublicKey(address) {
             resolve(null);
             return;
         }
+        // Hard deadline to prevent infinite promise deadlock if socket stalls
+        const timer = setTimeout(() => {
+            console.warn(`⚠️ getPublicKey timeout for ${address?.slice(0, 8)}`);
+            resolve(null); // Fail gracefully so app enters offline queue mode
+        }, 7000);
+
         socket.emit('getPublicKey', { address }, (result) => {
+            clearTimeout(timer);
             resolve(result?.publicKey || null);
         });
     });
@@ -574,8 +705,15 @@ export function getHistory(peerAddress) {
             resolve([]);
             return;
         }
+        // Hard deadline to prevent infinite spinner on stalled load
+        const timer = setTimeout(() => {
+            console.warn(`⚠️ getHistory timeout for ${peerAddress?.slice(0, 8)}`);
+            resolve([]);
+        }, 7000);
+
         socket.emit('getHistory', { peerAddress }, (history) => {
-            console.log(`📜 Received ${history.length} historical messages`);
+            clearTimeout(timer);
+            console.log(`📜 Received ${history?.length || 0} historical messages`);
             resolve(history || []);
         });
     });

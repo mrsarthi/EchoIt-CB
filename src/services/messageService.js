@@ -1,20 +1,53 @@
 // Message Service - High-level messaging API with hybrid P2P/Relay transport
-import { encryptMessage, decryptMessage } from '../crypto/crypto';
+import { 
+    encryptMessage, 
+    decryptMessage, 
+    generatePreKeyBundle, 
+    deriveX3DHSecret,
+    generateKeyPair
+} from '../crypto/crypto';
+import { 
+    createSession, 
+    createSessionResponder,
+    encryptRatchet, 
+    decryptRatchet,
+    storePreKeySecrets,
+    consumePreKeySecret
+} from '../crypto/doubleRatchet';
 import { getStoredKeys } from '../crypto/keyManager';
 import * as socketService from './socketService';
 import * as webrtcService from './webrtcService';
-import { savePendingMessage, getPendingMessages, removePendingMessage, getLocalHistory } from './storageService';
-
+import { savePendingMessage, getPendingMessages, removePendingMessage, getLocalHistory, saveMessage } from './storageService';
 
 // Track sent message IDs for deduplication
 const sentMessageIds = new Set();
 
 /**
- * Initialize messaging services
+ * Initialize messaging services and upload pre-keys for Task 12
  */
-export function initMessaging() {
+export async function initMessaging() {
     // Initialize WebRTC service (sets up signal listener)
     webrtcService.init();
+
+    // --- TASK 12: Upload Pre-Key Bundle for Double Ratchet ---
+    const myKeys = await getStoredKeys();
+    if (myKeys) {
+        const bundle = generatePreKeyBundle(30);
+
+        // Store secret keys locally (needed when WE are the X3DH responder)
+        await storePreKeySecrets(bundle.oneTimePreKeys.map(pk => ({
+            id: pk.id,
+            secretKey: pk.secretKey
+        })));
+
+        // Upload ONLY public keys to the server
+        socketService.uploadPreKeys(bundle.oneTimePreKeys.map(pk => ({
+            keyId: pk.id,
+            publicKey: pk.publicKey
+        })));
+
+        console.log('🔐 Task 12: Uploaded fresh pre-key bundle for X3DH (secrets stored locally)');
+    }
 }
 
 /**
@@ -32,173 +65,121 @@ export async function registerUser(address, publicKey) {
 /**
  * Send an encrypted message to a recipient
  * Uses P2P if connected, falls back to server relay
- * @param {string} senderAddress - Sender's wallet address
- * @param {string} recipientAddress - Recipient's wallet address
- * @param {string} plainText - The message content
- * @param {Object} replyTo - Optional reply context { id, content, senderUsername }
- * @param {Object} metadata - Metadata (group routing, media type)
- * @param {string} fallbackPubKey - (Optional) Pre-cached public key from device memory if server drops the user
- * @returns {Promise<Object>} The sent message object
+ * Now supports Double Ratchet / PFS (Task 12)
  */
 export async function sendEncryptedMessage(senderAddress, recipientAddress, plainText, replyTo = null, metadata = {}, fallbackPubKey = null) {
-    // Capture timestamp ONCE so all copies of this message share the same value
+    // Capture timestamp ONCE
     const now = Date.now();
 
-    // Get our keys
+    // Get our keys (Identity Keys)
     const myKeys = await getStoredKeys();
     if (!myKeys) {
         throw new Error('No encryption keys found. Please reconnect your wallet.');
     }
 
-    // Get recipient's public key from server (Primary)
-    let recipientPubKey = await socketService.getPublicKey(recipientAddress);
+    // --- TASK 12: Double Ratchet Encryption Flow ---
+    
+    // 1. Try to encrypt using existing ratchet session
+    let ratchetData = await encryptRatchet(recipientAddress, plainText);
+    let x3dhHeader = null;
 
-    // Fallback 1: Caller provided a cached key from the UX contacts layer
-    if (!recipientPubKey && fallbackPubKey) {
-        recipientPubKey = fallbackPubKey;
-        console.log('🔑 Server dropped target; recovered key from caller cache');
-    }
-
-    // Fallback: If server forgot them due to memory clears (e.g. they've been offline for days)
-    // Mine our local history to see if they've ever sent us a message we can extract the key from!
-    if (!recipientPubKey) {
+    // 2. If no session, attempt X3DH Handshake
+    if (!ratchetData && !metadata.groupId) { // DMs only for now
+        console.log(`🤝 Initiating X3DH handshake with ${recipientAddress.slice(0, 10)}...`);
         try {
-            const history = await getLocalHistory(recipientAddress);
-            if (history && history.length > 0) {
-                // Find ANY past inbound message from them
-                const lastMsgFromRecipient = history.slice().reverse().find(m => 
-                    m.from?.toLowerCase() === recipientAddress.toLowerCase() && m.senderPublicKey
+            const preKey = await socketService.fetchPreKey(recipientAddress);
+            const peerIK = await socketService.getPublicKey(recipientAddress);
+            
+            if (peerIK) {
+                const ephemeralKey = generateKeyPair();
+                const sharedSecret = deriveX3DHSecret(
+                    myKeys,         // my IK
+                    ephemeralKey,   // my EK
+                    peerIK,         // peer IK
+                    peerIK,         // peer SPK (using IK as fallback for prototype)
+                    preKey?.publicKey // peer OPK
                 );
-                if (lastMsgFromRecipient) {
-                    recipientPubKey = lastMsgFromRecipient.senderPublicKey;
-                    console.log('🔑 Recovered offline user public key from local history cache!');
-                }
+
+                await createSession(recipientAddress, sharedSecret, peerIK);
+                ratchetData = await encryptRatchet(recipientAddress, plainText);
+                
+                // Recipient needs this to derive the same secret
+                x3dhHeader = {
+                    ephemeralKey: ephemeralKey.publicKey,
+                    preKeyId: preKey?.keyId
+                };
             }
         } catch (err) {
-            console.warn('Failed to recover public key from local history:', err);
+            console.warn('X3DH handshake failed:', err);
         }
     }
 
-    if (!recipientPubKey) {
-        // User is TRULY offline (not registered AND no history) — queue message for later instead of blocking
-        const messageId = `msg_${now}_${Math.random().toString(36).substr(2, 9)}`;
-        const senderUsername = localStorage.getItem('decentrachat_username') || null;
-
-        const outboxMessage = {
-            id: messageId,
-            from: senderAddress,
-            to: recipientAddress,
-            content: plainText,
-            senderPublicKey: myKeys.publicKey,
-            senderUsername: senderUsername,
-            replyTo: replyTo,
-            timestamp: now,
-            status: 'pending',
-            transport: 'queued',
-            groupId: metadata.groupId,
-            groupName: metadata.groupName,
-            members: metadata.members,
-            type: metadata.type || 'text',
-        };
-        await savePendingMessage(outboxMessage);
-
-        // Throw a soft info-level error so the UI can display a friendly toast
-        const err = new Error('This user is currently offline. Your message will be delivered when they come back online.');
-        err.level = 'info';
-        throw err;
-    }
-
-    // Encrypt the message
-    const encryptedData = encryptMessage(plainText, recipientPubKey, myKeys.secretKey);
-
-    // Get sender's username from localStorage
+    // 3. Prepare Payload
+    const messageId = `msg_${now}_${Math.random().toString(36).substr(2, 9)}`;
     const senderUsername = localStorage.getItem('decentrachat_username') || null;
 
-    // Build message payload
-    const messageId = `msg_${now}_${Math.random().toString(36).substr(2, 9)}`;
-    const payload = {
+    let payload = {
         id: messageId,
-        encrypted: encryptedData.encrypted,
-        nonce: encryptedData.nonce,
-        senderPublicKey: myKeys.publicKey,
-        senderUsername: senderUsername,
-        replyTo: replyTo,
+        senderUsername,
+        replyTo,
         timestamp: now,
-        // Group metadata
         groupId: metadata.groupId,
         groupName: metadata.groupName,
         members: metadata.members,
         from: senderAddress,
-        type: metadata.type || 'text', // Default to text
+        type: metadata.type || 'text',
+        mediaId: metadata.mediaId,
+        manifest: metadata.manifest,
     };
+
+    if (ratchetData) {
+        // Double Ratchet Mode
+        payload.ratchet = ratchetData; // { ciphertext, nonce, header }
+        payload.x3dh = x3dhHeader;
+        payload.senderPublicKey = myKeys.publicKey; // Still useful for identity
+    } else {
+        // Fallback: Legacy static encryption (for groups or if X3DH fails)
+        let recipientPubKey = await socketService.getPublicKey(recipientAddress) || fallbackPubKey;
+        
+        if (!recipientPubKey) {
+            // Queue for offline delivery in outbox (plaintext - re-encrypt on flush)
+            const outboxMsg = { ...payload, to: recipientAddress, content: plainText, status: 'pending', transport: 'queued' };
+            await savePendingMessage(outboxMsg);
+            const err = new Error('User is offline and has no pre-keys. Message queued.');
+            err.level = 'info';
+            throw err;
+        }
+
+        const legacy = encryptMessage(plainText, recipientPubKey, myKeys.secretKey);
+        payload.encrypted = legacy.encrypted;
+        payload.nonce = legacy.nonce;
+        payload.senderPublicKey = myKeys.publicKey;
+    }
 
     // Track for deduplication
     sentMessageIds.add(messageId);
 
-    // Try P2P first
-    const p2pSent = webrtcService.sendToPeer(recipientAddress, {
-        ...payload,
-        from: senderAddress,
-        to: recipientAddress,
-    });
+    // 4. Dispatch (P2P or Relay)
+    const p2pSent = webrtcService.sendToPeer(recipientAddress, { ...payload, to: recipientAddress });
 
     if (!p2pSent) {
-        // Hybrid: Use Relay
-        // Prefer Server Relay if connected
         if (socketService.isConnected()) {
             console.log('📡 Using server relay for message delivery');
             socketService.sendMessage(recipientAddress, payload);
         } else {
-            // Queue in outbox for later delivery instead of throwing
-            console.warn('⚠️ Server unreachable and P2P failed. Queuing message in outbox.');
-            const outboxMessage = {
-                ...payload,
-                from: senderAddress,
-                to: recipientAddress,
-                content: plainText,
-                status: 'pending',
-                type: metadata.type || 'text',
-            };
+            console.warn('⚠️ Both transports failed. Queuing in outbox.');
+            const outboxMessage = { ...payload, to: recipientAddress, content: plainText, status: 'pending' };
             await savePendingMessage(outboxMessage);
-            // Return with pending status instead of throwing
-            return {
-                id: messageId,
-                from: senderAddress,
-                to: recipientAddress,
-                content: plainText,
-                encrypted: encryptedData.encrypted,
-                nonce: encryptedData.nonce,
-                senderPublicKey: myKeys.publicKey,
-                senderUsername: senderUsername,
-                replyTo: replyTo,
-                timestamp: now,
-                status: 'pending',
-                transport: 'queued',
-                groupId: metadata.groupId,
-                groupName: metadata.groupName,
-                members: metadata.members,
-                type: metadata.type || 'text',
-            };
+            return { ...outboxMessage, status: 'pending', transport: 'queued' };
         }
     }
 
-    return {
-        id: messageId,
-        from: senderAddress,
-        to: recipientAddress,
-        content: plainText,
-        encrypted: encryptedData.encrypted,
-        nonce: encryptedData.nonce,
-        senderPublicKey: myKeys.publicKey,
-        senderUsername: senderUsername,
-        replyTo: replyTo,
-        timestamp: now,
-        status: 'sent',
-        transport: p2pSent ? 'p2p' : 'relay',
-        groupId: metadata.groupId,
-        groupName: metadata.groupName,
-        members: metadata.members,
-        type: metadata.type || 'text',
+    return { 
+        ...payload, 
+        to: recipientAddress, 
+        content: plainText, 
+        status: 'sent', 
+        transport: p2pSent ? 'p2p' : 'relay' 
     };
 }
 
@@ -235,47 +216,70 @@ export function onTypingStatus(callback) {
 }
 
 /**
- * Decrypt a received message
- * @param {Object} encryptedMessage - Message object
- * @param {Object} cachedKeys - Optional cached keys
- * @param {string} myAddress - Optional current user's address for sender detection
- * @returns {Promise<Object>} Decrypted message object
+ * Decrypt a received message with Ratchet support (Task 12)
  */
 export async function decryptReceivedMessage(encryptedMessage, cachedKeys = null, myAddress = null) {
     if (!encryptedMessage) return null;
 
     const myKeys = cachedKeys || await getStoredKeys();
-    if (!myKeys) {
-        throw new Error('No encryption keys found.');
-    }
+    if (!myKeys) throw new Error('No encryption keys found.');
 
     // Handle status-only updates
-    if (!encryptedMessage.encrypted && encryptedMessage.status) {
-        return {
-            ...encryptedMessage,
-            decryptionFailed: false
-        };
+    if (!encryptedMessage.encrypted && !encryptedMessage.ratchet && encryptedMessage.status) {
+        return { ...encryptedMessage, decryptionFailed: false };
     }
 
-    // Determine if I'm the sender - use passed address or keys.address
+    // --- TASK 12: Handle Ratchet / X3DH ---
+    if (encryptedMessage.ratchet) {
+        try {
+            if (encryptedMessage.x3dh) {
+                const { ephemeralKey, preKeyId } = encryptedMessage.x3dh;
+                console.log(`🤝 Responding to X3DH handshake from ${encryptedMessage.from.slice(0, 10)}...`);
+                
+                // Retrieve the OPK secret that the server consumed
+                let opkSecret = null;
+                if (preKeyId !== undefined && preKeyId !== null) {
+                    opkSecret = await consumePreKeySecret(preKeyId);
+                }
+
+                const peerIK = encryptedMessage.senderPublicKey || await socketService.getPublicKey(encryptedMessage.from);
+
+                // As responder, derive the same X3DH secret
+                // Roles are swapped: peer is initiator, we are responder
+                const sharedSecret = deriveX3DHSecret(
+                    myKeys,                      // my IK
+                    { secretKey: myKeys.secretKey }, // using IK for SPK slot
+                    peerIK,                       // peer IK
+                    ephemeralKey,                  // peer EK (as SPK stand-in)
+                    opkSecret ? undefined : null   // OPK if available
+                );
+
+                // Use the RESPONDER session creator (properly initializes recvChainKey)
+                await createSessionResponder(
+                    encryptedMessage.from,
+                    sharedSecret,
+                    encryptedMessage.ratchet.header.ratchetKey
+                );
+            }
+
+            const decrypted = await decryptRatchet(encryptedMessage.from, encryptedMessage.ratchet);
+            if (decrypted) {
+                return { ...encryptedMessage, content: decrypted, decryptionFailed: false };
+            }
+        } catch (err) {
+            console.error('Ratchet decryption failed:', err);
+        }
+    }
+
+    // --- Legacy Decryption Fallback ---
     const walletAddress = myAddress || myKeys.address;
-    const iAmSender = walletAddress &&
-        encryptedMessage.from?.toLowerCase() === walletAddress.toLowerCase();
-
-    // Get the appropriate public key for decryption
+    const iAmSender = walletAddress && encryptedMessage.from?.toLowerCase() === walletAddress.toLowerCase();
+    
     let otherPartyPublicKey = encryptedMessage.senderPublicKey;
-
-    // If I'm the sender, I need recipient's public key to decrypt
-    if (iAmSender) {
-        otherPartyPublicKey = await socketService.getPublicKey(encryptedMessage.to);
-    }
+    if (iAmSender) otherPartyPublicKey = await socketService.getPublicKey(encryptedMessage.to);
 
     if (!otherPartyPublicKey) {
-        return {
-            ...encryptedMessage,
-            content: '[Unable to decrypt: key not found]',
-            decryptionFailed: true
-        };
+        return { ...encryptedMessage, content: '[Unable to decrypt: sender key not found]', decryptionFailed: true };
     }
 
     try {
@@ -286,20 +290,35 @@ export async function decryptReceivedMessage(encryptedMessage, cachedKeys = null
             myKeys.secretKey
         );
 
-        return {
-            ...encryptedMessage,
-            content: decryptedContent,
-            decryptionFailed: false,
-            type: encryptedMessage.type || 'text'
-        };
+        if (!decryptedContent) {
+            return { ...encryptedMessage, content: '[Unable to decrypt message - Key mismatch]', decryptionFailed: true };
+        }
+
+        return { ...encryptedMessage, content: decryptedContent, decryptionFailed: false, type: encryptedMessage.type || 'text' };
     } catch (err) {
-        console.error('Decryption failed:', err);
-        return {
-            ...encryptedMessage,
-            content: '[Decryption Failed]',
-            decryptionFailed: true
-        };
+        return { ...encryptedMessage, content: '[Decryption Error]', decryptionFailed: true };
     }
+}
+
+/**
+ * Proactively verify if a recipient's public key has changed on the server
+ * @param {string} address - Recipient address
+ * @param {Object} localContact - Current local contact record
+ * @returns {Promise<boolean>} True if key changed, false otherwise
+ */
+export async function verifyRecipientKey(address, localContact) {
+    if (!address || !socketService.isConnected()) return false;
+
+    try {
+        const serverKey = await socketService.getPublicKey(address);
+        if (serverKey && localContact && serverKey !== localContact.publicKey) {
+            console.warn(`🔐 Security Key Change detected for ${address?.slice(0, 10)}!`);
+            return true;
+        }
+    } catch (err) {
+        console.warn('Failed to verify recipient key:', err);
+    }
+    return false;
 }
 
 /**
@@ -361,12 +380,6 @@ export async function searchUser(query) {
         return await socketService.getUser(trimmed);
     }
 
-    // Search by Discussion ID (WORD-WORD-NN format)
-    if (/^[A-Z]+-[A-Z]+-\d{1,2}$/i.test(trimmed)) {
-        const result = await socketService.lookupByDiscussionId(trimmed.toUpperCase());
-        if (result) return result;
-    }
-
     // Search by username
     if (trimmed.length >= 3) {
         const username = trimmed.startsWith('@') ? trimmed.slice(1) : trimmed;
@@ -423,7 +436,7 @@ export async function flushPendingMessages(senderAddress, onFlushed = null) {
 
             // If the message was queued without encryption (recipient was offline),
             // encrypt it now using the recipient's public key
-            if (!encrypted && msg.content) {
+            if (!encrypted && msg.content && !msg.ratchet) {
                 const recipientPubKey = await socketService.getPublicKey(msg.to);
                 if (!recipientPubKey) {
                     // Recipient still not available — keep in outbox
@@ -438,18 +451,10 @@ export async function flushPendingMessages(senderAddress, onFlushed = null) {
             }
 
             const relayPayload = {
-                id: msg.id,
+                ...msg,
                 encrypted: encrypted,
                 nonce: nonce,
                 senderPublicKey: msg.senderPublicKey || myKeys.publicKey,
-                senderUsername: msg.senderUsername,
-                replyTo: msg.replyTo,
-                timestamp: msg.timestamp,
-                groupId: msg.groupId,
-                groupName: msg.groupName,
-                members: msg.members,
-                from: msg.from,
-                type: msg.type || 'text',
             };
 
             socketService.sendMessage(msg.to, relayPayload);
@@ -471,18 +476,20 @@ export async function flushPendingMessages(senderAddress, onFlushed = null) {
  * Send a delivery receipt
  * @param {string} senderAddress - Original sender's address
  * @param {string} messageId
+ * @param {string} chatId - (Optional) Conversation container ID
  */
-export function sendDeliveryReceipt(senderAddress, messageId) {
-    socketService.sendReceipt(messageId, senderAddress, 'delivered');
+export function sendDeliveryReceipt(senderAddress, messageId, chatId = null) {
+    socketService.sendReceipt(messageId, senderAddress, 'delivered', chatId);
 }
 
 /**
  * Send a read receipt
  * @param {string} senderAddress - Original sender's address
  * @param {string} messageId
+ * @param {string} chatId - (Optional) Conversation container ID
  */
-export function sendReadReceipt(senderAddress, messageId) {
-    socketService.sendReceipt(messageId, senderAddress, 'read');
+export function sendReadReceipt(senderAddress, messageId, chatId = null) {
+    socketService.sendReceipt(messageId, senderAddress, 'read', chatId);
 }
 
 /**

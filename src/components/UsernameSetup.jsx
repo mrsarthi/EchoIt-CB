@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { setUsername as setUsernameOnServer } from '../services/socketService';
 import './UsernameSetup.css';
 
-export function UsernameSetup({ onComplete, onSkip }) {
+export function UsernameSetup({ onComplete }) {
     const [username, setUsername] = useState('');
     const [error, setError] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -98,14 +98,7 @@ export function UsernameSetup({ onComplete, onSkip }) {
                             )}
                         </button>
 
-                        <button
-                            type="button"
-                            className="btn btn-ghost"
-                            onClick={onSkip}
-                            disabled={isSubmitting}
-                        >
-                            Skip for now
-                        </button>
+
                     </div>
                 </form>
             </div>

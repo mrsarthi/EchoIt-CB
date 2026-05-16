@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { App as CapacitorApp } from '@capacitor/app';
 import {
     initMessaging,
     sendEncryptedMessage,
@@ -110,7 +112,7 @@ export function useChat(myAddress) {
         setActiveChat({ address: groupId, info: groupContact, isGroup: true, members: groupContact.members });
 
         // Notify all members via the server so it shows up on their devices
-        emitCreateGroup(groupId, groupName, allMembers, [myAddress]);
+        emitCreateGroup(groupId, groupName, allMembers, [myAddress], null);
 
         return groupContact;
     }, [myAddress]);
@@ -151,9 +153,13 @@ export function useChat(myAddress) {
             await deleteGroup(groupId);
             return;
         }
+
+        let currentMembers = [];
+
         // Update the members list in contacts
         setContacts(prev => prev.map(c => {
             if (c.address === groupId && c.isGroup) {
+                currentMembers = c.members || [];
                 return {
                     ...c,
                     members: (c.members || []).filter(
@@ -163,6 +169,12 @@ export function useChat(myAddress) {
             }
             return c;
         }));
+
+        // Notify server to update registry and broadcast
+        import('../services/socketService').then(({ emitRemoveGroupMember }) => {
+            emitRemoveGroupMember(groupId, memberAddress, currentMembers);
+        });
+
         // Also update active chat if this group is open
         if (activeChatRef.current?.address === groupId) {
             setActiveChat(prev => ({
@@ -267,6 +279,84 @@ export function useChat(myAddress) {
             // Set "Member Since" date (first-time only)
             await setJoinedAt(Date.now());
 
+            // --- TASK 6: Group Syncing from Server Registry ---
+            const syncGroups = async () => {
+                try {
+                    const { getMyGroups } = await import('../services/socketService');
+                    const serverGroups = await getMyGroups();
+                    if (serverGroups && serverGroups.length > 0) {
+                        setContacts(prev => {
+                            const newContacts = [...prev];
+                            let changed = false;
+
+                            serverGroups.forEach(sg => {
+                                const existing = prev.find(c => c.address.toLowerCase() === sg.address.toLowerCase());
+                                if (!existing) {
+                                    newContacts.push(sg);
+                                    changed = true;
+                                } else if (JSON.stringify(existing.members) !== JSON.stringify(sg.members)) {
+                                    // Update member list if changed
+                                    const idx = newContacts.findIndex(c => c.address.toLowerCase() === sg.address.toLowerCase());
+                                    newContacts[idx] = { ...existing, members: sg.members };
+                                    changed = true;
+                                }
+                            });
+
+                            return changed ? newContacts : prev;
+                        });
+                        console.log(`👥 Synced ${serverGroups.length} groups from server registry.`);
+                    }
+                } catch (err) {
+                    console.error('Failed to sync groups:', err);
+                }
+            };
+
+            // Sync immediately and on every reconnection
+            syncGroups();
+            const unsubReconnectGroups = onReconnect(syncGroups);
+
+            // --- TASK 11: Group History Catch-up ---
+            const catchUpGroups = async () => {
+                const currentContacts = await getSavedContacts();
+                const groupChats = currentContacts.filter(c => c.isGroup);
+                
+                for (const group of groupChats) {
+                    try {
+                        const { getMessagesPaginated } = await import('../services/storageService');
+                        const localMsgs = await getMessagesPaginated(group.address, 1);
+                        const lastSeq = localMsgs.length > 0 ? (localMsgs[0].sequence_no || 0) : 0;
+                        
+                        console.log(`🔄 Catching up group ${group.address.slice(0, 8)} from seq ${lastSeq}...`);
+                        const missed = await socketService.syncGroup(group.address, lastSeq);
+                        
+                        if (missed && missed.length > 0) {
+                            console.log(`📥 Integrating ${missed.length} missed messages for group ${group.address.slice(0, 8)}`);
+                            for (const msg of missed) {
+                                await saveMessage(group.address, msg);
+                            }
+                            
+                            // If this is the active chat, update the UI
+                            if (activeChatRef.current?.address?.toLowerCase() === group.address.toLowerCase()) {
+                                setMessages(prev => {
+                                    const newMsgs = [...prev];
+                                    missed.forEach(m => {
+                                        if (!newMsgs.some(em => em.id === m.id)) {
+                                            newMsgs.push(m);
+                                        }
+                                    });
+                                    return newMsgs.sort((a, b) => a.timestamp - b.timestamp);
+                                });
+                            }
+                        }
+                    } catch (err) {
+                        console.error(`Catch-up failed for group ${group.address}:`, err);
+                    }
+                }
+            };
+
+            catchUpGroups();
+            const unsubReconnectCatchup = onReconnect(catchUpGroups);
+
             // Load persist contacts immediately
             const cachedContacts = await getSavedContacts();
             if (mounted && cachedContacts.length > 0) {
@@ -341,37 +431,68 @@ export function useChat(myAddress) {
 
             subscribeToMessages(async (msg) => {
                 const contactId = msg.groupId || msg.from;
+                
+                // Task 3: Emergency Key Refresh for decryption failures
+                let processedMsg = msg;
+                if (processedMsg.decryptionFailed && !processedMsg.isRetry && !processedMsg.groupId) {
+                    console.log(`🔍 Decryption failed for message from ${processedMsg.from?.slice(0, 10)}. Triggering emergency key refresh...`);
+                    try {
+                        const { verifyRecipientKey, decryptReceivedMessage } = await import('../services/messageService');
+                        const contact = contacts.find(c => c.address.toLowerCase() === processedMsg.from?.toLowerCase());
+                        const changed = await verifyRecipientKey(processedMsg.from, contact);
+                        
+                        if (changed) {
+                            // If key changed, try one more time (though if they used our old key, this still fails)
+                            // But if WE are the sender loading history, this is crucial.
+                            const retried = await decryptReceivedMessage({ ...processedMsg, isRetry: true }, keysRef.current, myAddress);
+                            if (!retried.decryptionFailed) {
+                                processedMsg = retried;
+                                console.log('✅ Emergency key refresh recovered the message!');
+                            }
+                        }
+                    } catch (err) {
+                        console.error('Emergency key refresh failed:', err);
+                    }
+                }
+
                 console.log('📨 Received message:', {
-                    id: msg.id,
-                    from: msg.from,
-                    to: msg.to,
-                    groupId: msg.groupId,
+                    id: processedMsg.id,
+                    from: processedMsg.from,
+                    to: processedMsg.to,
+                    groupId: processedMsg.groupId,
                     contactId,
-                    content: msg.content?.slice(0, 20)
+                    content: processedMsg.content?.slice(0, 20)
                 });
+
+                // Determine if the chat is actively open to mark it read instantly in storage
+                const isActive = activeChatRef.current?.address?.toLowerCase() === contactId?.toLowerCase();
+                if (processedMsg.from && processedMsg.from.toLowerCase() !== myAddress.toLowerCase()) {
+                    if (isActive) {
+                        processedMsg.status = 'read'; 
+                    }
+                }
 
                 // Save to local storage immediately
                 try {
-                    await saveMessage(contactId, msg);
-                    if (msg.id) ackOfflineMessages([msg.id]);
+                    await saveMessage(contactId, processedMsg);
+                    if (processedMsg.id) ackOfflineMessages([processedMsg.id]);
                     console.log(`💾 Persisted incoming message from ${contactId}`);
                 } catch (err) {
                     console.error('❌ Failed to persist incoming message:', err);
                 }
 
-                // Send delivery receipt (only for DMs to avoid storm)
-                if (!msg.groupId && msg.from && msg.from.toLowerCase() !== myAddress.toLowerCase()) {
-                    sendDeliveryReceipt(msg.from, msg.id);
-                    // Check if chat is actively open
-                    if (activeChatRef.current?.address?.toLowerCase() === msg.from.toLowerCase()) {
-                        sendReadReceipt(msg.from, msg.id);
+                // Send delivery receipts (for DMs and Groups)
+                if (processedMsg.from && processedMsg.from.toLowerCase() !== myAddress.toLowerCase()) {
+                    sendDeliveryReceipt(processedMsg.from, processedMsg.id, contactId);
+                    if (isActive) {
+                        sendReadReceipt(processedMsg.from, processedMsg.id, contactId);
                     }
                 }
 
                 // Handle incoming message
                 setMessages(prev => {
-                    const exists = prev.some(m => m.id === msg.id);
-                    if (exists) return prev.map(m => m.id === msg.id ? msg : m);
+                    const exists = prev.some(m => m.id === processedMsg.id);
+                    if (exists) return prev.map(m => m.id === processedMsg.id ? processedMsg : m);
 
                     // Filter: Only add if it belongs to current active chat
                     const activeAddress = activeChatRef.current?.address?.toLowerCase();
@@ -382,23 +503,18 @@ export function useChat(myAddress) {
 
                     if (isActiveGroup) {
                         // Active chat is Group. Msg must match group ID.
-                        isRelevant = msg.groupId === activeAddress;
+                        isRelevant = processedMsg.groupId === activeAddress;
                     } else {
                         // Active chat is DM. Msg must be DM (no groupId) and match contact address.
                         // Either from contact OR sent by me to contact
-                        if (!msg.groupId) {
-                            isRelevant = (msg.from?.toLowerCase() === activeAddress) ||
-                                (msg.to?.toLowerCase() === activeAddress);
+                        if (!processedMsg.groupId) {
+                            isRelevant = (processedMsg.from?.toLowerCase() === activeAddress) ||
+                                (processedMsg.to?.toLowerCase() === activeAddress);
                         }
                     }
 
-                    // Note: We usually add all messages to state? No, standard pattern here 
-                    // seems to be determining if we should show it. 
-                    // Actually, the original code loaded history on open. 
-                    // `messages` state IS only for the active chat.
-
                     if (isRelevant) {
-                        return [...prev, msg];
+                        return [...prev, processedMsg];
                     }
                     return prev;
                 });
@@ -604,13 +720,22 @@ export function useChat(myAddress) {
 
             // ... (rest of init - receipts, connection, status) ...
             // Copying existing receipt/connection logic...
-            onMessageReceipt(({ messageId, type, from }) => {
-                setMessages(prev => prev.map(m => m.id === messageId ? { ...m, status: type } : m));
+            onMessageReceipt(({ messageId, type, from, chatId }) => {
+                // Update local state if the chat is currently active
+                setMessages(prev => prev.map(m => {
+                    if (m.id === messageId) {
+                        const newReceipts = { ...(m.receipts || {}) };
+                        newReceipts[from.toLowerCase()] = type;
+                        return { ...m, receipts: newReceipts };
+                    }
+                    return m;
+                }));
                 
                 // Persist the receipt into storage so it survives app restarts
                 if (from && messageId) {
                     import('../services/storageService').then(s => {
-                         s.updateMessageStatus(from, [messageId], type).catch(err => console.debug('Failed updating receipt:', err));
+                         // Pass chatId to enable localized high-performance writes to both DB versions
+                         s.updateMessageReceipt(chatId, [messageId], from, type).catch(err => console.debug('Failed updating receipt:', err));
                     });
                 }
             });
@@ -765,27 +890,42 @@ export function useChat(myAddress) {
             });
         })();
 
-        // Send read receipts when window gains focus
+        // Send read receipts when window gains focus OR Android app is resumed from background
         const handleFocus = () => {
             const chat = activeChatRef.current;
-            if (!chat || chat.isGroup) return;
+            if (!chat) return;
 
-            // Get current messages and send read receipts for unread incoming ones
+            // Get current messages and send read receipts for all unread incoming messages
             setMessages(prev => {
                 const unread = prev.filter(m =>
-                    m.from?.toLowerCase() === chat.address?.toLowerCase() &&
+                    m.from?.toLowerCase() !== myAddress?.toLowerCase() &&
                     m.status !== 'read'
                 );
-                unread.forEach(m => sendReadReceipt(m.from, m.id));
+                // Pass active conversation address as the chatId scope
+                unread.forEach(m => sendReadReceipt(m.from, m.id, chat.address));
                 return prev;
             });
         };
+
         window.addEventListener('focus', handleFocus);
 
+        // Bridge native Android Capacitor app state wake cycles to handleFocus
+        let nativeListener = null;
+        if (Capacitor.isNativePlatform()) {
+            nativeListener = CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+                if (isActive) {
+                    console.log('📱 Android App Wake detected. Refreshing read receipts.');
+                    handleFocus();
+                }
+            });
+        }
 
         return () => {
             mounted = false;
             window.removeEventListener('focus', handleFocus);
+            if (nativeListener) {
+                nativeListener.then(l => l.remove()).catch(() => {});
+            }
             if (statusUnsubscribeRef.current) statusUnsubscribeRef.current();
             if (reconnectUnsubscribeRef.current) reconnectUnsubscribeRef.current();
             // Clear typing timeouts
@@ -834,17 +974,23 @@ export function useChat(myAddress) {
                             groupId: activeChat.address,
                             groupName: activeChat.info?.username || 'Group',
                             members: activeChat.members, // Propagate members list
-                            type: type
+                            type: type,
+                            ...metadata // Forward mediaId, manifest, etc.
                         }
                     ));
 
-                await Promise.all(promises);
+                const results = await Promise.allSettled(promises);
+                const failedCount = results.filter(r => r.status === 'rejected').length;
+                if (failedCount > 0) {
+                    console.warn(`[Group] Message delivery failed for ${failedCount} members (they may be offline), but proceeded for the rest.`);
+                }
 
                 // Add to local state
                 const sentMessage = {
                     id: `msg_${start}_${myAddress}`, // Pseudo ID
                     from: myAddress,
                     content,
+                    replyTo, // Link parent message context for proper threaded rendering locally
                     timestamp: start,
                     status: 'sent',
                     groupId: activeChat.address,
@@ -864,7 +1010,7 @@ export function useChat(myAddress) {
                     activeChat.address,
                     content,
                     replyTo,
-                    { type: type },
+                    { type: type, ...metadata }, // Forward mediaId, manifest, etc.
                     activeChat.publicKey // Inject caller-level fallback key
                 );
                 // Attach metadata (mediaId) to the persisted message
@@ -914,6 +1060,26 @@ export function useChat(myAddress) {
             isGroup: contact?.isGroup || false,
             members: contact?.members || []
         });
+
+        // Task 3: Proactive Key Verification (Ghost Key Shield)
+        if (contact && !contact.isGroup) {
+            import('../services/messageService').then(async ({ verifyRecipientKey }) => {
+                const changed = await verifyRecipientKey(address, contact);
+                if (changed) {
+                    // Update local contact record with the fresh key if we can
+                    const { getUser } = await import('../services/socketService');
+                    const freshUser = await getUser(address);
+                    if (freshUser) {
+                        setContacts(prev => prev.map(c => 
+                            c.address.toLowerCase() === address.toLowerCase() 
+                                ? { ...c, publicKey: freshUser.publicKey, isVerified: false } 
+                                : c
+                        ));
+                        console.log(`🔐 Contact ${address?.slice(0, 10)} public key updated proactively. RESETTING verification.`);
+                    }
+                }
+            }).catch(err => console.debug('Key verification failed:', err));
+        }
 
         // Load messages for this chat
         setMessages([]);
@@ -966,20 +1132,29 @@ export function useChat(myAddress) {
                 merged = merged.filter(m => !m.groupId);
             }
 
-            setMessages(merged.map(m => {
-                // Send explicit read receipts for missed incoming messages that we are now opening
-                if (m.from?.toLowerCase() === address.toLowerCase()) {
-                    if (m.status !== 'read') {
-                        sendReadReceipt(m.from, m.id);
-                    }
+            const unreadIds = [];
+            const mappedMessages = merged.map(m => {
+                // Send explicit read receipts for missed incoming messages (Groups or DMs) that we are now opening
+                const isIncoming = m.from?.toLowerCase() !== myAddress?.toLowerCase();
+                if (isIncoming && m.status !== 'read') {
+                    // Pass active conversation address as the chatId scope for direct writes
+                    sendReadReceipt(m.from, m.id, address);
+                    unreadIds.push(m.id);
                     return {
                         ...m,
                         status: 'read'
                     };
                 }
-                // Preserve the original status for messages we sent
                 return m;
-            }));
+            });
+
+            setMessages(mappedMessages);
+
+            // Persist the read status locally so we don't re-emit receipts next session
+            if (unreadIds.length > 0) {
+                const { updateMessageReceipt } = await import('../services/storageService');
+                updateMessageReceipt(address, unreadIds, myAddress, 'read').catch(e => console.debug('Local status persistence failed', e));
+            }
         } catch (err) {
             console.error('Error loading chat:', err);
         } finally {
@@ -1105,6 +1280,30 @@ export function useChat(myAddress) {
         setTypingStatus({});
     }, []);
 
+    // --- Task 10: Verify Peer Identity ---
+    const verifyContact = useCallback(async (address, isVerified) => {
+        if (!address) return;
+        
+        setContacts(prev => {
+            const next = prev.map(c => 
+                c.address.toLowerCase() === address.toLowerCase() 
+                    ? { ...c, isVerified } 
+                    : c
+            );
+            return next;
+        });
+
+        // Update active chat if it matches
+        if (activeChatRef.current?.address?.toLowerCase() === address.toLowerCase()) {
+            setActiveChat(prev => ({
+                ...prev,
+                info: { ...prev.info, isVerified }
+            }));
+        }
+
+        console.log(`🛡️ Verification status for ${address.slice(0, 10)} set to: ${isVerified}`);
+    }, []);
+
 
     return {
         activeChat,
@@ -1132,6 +1331,7 @@ export function useChat(myAddress) {
         myStatus,
         saveProfile,
         updateGroupAvatar,
+        verifyContact, // Task 10
         clearError: () => setError(null),
     };
 }

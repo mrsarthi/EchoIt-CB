@@ -1,89 +1,213 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en" class="dark scroll-smooth">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="White-label E2EE chat SDK for Desktop and Android. TweetNaCl cryptography, zero-knowledge relay, production-ready for IP acquisition.">
+    <meta name="theme-color" content="#111827">
+    <meta property="og:title" content="DecentraChat — Zero-Knowledge Chat Infrastructure">
+    <meta property="og:description" content="Production-ready, white-label E2EE messaging. Native apps, no central message store, acquisition-ready codebase.">
+    <meta property="og:type" content="website">
     <title>DecentraChat - Secure White-Label Chat SDK</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
             darkMode: 'class',
             theme: {
                 extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+                    },
                     colors: {
                         brand: {
+                            400: '#818cf8',
                             500: '#6366f1',
                             600: '#4f46e5',
                         }
-                    }
+                    },
+                    boxShadow: {
+                        glow: '0 0 80px -20px rgba(99, 102, 241, 0.45)',
+                    },
                 }
             }
         }
     </script>
     <style>
+        .mesh-bg {
+            background-color: #111827;
+            background-image:
+                radial-gradient(ellipse 80% 50% at 50% -20%, rgba(99, 102, 241, 0.22), transparent),
+                radial-gradient(ellipse 60% 40% at 100% 0%, rgba(79, 70, 229, 0.12), transparent),
+                radial-gradient(ellipse 50% 30% at 0% 20%, rgba(99, 102, 241, 0.08), transparent);
+        }
         .glass {
-            background: rgba(17, 24, 39, 0.7);
-            backdrop-filter: blur(10px);
+            background: rgba(17, 24, 39, 0.72);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .glass-strong {
+            background: rgba(17, 24, 39, 0.88);
+            backdrop-filter: blur(14px);
             border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        /* Skip link: visible on keyboard focus (Tailwind has no focus:not-sr-only) */
+        .skip-link {
+            position: fixed;
+            left: 1rem;
+            top: 1rem;
+            z-index: 60;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            background: #4f46e5;
+            color: #fff;
+            font-weight: 600;
+            font-size: 0.875rem;
+            transform: translateY(calc(-100% - 2.5rem));
+            opacity: 0;
+            pointer-events: none;
+            transition: transform 0.15s ease, opacity 0.15s ease;
+            outline: none;
+            box-shadow: 0 0 0 2px #111827, 0 0 0 4px #818cf8;
+        }
+        .skip-link:focus {
+            transform: translateY(0);
+            opacity: 1;
+            pointer-events: auto;
         }
     </style>
 </head>
-<body class="bg-gray-900 text-white font-sans antialiased selection:bg-brand-500 selection:text-white min-h-screen flex flex-col">
-    
-    <!-- Navbar -->
-    <nav class="w-full border-b border-gray-800 bg-gray-900/80 backdrop-blur fixed top-0 z-50">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-            <div class="flex items-center gap-2">
-                <svg class="w-8 h-8 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
-                <span class="font-bold text-xl tracking-tight">DecentraChat</span>
-            </div>
-            <a href="#contact" class="text-sm font-medium text-gray-300 hover:text-white transition">Acquire Codebase</a>
-        </div>
-    </nav>
+<body class="mesh-bg text-white font-sans antialiased selection:bg-brand-500 selection:text-white min-h-screen flex flex-col">
 
-    <!-- Hero Section -->
-    <main class="flex-grow pt-32 pb-16 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto text-center">
-        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-brand-500/10 text-brand-500 text-sm font-medium mb-8 border border-brand-500/20">
-            <span class="w-2 h-2 rounded-full bg-brand-500 animate-pulse"></span>
-            Available for Acquisition
+    <a href="#main" class="skip-link">Skip to content</a>
+
+    <header>
+        <nav class="w-full border-b border-gray-800/80 bg-gray-900/75 backdrop-blur-md fixed top-0 z-50 shadow-sm shadow-black/20" aria-label="Primary">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
+                <a href="#main" class="flex items-center gap-2 shrink-0 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900">
+                    <svg class="w-8 h-8 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
+                    <span class="font-bold text-xl tracking-tight">DecentraChat</span>
+                </a>
+                <div class="hidden sm:flex items-center gap-8 text-sm font-medium text-gray-400">
+                    <a href="#features" class="hover:text-white transition-colors focus:outline-none focus-visible:text-white focus-visible:underline underline-offset-4">Capabilities</a>
+                    <a href="#stack" class="hover:text-white transition-colors focus:outline-none focus-visible:text-white focus-visible:underline underline-offset-4">Stack</a>
+                    <a href="#contact" class="text-white hover:text-brand-400 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 rounded px-1">Acquire</a>
+                </div>
+                <a href="#contact" class="text-sm font-semibold text-white bg-brand-600 hover:bg-brand-500 px-4 py-2 rounded-lg transition-colors shadow-glow focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900">Acquire codebase</a>
+            </div>
+        </nav>
+    </header>
+
+    <main id="main" class="flex-grow pt-28 sm:pt-32 pb-20 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto w-full" tabindex="-1">
+        <div class="text-center max-w-4xl mx-auto">
+            <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-brand-500/10 text-brand-400 text-sm font-medium mb-8 border border-brand-500/25">
+                <span class="w-2 h-2 rounded-full bg-brand-500 animate-pulse" aria-hidden="true"></span>
+                Available for acquisition
+            </div>
+            <h1 class="text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-extrabold tracking-tight mb-6 bg-clip-text text-transparent bg-gradient-to-b from-white via-white to-gray-500 leading-[1.1]">
+                Zero-knowledge chat infrastructure.
+            </h1>
+            <p class="text-lg sm:text-xl text-gray-400 max-w-2xl mx-auto mb-10 leading-relaxed">
+                A production-ready, white-label E2EE messaging SDK. Native Desktop and Android, no central message store, and cryptography you can explain to security teams.
+            </p>
+            <div class="flex flex-col sm:flex-row items-center justify-center gap-4">
+                <a href="#contact" class="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-3.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-semibold transition-colors shadow-glow focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900">
+                    Discuss acquisition
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"></path></svg>
+                </a>
+                <a href="#features" class="w-full sm:w-auto inline-flex items-center justify-center px-8 py-3.5 rounded-xl border border-gray-600 text-gray-200 hover:bg-gray-800/80 hover:border-gray-500 font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900">
+                    View capabilities
+                </a>
+            </div>
         </div>
-        <h1 class="text-5xl md:text-7xl font-extrabold tracking-tight mb-6 bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-500">
-            Zero-Knowledge <br/> Chat Infrastructure.
-        </h1>
-        <p class="text-xl text-gray-400 max-w-2xl mx-auto mb-10">
-            A production-ready, white-label E2EE messaging SDK. Built for Desktop and Android natively. Zero central database, pure cryptographic privacy.
-        </p>
-        
-        <!-- Feature Grid -->
-        <div class="grid md:grid-cols-3 gap-6 text-left mt-16">
-            <div class="glass p-6 rounded-2xl">
-                <div class="w-12 h-12 bg-gray-800 rounded-lg flex items-center justify-center mb-4 border border-gray-700">
-                    <svg class="w-6 h-6 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
-                </div>
-                <h3 class="font-bold text-lg mb-2">Military-Grade E2EE</h3>
-                <p class="text-gray-400 text-sm">Powered by TweetNaCl (X25519 ECDH + XSalsa20 + Poly1305). Keys never leave the client device.</p>
+
+        <dl class="grid grid-cols-2 lg:grid-cols-4 gap-4 max-w-5xl mx-auto mt-20 text-center">
+            <div class="glass rounded-2xl p-5 sm:p-6">
+                <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 mb-1">Crypto</dt>
+                <dd class="text-lg sm:text-xl font-bold text-white">TweetNaCl</dd>
+                <dd class="text-xs text-gray-500 mt-1">X25519 · XSalsa20 · Poly1305</dd>
             </div>
-            <div class="glass p-6 rounded-2xl">
-                <div class="w-12 h-12 bg-gray-800 rounded-lg flex items-center justify-center mb-4 border border-gray-700">
-                    <svg class="w-6 h-6 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
-                </div>
-                <h3 class="font-bold text-lg mb-2">Zero-Knowledge Relay</h3>
-                <p class="text-gray-400 text-sm">Socket.IO signaling daemon handles ephemeral routing. The server wipes its memory every 15 minutes.</p>
+            <div class="glass rounded-2xl p-5 sm:p-6">
+                <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 mb-1">Relay</dt>
+                <dd class="text-lg sm:text-xl font-bold text-white">Ephemeral</dd>
+                <dd class="text-xs text-gray-500 mt-1">Socket.IO signaling</dd>
             </div>
-            <div class="glass p-6 rounded-2xl">
-                <div class="w-12 h-12 bg-gray-800 rounded-lg flex items-center justify-center mb-4 border border-gray-700">
-                    <svg class="w-6 h-6 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>
-                </div>
-                <h3 class="font-bold text-lg mb-2">Native Android & Desktop</h3>
-                <p class="text-gray-400 text-sm">Built with React 18 and Capacitor. Features Mutex-locked IndexedDB for resilient offline queuing.</p>
+            <div class="glass rounded-2xl p-5 sm:p-6">
+                <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 mb-1">Clients</dt>
+                <dd class="text-lg sm:text-xl font-bold text-white">Native</dd>
+                <dd class="text-xs text-gray-500 mt-1">Android &amp; desktop</dd>
             </div>
-        </div>
+            <div class="glass rounded-2xl p-5 sm:p-6 col-span-2 lg:col-span-1">
+                <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 mb-1">Offline</dt>
+                <dd class="text-lg sm:text-xl font-bold text-white">Resilient</dd>
+                <dd class="text-xs text-gray-500 mt-1">Mutex-safe IndexedDB queue</dd>
+            </div>
+        </dl>
+
+        <section id="features" class="scroll-mt-28 mt-24" aria-labelledby="features-heading">
+            <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-10 text-center sm:text-left">
+                <div>
+                    <h2 id="features-heading" class="text-2xl sm:text-3xl font-bold tracking-tight">Built for teams who ship secure chat</h2>
+                    <p class="text-gray-400 mt-2 max-w-xl mx-auto sm:mx-0">Privacy properties, native performance, and ops-friendly relay behavior—without rebuilding cryptography from scratch.</p>
+                </div>
+            </div>
+            <div class="grid md:grid-cols-3 gap-6 text-left">
+                <article class="glass p-6 sm:p-7 rounded-2xl transition-all duration-300 hover:border-brand-500/25 hover:shadow-lg hover:shadow-brand-500/5 group">
+                    <div class="w-12 h-12 bg-gray-800/80 rounded-xl flex items-center justify-center mb-5 border border-gray-700/80 group-hover:border-brand-500/30 transition-colors">
+                        <svg class="w-6 h-6 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+                    </div>
+                    <h3 class="font-bold text-lg mb-2">End-to-end by default</h3>
+                    <p class="text-gray-400 text-sm leading-relaxed">TweetNaCl (X25519 ECDH, XSalsa20-Poly1305). Keys stay on-device; the relay never sees plaintext.</p>
+                </article>
+                <article class="glass p-6 sm:p-7 rounded-2xl transition-all duration-300 hover:border-brand-500/25 hover:shadow-lg hover:shadow-brand-500/5 group">
+                    <div class="w-12 h-12 bg-gray-800/80 rounded-xl flex items-center justify-center mb-5 border border-gray-700/80 group-hover:border-brand-500/30 transition-colors">
+                        <svg class="w-6 h-6 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                    </div>
+                    <h3 class="font-bold text-lg mb-2">Zero-knowledge relay</h3>
+                    <p class="text-gray-400 text-sm leading-relaxed">Socket.IO for signaling and routing. Designed for minimal retention and periodic memory hygiene on the daemon.</p>
+                </article>
+                <article class="glass p-6 sm:p-7 rounded-2xl transition-all duration-300 hover:border-brand-500/25 hover:shadow-lg hover:shadow-brand-500/5 group">
+                    <div class="w-12 h-12 bg-gray-800/80 rounded-xl flex items-center justify-center mb-5 border border-gray-700/80 group-hover:border-brand-500/30 transition-colors">
+                        <svg class="w-6 h-6 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>
+                    </div>
+                    <h3 class="font-bold text-lg mb-2">Native Android &amp; desktop</h3>
+                    <p class="text-gray-400 text-sm leading-relaxed">React 18 and Capacitor. Mutex-locked IndexedDB for offline-safe send queues and predictable recovery.</p>
+                </article>
+            </div>
+        </section>
+
+        <section id="stack" class="scroll-mt-28 mt-20 text-center" aria-labelledby="stack-heading">
+            <h2 id="stack-heading" class="sr-only">Technology stack</h2>
+            <p class="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">Ships with</p>
+            <div class="flex flex-wrap justify-center gap-2 sm:gap-3 max-w-3xl mx-auto">
+                <span class="px-4 py-2 rounded-full bg-gray-800/80 border border-gray-700 text-sm text-gray-300">React 18</span>
+                <span class="px-4 py-2 rounded-full bg-gray-800/80 border border-gray-700 text-sm text-gray-300">Capacitor</span>
+                <span class="px-4 py-2 rounded-full bg-gray-800/80 border border-gray-700 text-sm text-gray-300">Socket.IO</span>
+                <span class="px-4 py-2 rounded-full bg-gray-800/80 border border-gray-700 text-sm text-gray-300">TweetNaCl</span>
+                <span class="px-4 py-2 rounded-full bg-gray-800/80 border border-gray-700 text-sm text-gray-300">IndexedDB</span>
+            </div>
+        </section>
+
+        <section id="contact" class="scroll-mt-28 mt-24 max-w-2xl mx-auto" aria-labelledby="contact-heading">
+            <div class="glass-strong rounded-3xl p-8 sm:p-10 text-center shadow-glow border-brand-500/10">
+                <h2 id="contact-heading" class="text-2xl sm:text-3xl font-bold mb-3">Acquire the full IP</h2>
+                <p class="text-gray-400 mb-8 leading-relaxed">Source, branding rights, and documentation—ready for your legal and engineering diligence. Replace the email below with your deal inbox.</p>
+                <a href="mailto:acquire@example.com?subject=DecentraChat%20acquisition%20inquiry" class="inline-flex items-center justify-center gap-2 w-full sm:w-auto min-w-[240px] px-8 py-4 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900">
+                    <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
+                    Email acquisition team
+                </a>
+                <p class="text-xs text-gray-600 mt-6">Update <code class="text-gray-500 bg-gray-800/80 px-1.5 py-0.5 rounded">mailto:</code> in <code class="text-gray-500 bg-gray-800/80 px-1.5 py-0.5 rounded">index.html</code> before going live.</p>
+            </div>
+        </section>
     </main>
 
-    <!-- Footer -->
-    <footer class="border-t border-gray-800 py-8 text-center text-gray-500 text-sm">
-        <p>Codebase available for full IP acquisition.</p>
+    <footer class="border-t border-gray-800/80 py-10 px-4">
+        <div class="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4 text-gray-500 text-sm">
+            <p>© 2026 DecentraChat — codebase available for full IP acquisition.</p>
+            <a href="#main" class="text-gray-400 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500 rounded">Back to top</a>
+        </div>
     </footer>
-
 </body>
 </html>

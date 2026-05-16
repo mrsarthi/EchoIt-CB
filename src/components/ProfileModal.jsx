@@ -1,5 +1,4 @@
 import { useState, useRef } from 'react';
-import { generateDiscussionId, formatDiscussionId } from '../services/identityService';
 import './ProfileModal.css';
 
 export function ProfileModal({ 
@@ -121,7 +120,7 @@ export function ProfileModal({
                     </div>
 
                     <div className="input-group">
-                        <label>Username (Read-only)</label>
+                        <label>Your Username (@)</label>
                         <input 
                             type="text" 
                             className="input" 
@@ -146,21 +145,7 @@ export function ProfileModal({
                         </span>
                     </div>
 
-                    <div className="profile-id-section">
-                        <label>Your Discussion ID</label>
-                        <div className="profile-id-box" onClick={() => {
-                            const dId = generateDiscussionId(walletAddress);
-                            navigator.clipboard.writeText(dId).then(() => alert('Discussion ID copied! 📋'));
-                        }} title="Click to copy">
-                            <span className="profile-id-text" style={{ fontFamily: "'JetBrains Mono', monospace", letterSpacing: '0.5px' }}>
-                                {formatDiscussionId(generateDiscussionId(walletAddress))}
-                            </span>
-                            <button type="button" className="btn-icon">📋</button>
-                        </div>
-                        <span className="text-xs text-muted" style={{ marginTop: '4px', display: 'block' }}>
-                            Share this ID with others to connect
-                        </span>
-                    </div>
+
 
                     <div className="profile-id-section">
                         <label>Wallet Address</label>

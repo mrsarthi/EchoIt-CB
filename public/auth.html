@@ -185,7 +185,16 @@
                 showStatus('Signing authentication message...', 'info');
 
                 // Create message for signing
-                const message = `DecentraChat Authentication\n\nThis signature will generate your encryption keys.\nNonce: ${nonce}\nAddress: ${address}`;
+                const sessionId = urlParams.get('session');
+                let message;
+
+                if (sessionId) {
+                    // Task 4: Session-bound message for robust mobile auth
+                    message = `Authorize DecentraChat Auth: ${sessionId}`;
+                } else {
+                    // Legacy/Standard message
+                    message = `DecentraChat Authentication\n\nThis signature will generate your encryption keys.\nNonce: ${nonce}\nAddress: ${address}`;
+                }
 
                 // Convert message to hex
                 const msgHex = '0x' + Array.from(new TextEncoder().encode(message))
@@ -200,8 +209,7 @@
 
                 showStatus('Sending to app...', 'info');
 
-                // Get session for WebSocket relay
-                const sessionId = urlParams.get('session');
+                // Relay via WebSocket if session ID is present (already parsed above)
 
                 // If we have a sessionId, use the WebSocket relay (robust mobile flow)
                 if (sessionId) {

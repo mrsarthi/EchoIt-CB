@@ -1,13 +1,15 @@
 // ChatInterface - Main chat UI component
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { useChat } from '../hooks/useChat';
+import { useWallet } from '../context/WalletContext';
 import { formatAddress } from '../blockchain/web3Provider';
 import { CreateGroupModal } from './CreateGroupModal';
 import { GroupDetailsModal } from './GroupDetailsModal';
 import { ProfileModal } from './ProfileModal';
 import { ProfilePreviewModal } from './ProfilePreviewModal';
 import { SettingsModal } from './SettingsModal';
-import { generateDiscussionId } from '../services/identityService';
+import SafetyNumbers from './SafetyNumbers'; // Task 10
+
 import { App as CapacitorApp } from '@capacitor/app';
 import { platform } from '../services/platformService';
 import QuickPinchZoom, { make3dTransformValue } from 'react-quick-pinch-zoom';
@@ -40,7 +42,8 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
         myAvatar,
         myStatus,
         saveProfile,
-        updateGroupAvatar
+        updateGroupAvatar,
+        verifyContact
     } = useChat(walletAddress);
 
     const [newMessage, setNewMessage] = useState('');
@@ -50,8 +53,9 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
     const [showDebug, setShowDebug] = useState(false);
     const [showGroupModal, setShowGroupModal] = useState(false);
     const [showGroupDetails, setShowGroupDetails] = useState(false);
+    const [showSafetyNumbers, setShowSafetyNumbers] = useState(false); // Task 10
     const [imagePreview, setImagePreview] = useState(null); // base64 data URL
-    const [lightboxImage, setLightboxImage] = useState(null);
+    const [lightboxMedia, setLightboxMedia] = useState(null); // { src, type }
     const [showSettings, setShowSettings] = useState(false);
     const [showProfileModal, setShowProfileModal] = useState(false);
     const [reactionPickerMsgId, setReactionPickerMsgId] = useState(null);
@@ -62,27 +66,126 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
     const fileInputRef = useRef(null);
     const typingTimeoutRef = useRef(null);
     const longPressTimerRef = useRef(null);
-    const imageMediaIdRef = useRef(null); // Stash mediaId for image send
+    const mediaIdRef = useRef(null); // Stash mediaId for media send
+    const mediaTypeRef = useRef('image'); // 'image' or 'video'
+    const mediaMimeTypeRef = useRef('image/jpeg');
     const [profilePreview, setProfilePreview] = useState(null); // User object for preview modal
+    const [mediaProgress, setMediaProgress] = useState({}); // { [msgId]: progressPercent }
+    const [isUploadingMedia, setIsUploadingMedia] = useState(false);
+    const [uploadProgress, setUploadProgress] = useState(0);
 
     const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
-    // Auto-scroll to bottom when new messages arrive (only if already near bottom)
+    const chatScrollPositionsRef = useRef({}); // { [chatAddress]: scrollTop }
     const prevMessagesLenRef = useRef(0);
+
+    // Helper to scroll the messages container to the exact bottom
+    const forceScrollToBottom = (smooth = false) => {
+        const container = messagesContainerRef.current;
+        if (!container) return;
+        container.scrollTo({
+            top: container.scrollHeight,
+            behavior: smooth ? 'smooth' : 'auto'
+        });
+    };
+
+    // Effect 1: Chat switches, restore scroll location, or force initial bottom snap
     useEffect(() => {
         const container = messagesContainerRef.current;
-        // Always scroll on first load or when a new message is added at end
-        if (!container || messages.length === 0) return;
+        if (!container || !activeChat?.address) return;
+
+        const address = activeChat.address;
+        prevMessagesLenRef.current = 0; // Reset count for incoming scroll math
+
+        const saved = chatScrollPositionsRef.current[address];
         
-        // If messages were prepended (load-more), don't scroll
-        if (messages.length > prevMessagesLenRef.current + 1) {
-            // Likely a bulk prepend from loadMore — keep position
-            prevMessagesLenRef.current = messages.length;
+        // A tiny timeout guarantees that React finished initial paints in hybrid architectures
+        const timer = setTimeout(() => {
+            if (saved !== undefined) {
+                container.scrollTop = saved;
+            } else {
+                forceScrollToBottom(false);
+            }
+        }, 50);
+
+        const saveScroll = () => {
+            chatScrollPositionsRef.current[address] = container.scrollTop;
+        };
+
+        container.addEventListener('scroll', saveScroll, { passive: true });
+        return () => {
+            clearTimeout(timer);
+            container.removeEventListener('scroll', saveScroll);
+        };
+    }, [activeChat?.address]);
+
+    // Effect 2: Dynamic Height Monitoring (ResizeObserver)
+    // Handles keyboard appearance, dynamic image loadings, and asynchronous height changes!
+    useEffect(() => {
+        const container = messagesContainerRef.current;
+        if (!container || !activeChat?.address) return;
+
+        let isUserAtBottom = true;
+
+        // ResizeObserver observes container bounds & contents
+        const observer = new ResizeObserver(() => {
+            // If user was at/near bottom before resize, keep them locked at bottom!
+            if (isUserAtBottom) {
+                forceScrollToBottom(false);
+            }
+        });
+        
+        observer.observe(container);
+
+        const checkScroll = () => {
+            const threshold = 150; // Tolerable threshold
+            const fromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+            isUserAtBottom = fromBottom <= threshold;
+        };
+
+        container.addEventListener('scroll', checkScroll, { passive: true });
+        
+        // Set initial state
+        checkScroll();
+
+        return () => {
+            observer.disconnect();
+            container.removeEventListener('scroll', checkScroll);
+        };
+    }, [activeChat?.address]);
+
+    // Effect 3: Scroll behavior purely controlled by arriving message mutations
+    useEffect(() => {
+        const container = messagesContainerRef.current;
+        if (!container || messages.length === 0) return;
+
+        const prevLen = prevMessagesLenRef.current;
+        prevMessagesLenRef.current = messages.length;
+
+        // A. Initial population: do hard snap
+        if (prevLen === 0) {
+            const address = activeChat?.address;
+            const saved = address ? chatScrollPositionsRef.current[address] : undefined;
+            if (saved === undefined) {
+                forceScrollToBottom(false);
+                // Double-tap snap in a timeout to counter sluggish layouts on low-end Androids
+                setTimeout(() => forceScrollToBottom(false), 100);
+            }
             return;
         }
-        prevMessagesLenRef.current = messages.length;
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [messages]);
+
+        // B. Prepended/Bulk loading: preserve position (don't scroll)
+        if (messages.length > prevLen + 1) {
+            return;
+        }
+
+        // C. Single new incoming message: smooth scroll if currently viewing bottom
+        const threshold = 200;
+        const fromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+        if (fromBottom <= threshold) {
+            forceScrollToBottom(true);
+        }
+    }, [messages, activeChat?.address]);
 
     // Scroll-to-top: load more messages
     useEffect(() => {
@@ -113,8 +216,8 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
 
         const backListener = CapacitorApp.addListener('backButton', ({ canGoBack }) => {
             // Priority 1: Lightbox open
-            if (lightboxImage) {
-                setLightboxImage(null);
+            if (lightboxMedia) {
+                setLightboxMedia(null);
                 return;
             }
             // Priority 2: Reaction picker open
@@ -155,7 +258,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
         return () => {
             backListener.then(listener => listener.remove());
         };
-    }, [lightboxImage, reactionPickerMsgId, showProfileModal, showSettings, showGroupDetails, showGroupModal, activeChat, closeChat]);
+    }, [lightboxMedia, reactionPickerMsgId, showProfileModal, showSettings, showGroupDetails, showGroupModal, activeChat, closeChat]);
 
     const handleSend = async (e) => {
         e.preventDefault();
@@ -243,42 +346,139 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
         });
     };
 
-    const handleImageSelect = async (e) => {
+    const processVideo = (file) => {
+        return new Promise((resolve, reject) => {
+            const video = document.createElement('video');
+            video.preload = 'metadata';
+            video.muted = true;
+            video.playsInline = true;
+
+            video.onloadeddata = () => {
+                // Seek to 1 second in, or 0 if video is shorter
+                video.currentTime = Math.min(1, video.duration / 2 || 0);
+            };
+
+            video.onseeked = () => {
+                const canvas = document.createElement('canvas');
+                const maxWidth = 320;
+                let { videoWidth: width, videoHeight: height } = video;
+                if (width > maxWidth) {
+                    height = (height * maxWidth) / width;
+                    width = maxWidth;
+                }
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(video, 0, 0, width, height);
+                
+                // Draw a subtle play button overlay on the thumbnail
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+                ctx.beginPath();
+                ctx.arc(width / 2, height / 2, 24, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = 'white';
+                ctx.beginPath();
+                ctx.moveTo(width / 2 - 8, height / 2 - 10);
+                ctx.lineTo(width / 2 + 12, height / 2);
+                ctx.lineTo(width / 2 - 8, height / 2 + 10);
+                ctx.fill();
+
+                const thumbnail = canvas.toDataURL('image/jpeg', 0.6);
+                
+                // Read full video file as base64
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    resolve({ fullRes: e.target.result, thumbnail });
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            };
+
+            video.onerror = reject;
+            video.src = URL.createObjectURL(file);
+        });
+    };
+
+    const handleMediaSelect = async (e) => {
         const file = e.target.files?.[0];
         if (!file) return;
-        if (!file.type.startsWith('image/')) return;
+        
+        // 25MB Limit Check
+        const MAX_SIZE = 25 * 1024 * 1024;
+        if (file.size > MAX_SIZE) {
+            alert(`File is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Maximum size is 25 MB.`);
+            e.target.value = '';
+            return;
+        }
 
-        const { fullRes, thumbnail } = await resizeImage(file);
+        let fullRes, thumbnail;
+        const isVideo = file.type.startsWith('video/');
+        const isImage = file.type.startsWith('image/');
+
+        if (!isVideo && !isImage) return;
+
+        if (isVideo) {
+            ({ fullRes, thumbnail } = await processVideo(file));
+        } else {
+            ({ fullRes, thumbnail } = await resizeImage(file));
+        }
+
         // Store full-res in media cache, display thumbnail as preview
-        const mediaId = `img_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+        const mediaId = `${isVideo ? 'vid' : 'img'}_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
         const { saveMedia } = await import('../services/storageService');
         await saveMedia(mediaId, fullRes);
-        // Store mediaId on the preview so we can retrieve full-res later
+        
         setImagePreview(thumbnail);
-        // Stash the mediaId for sendImage to use
-        imageMediaIdRef.current = mediaId;
-        // Reset file input so same file can be re-selected
+        mediaIdRef.current = mediaId;
+        mediaTypeRef.current = isVideo ? 'video' : 'image';
+        mediaMimeTypeRef.current = file.type;
         e.target.value = '';
     };
 
-    const handleSendImage = async () => {
-        if (!imagePreview || isLoading) return;
+    const handleSendMedia = async () => {
+        if (!imagePreview || isLoading || isUploadingMedia) return;
         const imgData = imagePreview;
-        const mediaId = imageMediaIdRef.current;
-        setImagePreview(null);
-        imageMediaIdRef.current = null;
+        const mediaId = mediaIdRef.current;
+        const mediaType = mediaTypeRef.current;
+        const mimeType = mediaMimeTypeRef.current;
+        
+        setIsUploadingMedia(true);
+        setUploadProgress(0);
+
         try {
-            // Send thumbnail as the message content, attach mediaId for full-res retrieval
-            await sendMessage(imgData, null, 'image', { mediaId });
+            const { getMedia } = await import('../services/storageService');
+            const fullRes = await getMedia(mediaId);
+            console.log('[SendMedia] fullRes retrieved:', fullRes ? `${(fullRes.length / 1024).toFixed(1)} KB` : 'NULL');
+            
+            let manifest = null;
+            if (fullRes) {
+                const { sliceAndTransmitMedia } = await import('../services/mediaTransport');
+                manifest = await sliceAndTransmitMedia(fullRes, mimeType, (progress) => {
+                    setUploadProgress(progress);
+                });
+                console.log('[SendMedia] Upload complete, manifest:', manifest?.mediaId);
+            } else {
+                console.warn('[SendMedia] No full-res media found in store for mediaId:', mediaId);
+            }
+
+            setImagePreview(null);
+            mediaIdRef.current = null;
+            setIsUploadingMedia(false);
+            setUploadProgress(0);
+
+            // Send thumbnail as the message content, attach mediaId & manifest
+            await sendMessage(imgData, null, mediaType, { mediaId, manifest });
         } catch (err) {
-            setImagePreview(imgData); // Restore on error
-            imageMediaIdRef.current = mediaId;
+            console.error("Failed to send media:", err);
+            alert(`Media upload failed: ${err.message}`);
+            setIsUploadingMedia(false);
+            setUploadProgress(0);
         }
     };
 
-    const cancelImagePreview = () => {
+    const cancelMediaPreview = () => {
         setImagePreview(null);
-        imageMediaIdRef.current = null;
+        mediaIdRef.current = null;
     };
 
     const scrollToMessage = (msgId) => {
@@ -353,6 +553,42 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
     };
 
     const typingText = getTypingText();
+
+    // Compute Last Read Message IDs for Floating Anchors
+    const { lastReadMessageIds, lastSentMessageId } = useMemo(() => {
+        const reads = {}; // { '0xUserA': 'msg_123' }
+        let lastSent = null;
+
+        // Iterate backwards because newer messages are at the end
+        for (let i = messages.length - 1; i >= 0; i--) {
+            const msg = messages[i];
+            
+            // Track absolute last sent message
+            if (msg.from?.toLowerCase() === walletAddress?.toLowerCase() && !lastSent) {
+                lastSent = msg.id;
+            }
+
+            // Track last read message per participant
+            if (msg.from?.toLowerCase() === walletAddress?.toLowerCase()) {
+                // Check new receipts dictionary architecture
+                if (msg.receipts) {
+                    Object.entries(msg.receipts).forEach(([address, status]) => {
+                        const lowerAddr = address.toLowerCase();
+                        if (status === 'read' && !reads[lowerAddr]) {
+                            reads[lowerAddr] = msg.id;
+                        }
+                    });
+                } else if (msg.status === 'read' && activeChat && !activeChat.isGroup) {
+                    // Fallback to legacy status string for DMs
+                    const lowerAddr = activeChat.address.toLowerCase();
+                    if (!reads[lowerAddr]) {
+                        reads[lowerAddr] = msg.id;
+                    }
+                }
+            }
+        }
+        return { lastReadMessageIds: reads, lastSentMessageId: lastSent };
+    }, [messages, walletAddress, activeChat]);
 
     return (
         <div className={`chat-container ${activeChat ? 'has-active-chat' : ''}`}>
@@ -584,6 +820,14 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                             <span className="encrypted-badge">
                                                 🔒 Encrypted
                                             </span>
+                                            {!activeChat.isGroup && (
+                                                <button 
+                                                    className="verify-identity-link"
+                                                    onClick={() => setShowSafetyNumbers(true)}
+                                                >
+                                                    {activeChat.info?.isVerified ? '✅ Verified' : '🛡️ Verify Identity'}
+                                                </button>
+                                            )}
                                         </div>
                                     )}
                                 </div>
@@ -643,8 +887,9 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                     >
                                         <div
                                         className="message-bubble"
-                                            onDoubleClick={() => handleReply(msg)}
+                                            onDoubleClick={() => !msg.decryptionFailed && handleReply(msg)}
                                             onTouchStart={(e) => {
+                                                if (msg.decryptionFailed) return;
                                                 longPressTimerRef.current = setTimeout(() => {
                                                     setReactionPickerMsgId(msg.id);
                                                 }, 500);
@@ -652,6 +897,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                             onTouchEnd={() => clearTimeout(longPressTimerRef.current)}
                                             onTouchMove={() => clearTimeout(longPressTimerRef.current)}
                                             onContextMenu={(e) => {
+                                                if (msg.decryptionFailed) return;
                                                 e.preventDefault();
                                                 setReactionPickerMsgId(msg.id);
                                             }}
@@ -681,7 +927,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                                 </div>
                                             )}
 
-                                            {msg.replyTo && (
+                                            {msg.replyTo && !msg.decryptionFailed && (
                                                 <div
                                                     className="message-reply-context clickable"
                                                     onClick={() => msg.replyTo.id && scrollToMessage(msg.replyTo.id)}
@@ -698,21 +944,68 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                                     </div>
                                                 </div>
                                             )}
-                                            {msg.type === 'image' ? (
+
+                                            {msg.decryptionFailed ? (
+                                                <div className="decryption-failed-content">
+                                                    <span className="decryption-failed-icon">🔒</span>
+                                                    <p className="message-content italic opacity-75">
+                                                        {msg.content || 'This message could not be decrypted. The sender may have reset their account.'}
+                                                    </p>
+                                                </div>
+                                            ) : (msg.type === 'image' || msg.type === 'video') ? (
                                                 <div className="message-image-wrapper" onClick={async () => {
+                                                    // Already downloading?
+                                                    if (mediaProgress[msg.id]) return;
+
                                                     // Try to load full-res from media store
                                                     if (msg.mediaId) {
-                                                        const { getMedia } = await import('../services/storageService');
-                                                        const fullRes = await getMedia(msg.mediaId);
+                                                        const { getMedia, saveMedia } = await import('../services/storageService');
+                                                        let fullRes = await getMedia(msg.mediaId);
+                                                        
+                                                        // Fetch from custom Relay if not local and manifest exists
+                                                        if (!fullRes && msg.manifest) {
+                                                            try {
+                                                                setMediaProgress(prev => ({ ...prev, [msg.id]: 1 }));
+                                                                const { fetchAndReconstructMedia } = await import('../services/mediaTransport');
+                                                                fullRes = await fetchAndReconstructMedia(msg.manifest, (progress) => {
+                                                                    setMediaProgress(prev => ({ ...prev, [msg.id]: progress }));
+                                                                });
+                                                                
+                                                                if (fullRes) {
+                                                                    await saveMedia(msg.mediaId, fullRes);
+                                                                }
+                                                            } catch (err) {
+                                                                console.error("Failed to fetch full media:", err);
+                                                                alert("Failed to download full-resolution media from relays.");
+                                                            } finally {
+                                                                setMediaProgress(prev => {
+                                                                    const next = { ...prev };
+                                                                    delete next[msg.id];
+                                                                    return next;
+                                                                });
+                                                            }
+                                                        }
+
                                                         if (fullRes) {
-                                                            setLightboxImage(fullRes);
+                                                            setLightboxMedia({ src: fullRes, type: msg.type });
                                                             return;
                                                         }
                                                     }
                                                     // Fallback to inline content
-                                                    setLightboxImage(msg.content);
+                                                    setLightboxMedia({ src: msg.content, type: 'image' });
                                                 }}>
-                                                    <img src={msg.content} alt="Sent image" className="message-image" loading="lazy" />
+                                                    <img src={msg.content} alt={`Sent ${msg.type}`} className={`message-image ${mediaProgress[msg.id] ? 'loading-blur' : ''}`} loading="lazy" />
+                                                    {msg.type === 'video' && !mediaProgress[msg.id] && (
+                                                        <div className="video-play-overlay" style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: '48px', height: '48px', background: 'rgba(0,0,0,0.6)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', pointerEvents: 'none' }}>
+                                                            ▶
+                                                        </div>
+                                                    )}
+                                                    {mediaProgress[msg.id] && (
+                                                        <div className="image-download-overlay" style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)', color: 'white', borderRadius: '12px' }}>
+                                                            <div className="spinner-small" style={{ marginBottom: '8px' }}></div>
+                                                            <span>{mediaProgress[msg.id]}%</span>
+                                                        </div>
+                                                    )}
                                                 </div>
                                             ) : (
                                                 <p className="message-content">{msg.content}</p>
@@ -734,13 +1027,36 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                                         🔒
                                                     </span>
                                                 )}
-                                                {msg.from?.toLowerCase() === walletAddress?.toLowerCase() && (
-                                                    <span className={`message-status ${msg.status || 'sent'}`} title={msg.status || 'sent'}>
-                                                        {msg.status === 'pending' ? '🕐' : msg.status === 'read' ? '✓✓' : msg.status === 'delivered' ? '✓✓' : '✓'}
-                                                    </span>
-                                                )}
                                             </div>
                                         </div>
+
+                                        {/* Floating Avatar Read Receipts */}
+                                        {msg.from?.toLowerCase() === walletAddress?.toLowerCase() && (
+                                            <div className="receipt-anchors">
+                                                {/* If this is the absolute last sent message, and NO ONE has read it yet, show a vector sent/delivered indicator */}
+                                                {msg.id === lastSentMessageId && !Object.values(lastReadMessageIds).includes(msg.id) && (
+                                                    <div className={`receipt-indicator ${msg.status === 'pending' ? 'pending' : (Object.values(msg.receipts || {}).includes('delivered') || msg.status === 'delivered' ? 'delivered' : 'sent')}`} title={msg.status === 'pending' ? 'Sending...' : (Object.values(msg.receipts || {}).includes('delivered') || msg.status === 'delivered' ? 'Delivered' : 'Sent')}>
+                                                        {msg.status === 'pending' && <span className="pending-dots">⋯</span>}
+                                                    </div>
+                                                )}
+
+                                                {/* Stack avatars of anyone who has THIS message as their absolute last read message */}
+                                                {Object.entries(lastReadMessageIds)
+                                                    .filter(([addr, msgId]) => msgId === msg.id)
+                                                    .map(([addr]) => {
+                                                        const contact = contacts.find(c => c.address.toLowerCase() === addr.toLowerCase());
+                                                        return (
+                                                            <div key={addr} className="receipt-avatar animate-fadeIn" title={`Read by ${contact?.username || formatAddress(addr)}`}>
+                                                                {contact?.avatar ? (
+                                                                    <img src={contact.avatar} alt="R" />
+                                                                ) : (
+                                                                    <div className="receipt-avatar-fallback">{(contact?.username || addr.slice(2)).charAt(0).toUpperCase()}</div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })}
+                                            </div>
+                                        )}
                                         {/* Reaction pills below the bubble */}
                                         {msg.reactions && Object.keys(msg.reactions).length > 0 && (
                                             <div className={`reaction-pills ${msg.from?.toLowerCase() === walletAddress?.toLowerCase() ? 'sent' : 'received'}`}>
@@ -780,17 +1096,26 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                             {imagePreview && (
                                 <div className="image-preview-bar animate-fadeIn">
                                     <img src={imagePreview} alt="Preview" className="image-preview-thumb" />
-                                    <span className="image-preview-label">Image ready to send</span>
-                                    <button type="button" className="close-reply-btn" onClick={cancelImagePreview}>×</button>
+                                    {isUploadingMedia ? (
+                                        <div className="upload-progress-container" style={{ flex: 1, padding: '0 15px' }}>
+                                            <span className="image-preview-label" style={{ display: 'block', marginBottom: '5px' }}>Uploading high-res ({uploadProgress}%)</span>
+                                            <div className="progress-bar-bg" style={{ width: '100%', height: '4px', background: 'var(--surface-3)', borderRadius: '2px', overflow: 'hidden' }}>
+                                                <div className="progress-bar-fill" style={{ width: `${uploadProgress}%`, height: '100%', background: 'var(--accent-primary)', transition: 'width 0.3s' }}></div>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <span className="image-preview-label">Image ready to send</span>
+                                    )}
+                                    {!isUploadingMedia && <button type="button" className="close-reply-btn" onClick={cancelMediaPreview}>×</button>}
                                 </div>
                             )}
                             <div className="message-input-row">
                                 <input
                                     type="file"
                                     ref={fileInputRef}
-                                    accept="image/*"
+                                    accept="image/*,video/*"
                                     style={{ display: 'none' }}
-                                    onChange={handleImageSelect}
+                                    onChange={handleMediaSelect}
                                 />
                                 <button
                                     type="button"
@@ -813,7 +1138,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                     <button
                                         type="button"
                                         className="btn btn-primary send-btn"
-                                        onClick={handleSendImage}
+                                        onClick={handleSendMedia}
                                         disabled={isLoading}
                                     >
                                         <span className="send-icon">➤</span>
@@ -893,30 +1218,40 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                 </div>
             )}
 
-            {lightboxImage && (
-                <div className="lightbox-overlay" onClick={() => setLightboxImage(null)}>
-                    <button className="lightbox-close" onClick={(e) => { e.stopPropagation(); setLightboxImage(null); }}>×</button>
+            {lightboxMedia && (
+                <div className="lightbox-overlay" onClick={() => setLightboxMedia(null)}>
+                    <button className="lightbox-close" onClick={(e) => { e.stopPropagation(); setLightboxMedia(null); }}>×</button>
                     <div className="lightbox-zoom-container" onClick={(e) => e.stopPropagation()}>
-                        <QuickPinchZoom
-                            onUpdate={({ x, y, scale }) => {
-                                const imgEntry = document.getElementById('lightbox-zoomed-img');
-                                if (imgEntry) {
-                                    imgEntry.style.setProperty(
-                                        'transform',
-                                        make3dTransformValue({ x, y, scale })
-                                    );
-                                }
-                            }}
-                            maxZoom={5}
-                            wheelScaleFactor={500}
-                        >
-                            <img
-                                id="lightbox-zoomed-img"
-                                src={lightboxImage}
-                                alt="Full size"
-                                className="lightbox-image"
+                        {lightboxMedia.type === 'video' ? (
+                            <video
+                                src={lightboxMedia.src}
+                                controls
+                                autoPlay
+                                className="lightbox-video"
+                                style={{ maxWidth: '90vw', maxHeight: '90vh', outline: 'none' }}
                             />
-                        </QuickPinchZoom>
+                        ) : (
+                            <QuickPinchZoom
+                                onUpdate={({ x, y, scale }) => {
+                                    const imgEntry = document.getElementById('lightbox-zoomed-img');
+                                    if (imgEntry) {
+                                        imgEntry.style.setProperty(
+                                            'transform',
+                                            make3dTransformValue({ x, y, scale })
+                                        );
+                                    }
+                                }}
+                                maxZoom={5}
+                                wheelScaleFactor={500}
+                            >
+                                <img
+                                    id="lightbox-zoomed-img"
+                                    src={lightboxMedia.src}
+                                    alt="Full size"
+                                    className="lightbox-image"
+                                />
+                            </QuickPinchZoom>
+                        )}
                     </div>
                 </div>
             )}
@@ -936,6 +1271,17 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                     onClose={() => setProfilePreview(null)}
                     onStartChat={handleStartChatFromPreview}
                     myAddress={walletAddress}
+                />
+            )}
+
+            {/* Task 10: Safety Numbers Modal */}
+            {showSafetyNumbers && activeChat && !activeChat.isGroup && (
+                <SafetyNumbers
+                    contact={activeChat.info}
+                    myKeys={useWallet().keys} // Fetch keys from WalletContext via hook
+                    isVerified={activeChat.info?.isVerified}
+                    onVerify={(status) => verifyContact(activeChat.address, status)}
+                    onClose={() => setShowSafetyNumbers(false)}
                 />
             )}
         </div>
