@@ -721,6 +721,31 @@ export function useChat(myAddress) {
             // ... (rest of init - receipts, connection, status) ...
             // Copying existing receipt/connection logic...
             onMessageReceipt(({ messageId, type, from, chatId }) => {
+                // Task 13: Background profile fetch for unknown senders
+                if (from) {
+                    setContacts(prev => {
+                        const isKnown = prev.some(c => c.address.toLowerCase() === from.toLowerCase());
+                        if (!isKnown) {
+                            getUser(from).then(freshUser => {
+                                if (freshUser) {
+                                    setContacts(latest => {
+                                        if (latest.some(c => c.address.toLowerCase() === from.toLowerCase())) return latest;
+                                        return [...latest, {
+                                            address: freshUser.address,
+                                            username: freshUser.username,
+                                            avatar: freshUser.avatar,
+                                            online: freshUser.online,
+                                            lastMessageTime: Date.now(),
+                                            unreadCount: 0
+                                        }];
+                                    });
+                                }
+                            }).catch(err => console.debug('Background profile fetch failed:', err));
+                        }
+                        return prev;
+                    });
+                }
+
                 // Update local state if the chat is currently active
                 setMessages(prev => prev.map(m => {
                     if (m.id === messageId) {

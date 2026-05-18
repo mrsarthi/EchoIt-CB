@@ -1045,17 +1045,25 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                                     .filter(([addr, msgId]) => msgId === msg.id)
                                                     .map(([addr]) => {
                                                         const contact = contacts.find(c => c.address.toLowerCase() === addr.toLowerCase());
+                                                        // Task 13: Better fallback color logic
+                                                        const getFallbackColor = (a) => {
+                                                            const colors = ['#f87171', '#fb923c', '#34d399', '#22d3ee', '#818cf8', '#c084fc'];
+                                                            const index = parseInt(a.slice(2, 10), 16) % colors.length;
+                                                            return colors[index];
+                                                        };
+
                                                         return (
                                                             <div key={addr} className="receipt-avatar animate-fadeIn" title={`Read by ${contact?.username || formatAddress(addr)}`}>
                                                                 {contact?.avatar ? (
                                                                     <img src={contact.avatar} alt="R" />
                                                                 ) : (
-                                                                    <div className="receipt-avatar-fallback">{(contact?.username || addr.slice(2)).charAt(0).toUpperCase()}</div>
+                                                                    <div className="receipt-avatar-fallback" style={{ background: getFallbackColor(addr) }}>
+                                                                        {(contact?.username || addr.slice(2)).charAt(0).toUpperCase()}
+                                                                    </div>
                                                                 )}
                                                             </div>
                                                         );
-                                                    })}
-                                            </div>
+                                                    })}                                            </div>
                                         )}
                                         {/* Reaction pills below the bubble */}
                                         {msg.reactions && Object.keys(msg.reactions).length > 0 && (

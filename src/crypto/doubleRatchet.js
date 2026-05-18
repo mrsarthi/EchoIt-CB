@@ -189,8 +189,9 @@ export async function consumePreKeySecret(keyId) {
  * The initiator knows:
  *  - initialSharedSecret: the X3DH derived secret
  *  - peerRatchetPublicKey: the peer's identity/signed pre-key (used as initial ratchet key)
+ *  - x3dhParams: { ephemeralKey, preKeyId } to be re-sent until ACKed (Task 13)
  */
-export async function createSession(peerAddress, initialSharedSecret, peerRatchetPublicKey) {
+export async function createSession(peerAddress, initialSharedSecret, peerRatchetPublicKey, x3dhParams = null) {
     // Normalize the shared secret
     const sharedSecretBytes = typeof initialSharedSecret === 'string'
         ? decodeBase64(initialSharedSecret)
@@ -206,7 +207,9 @@ export async function createSession(peerAddress, initialSharedSecret, peerRatche
         sendIndex: 0,
         recvIndex: 0,
         previousCounter: 0,
-        skippedMessageKeys: {} // { "ratchetKey:index": base64MessageKey }
+        skippedMessageKeys: {}, // { "ratchetKey:index": base64MessageKey }
+        acknowledged: false, // Task 13
+        x3dhParams // Task 13: Store for re-sending until ACKed
     };
 
     // Perform the initial DH ratchet step to derive the sending chain
@@ -242,7 +245,8 @@ export async function createSessionResponder(peerAddress, initialSharedSecret, p
         sendIndex: 0,
         recvIndex: 0,
         previousCounter: 0,
-        skippedMessageKeys: {}
+        skippedMessageKeys: {},
+        acknowledged: true // Task 13: We just successfully decrypted their first message!
     };
 
     // Step 1: DH ratchet to derive recvChainKey (for decrypting incoming messages)
@@ -298,7 +302,9 @@ export async function encryptRatchet(peerAddress, plaintext) {
                 : session.sendRatchetKeyPair.publicKey,
             index,
             previousCounter: session.previousCounter
-        }
+        },
+        acknowledged: session.acknowledged, // Task 13
+        x3dhParams: session.x3dhParams    // Task 13
     };
 }
 
@@ -322,10 +328,15 @@ function trySkippedMessageKeys(session, header, ciphertext, nonce) {
             decodeBase64(nonce),
             messageKey
         );
-        return decrypted ? encodeUTF8(decrypted) : null;
+
+        if (decrypted) {
+            session.acknowledged = true; // Task 13
+            return encodeUTF8(decrypted);
+        }
     }
     return null; // Not a skipped message
 }
+
 
 /**
  * Store skipped message keys when we need to advance past some indices.
@@ -429,6 +440,7 @@ export async function decryptRatchet(peerAddress, { ciphertext, nonce, header })
             return null;
         }
 
+        session.acknowledged = true; // Task 13: Successfully decrypted a message!
         await saveSession(peerAddress, session);
         return encodeUTF8(decrypted);
     } catch (e) {

@@ -960,10 +960,10 @@ io.on('connection', (socket) => {
     // Handle message receipts (delivered/read)
     socket.on('messageReceipt', ({ messageId, to, type, chatId }) => {
         const toAddress = to.toLowerCase();
-        const recipient = users.get(toAddress);
+        const fromAddress = socket.address?.toLowerCase();
 
-        // Update message in SQLite history
-        db.get(`SELECT payload, conv_id FROM history WHERE id = ?`, [messageId], (err, row) => {
+        // 1. Update message in standard SQLite history
+        db.get(`SELECT payload FROM history WHERE id = ?`, [messageId], (err, row) => {
             if (row) {
                 try {
                     const msg = JSON.parse(row.payload);
@@ -975,15 +975,56 @@ io.on('connection', (socket) => {
             }
         });
 
-        // Relay receipt to sender
-        if (recipient && recipient.online) {
-            io.to(recipient.socketId).emit('messageReceipt', {
-                messageId,
-                type,
-                from: socket.address,
-                chatId // Propagate conversation scope back to the sender
+        // 2. Update Group History & Broadcast (Task 13)
+        if (chatId && chatId.startsWith('group_')) {
+            // Update group history payload
+            db.get(`SELECT payload FROM group_history WHERE id = ?`, [messageId], (err, row) => {
+                if (row) {
+                    try {
+                        const msg = JSON.parse(row.payload);
+                        // Initialize receipts map if missing
+                        if (!msg.receipts) msg.receipts = {};
+                        msg.receipts[fromAddress] = type;
+                        
+                        db.run(`UPDATE group_history SET payload = ? WHERE id = ?`, [JSON.stringify(msg), messageId]);
+                    } catch (e) {
+                        console.error('[📜] Failed to update group receipt in DB:', e.message);
+                    }
+                }
             });
-            console.log(`[✓] ${type} receipt: ${messageId.slice(0, 15)}... for chat ${chatId?.slice(0, 6)}`);
+
+            // Broadcast receipt to all ONLINE group members
+            db.all(`SELECT user_address FROM group_members WHERE group_id = ?`, [chatId], (err, rows) => {
+                if (err || !rows) return;
+                
+                rows.forEach(row => {
+                    const memberAddr = row.user_address.toLowerCase();
+                    if (memberAddr === fromAddress) return; // Don't send back to the one who read it
+
+                    const member = users.get(memberAddr);
+                    if (member && member.online) {
+                        io.to(member.socketId).emit('messageReceipt', {
+                            messageId,
+                            type,
+                            from: socket.address,
+                            chatId
+                        });
+                    }
+                });
+            });
+            console.log(`[✓] Group ${type} receipt for ${chatId.slice(0, 8)} from ${fromAddress.slice(0, 8)}`);
+        } else {
+            // Standard DM relay logic
+            const recipient = users.get(toAddress);
+            if (recipient && recipient.online) {
+                io.to(recipient.socketId).emit('messageReceipt', {
+                    messageId,
+                    type,
+                    from: socket.address,
+                    chatId // Propagate conversation scope back to the sender
+                });
+                console.log(`[✓] ${type} receipt: ${messageId.slice(0, 15)}... for chat ${chatId?.slice(0, 6)}`);
+            }
         }
     });
 

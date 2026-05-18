@@ -77,14 +77,20 @@ export async function sendEncryptedMessage(senderAddress, recipientAddress, plai
         throw new Error('No encryption keys found. Please reconnect your wallet.');
     }
 
-    // --- TASK 12: Double Ratchet Encryption Flow ---
+    // --- TASK 12 & 13: Double Ratchet Encryption Flow ---
     
     // 1. Try to encrypt using existing ratchet session
     let ratchetData = await encryptRatchet(recipientAddress, plainText);
     let x3dhHeader = null;
 
+    // Task 13: If session exists but isn't acknowledged, re-attach the X3DH header
+    if (ratchetData && !ratchetData.acknowledged && ratchetData.x3dhParams) {
+        x3dhHeader = ratchetData.x3dhParams;
+        console.log(`🤝 Session not ACKed. Re-attaching X3DH header for ${recipientAddress.slice(0, 10)}`);
+    }
+
     // 2. If no session, attempt X3DH Handshake
-    if (!ratchetData && !metadata.groupId) { // DMs only for now
+    if (!ratchetData) {
         console.log(`🤝 Initiating X3DH handshake with ${recipientAddress.slice(0, 10)}...`);
         try {
             const preKey = await socketService.fetchPreKey(recipientAddress);
@@ -100,14 +106,14 @@ export async function sendEncryptedMessage(senderAddress, recipientAddress, plai
                     preKey?.publicKey // peer OPK
                 );
 
-                await createSession(recipientAddress, sharedSecret, peerIK);
-                ratchetData = await encryptRatchet(recipientAddress, plainText);
-                
-                // Recipient needs this to derive the same secret
+                // Task 13: Store x3dhParams in session
                 x3dhHeader = {
                     ephemeralKey: ephemeralKey.publicKey,
                     preKeyId: preKey?.keyId
                 };
+
+                await createSession(recipientAddress, sharedSecret, peerIK, x3dhHeader);
+                ratchetData = await encryptRatchet(recipientAddress, plainText);
             }
         } catch (err) {
             console.warn('X3DH handshake failed:', err);
