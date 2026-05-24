@@ -87,6 +87,9 @@ server/*.sqlite
 *.sqlite
 build_error*.*
 *.txt
+server/*.json
+screenshot.js
+screenshot*.png
 
 # Duplicate/Separate Standalone Codebases
 media-relay-server/
