@@ -28,7 +28,13 @@ vi.mock('localforage', () => {
     };
 });
 
-import * as storage from '../src/services/storageService';
+vi.mock('./stateEngine', () => {
+    return {
+        insertMessage: vi.fn(async () => {})
+    };
+});
+
+import * as storage from './storageService';
 
 describe('Storage Service V2', () => {
     const chatId = '0x123';

@@ -60,7 +60,12 @@ export async function getConnectedAddress() {
  */
 export async function signMessage(message) {
     if (!signer) {
-        throw new Error('Wallet not connected');
+        if (isWeb3Available()) {
+            provider = new BrowserProvider(window.ethereum);
+            signer = await provider.getSigner();
+        } else {
+            throw new Error('Wallet not connected');
+        }
     }
 
     return await signer.signMessage(message);

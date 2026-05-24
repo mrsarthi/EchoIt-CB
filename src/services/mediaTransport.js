@@ -1,155 +1,156 @@
 import { generateSymmetricKey, encryptSymmetric, decryptSymmetric } from '../crypto/crypto';
-import { uploadChunkWithRetry, fetchChunkWithTimeout, wakeUpRelays } from './customRelayService';
-import { getUploadToken } from './socketService';
+import * as webrtcService from './webrtcService';
+import { uploadToIPFS, fetchFromIPFS } from './ipfsService';
 
-const CHUNK_SIZE = 256 * 1024; // 256 KB chunks
-const CONCURRENCY_LIMIT = 4; // limit simultaneous relay network calls
-
-// Robust concurrency queue that handles errors properly
-async function runWithConcurrency(tasks, limit) {
-    const results = [];
-    const executing = new Set();
-
-    for (const task of tasks) {
-        const p = Promise.resolve().then(() => task());
-        results.push(p);
-
-        const cleanup = () => executing.delete(p);
-        p.then(cleanup, cleanup); // Remove from executing on BOTH success and failure
-
-        executing.add(p);
-        if (executing.size >= limit) {
-            // Wait for ANY task to finish (success or failure) before starting next
-            await Promise.race(executing).catch(() => {});
-        }
-    }
-
-    return Promise.all(results);
-}
+const WEBRTC_PACKET_SIZE = 16 * 1024; // 16 KB packets for P2P Data Channels
+const PINATA_JWT_KEY = 'decentrachat_pinata_jwt';
 
 /**
- * Encrypts a media payload, splits it into chunks, and uploads them to the custom relay pool.
- * @param {string} base64Data - Full-res image data
- * @param {string} mimeType - e.g., 'image/jpeg'
- * @param {Function} onProgress - Callback with percentage (0-100)
- * @returns {Promise<Object>} The manifest pointer to be sent over signaling channel
+ * Encrypts a media payload and transmits it.
+ * Tries direct WebRTC P2P first, falls back to IPFS (via Pinata).
  */
-export async function sliceAndTransmitMedia(base64Data, mimeType, onProgress) {
+export async function sliceAndTransmitMedia(base64Data, mimeType, onProgress, recipientAddress = null) {
     console.log('[MediaTransport] Starting upload pipeline...');
-    console.log(`[MediaTransport] Payload size: ${(base64Data.length / 1024).toFixed(1)} KB`);
-
-    // Wake up relay servers in parallel while we encrypt (handles Render cold starts)
-    const wakePromise = wakeUpRelays();
-
-    console.log('[MediaTransport] Generating key and encrypting payload...');
+    
     const ephemeralKey = generateSymmetricKey();
     const { encrypted, nonce } = encryptSymmetric(base64Data, ephemeralKey);
-    console.log(`[MediaTransport] Encrypted size: ${(encrypted.length / 1024).toFixed(1)} KB`);
 
-    const totalChunks = Math.ceil(encrypted.length / CHUNK_SIZE);
     const manifest = {
         mediaId: `media_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
         mimeType,
-        totalChunks,
         ephemeralKey,
-        nonce,
-        chunkHashes: []
+        nonce
     };
 
-    console.log(`[MediaTransport] Slicing into ${totalChunks} chunks...`);
-    const chunks = [];
-    for (let i = 0; i < totalChunks; i++) {
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, encrypted.length);
-        const chunkData = encrypted.slice(start, end);
-        const chunkId = `${manifest.mediaId}_chunk_${i}`;
-        manifest.chunkHashes.push(chunkId);
-        chunks.push({ id: chunkId, data: chunkData });
-    }
-
-    // Wait for relay wake-up to finish before uploading
-    try {
-        await wakePromise;
-        console.log('[MediaTransport] Relays are awake and ready.');
-    } catch (e) {
-        console.warn('[MediaTransport] Relay wake-up had issues, proceeding anyway:', e.message);
-    }
-
-    // --- TASK 9: Fetch Upload Token ---
-    let uploadToken = null;
-    try {
-        uploadToken = await getUploadToken();
-        if (uploadToken) {
-            console.log('[MediaTransport] Obtained media upload token.');
-        } else {
-            console.warn('[MediaTransport] Failed to obtain upload token, upload may fail.');
+    // --- Layer 4: Try Direct P2P Pipe first ---
+    if (recipientAddress && webrtcService.isPeerConnected(recipientAddress)) {
+        console.log(`[MediaTransport] Peer ${recipientAddress.slice(0, 10)} connected. Attempting P2P direct pipe...`);
+        try {
+            const p2pSuccess = await pipeMediaViaWebRTC(recipientAddress, manifest.mediaId, encrypted, onProgress);
+            if (p2pSuccess) {
+                manifest.isP2P = true;
+                return manifest;
+            }
+        } catch (err) {
+            console.warn('[MediaTransport] P2P pipe failed, falling back to IPFS:', err.message);
         }
+    }
+
+    // --- Layer 6 Fallback: IPFS (Pinata) ---
+    console.log('[MediaTransport] Uploading to IPFS...');
+    if (onProgress) onProgress(10); // Start progress
+
+    const pinataJwt = localStorage.getItem(PINATA_JWT_KEY);
+    if (!pinataJwt) {
+        throw new Error("Pinata JWT not found in Settings. Please configure it to send media when peers are offline.");
+    }
+
+    try {
+        // Since we already have the encrypted blob as a base64 string from encryptSymmetric
+        // we can pass it directly to uploadToIPFS.
+        // Wait, encryptSymmetric returns a base64 string? Let me check crypto.js
+        // No, encryptSymmetric in crypto.js returns { encrypted, nonce }. 
+        // Let's check what 'encrypted' is. In crypto.js, it's encodeBase64(nacl.secretbox(...))
+        
+        const cid = await uploadToIPFS(encrypted, pinataJwt);
+        manifest.cid = cid;
+        manifest.isIPFS = true;
+        
+        if (onProgress) onProgress(100);
+        return manifest;
     } catch (err) {
-        console.error('[MediaTransport] Error fetching upload token:', err.message);
+        console.error('[MediaTransport] IPFS Upload failed:', err);
+        throw err;
     }
-
-    console.log(`[MediaTransport] Uploading ${totalChunks} chunks to relays (Concurrency: ${CONCURRENCY_LIMIT})...`);
-    let uploadedCount = 0;
-
-    const uploadTasks = chunks.map(chunk => async () => {
-        const success = await uploadChunkWithRetry(chunk.id, chunk.data, uploadToken);
-        if (!success) {
-            throw new Error(`Failed to upload chunk ${chunk.id}`);
-        }
-        uploadedCount++;
-        if (onProgress) {
-            onProgress(Math.round((uploadedCount / totalChunks) * 100));
-        }
-        console.log(`[MediaTransport] Chunk ${uploadedCount}/${totalChunks} uploaded.`);
-    });
-
-    await runWithConcurrency(uploadTasks, CONCURRENCY_LIMIT);
-    console.log('[MediaTransport] All chunks uploaded successfully!');
-
-    return manifest;
 }
 
 /**
- * Downloads chunks from the relay pool and decrypts them back into a media blob.
- * @param {Object} manifest - The manifest object received over the signaling channel
- * @param {Function} onProgress - Callback with percentage (0-100)
- * @returns {Promise<string>} The decrypted base64 data
+ * Directly pipes media data over WebRTC in small 16KB fragments.
+ */
+async function pipeMediaViaWebRTC(peerAddress, mediaId, data, onProgress) {
+    const totalSize = data.length;
+    const totalPackets = Math.ceil(totalSize / WEBRTC_PACKET_SIZE);
+    
+    for (let i = 0; i < totalPackets; i++) {
+        const start = i * WEBRTC_PACKET_SIZE;
+        const end = Math.min(start + WEBRTC_PACKET_SIZE, totalSize);
+        const packet = data.slice(start, end);
+        
+        const success = webrtcService.sendToPeer(peerAddress, {
+            type: 'MEDIA_CHUNK',
+            mediaId,
+            index: i,
+            total: totalPackets,
+            data: packet
+        });
+
+        if (!success) return false;
+
+        if (onProgress && i % 5 === 0) {
+            onProgress(Math.round((i / totalPackets) * 100));
+        }
+        
+        // Minor delay to prevent flooding the data channel buffer
+        if (i % 10 === 0) await new Promise(r => setTimeout(r, 10));
+    }
+
+    if (onProgress) onProgress(100);
+    return true;
+}
+
+/**
+ * Downloads and decrypts media from manifest.
  */
 export async function fetchAndReconstructMedia(manifest, onProgress) {
-    const { totalChunks, chunkHashes, ephemeralKey, nonce } = manifest;
-
-    // Wake up relays before fetching
-    try {
-        await wakeUpRelays();
-    } catch (e) {
-        console.warn('[MediaTransport] Relay wake-up had issues, proceeding anyway.');
+    // 1. Check P2P Buffer
+    if (manifest.isP2P) {
+        console.log('[MediaTransport] P2P Media Reassembling from local buffer...');
+        const buffered = await getP2PMediaBuffer(manifest.mediaId);
+        if (buffered) {
+            return decryptSymmetric(buffered, manifest.nonce, manifest.ephemeralKey);
+        }
     }
 
-    console.log(`[MediaTransport] Fetching ${totalChunks} chunks from relays...`);
-    let downloadedCount = 0;
-
-    const fetchTasks = chunkHashes.map(chunkId => async () => {
-        const chunkData = await fetchChunkWithTimeout(chunkId);
-        if (!chunkData) {
-            throw new Error(`Failed to fetch chunk ${chunkId}`);
-        }
-        downloadedCount++;
-        if (onProgress) {
-            onProgress(Math.round((downloadedCount / totalChunks) * 100));
-        }
-        return chunkData;
-    });
-
-    const downloadedChunks = await runWithConcurrency(fetchTasks, CONCURRENCY_LIMIT);
-
-    console.log('[MediaTransport] Reassembling chunks and decrypting...');
-    const encryptedPayload = downloadedChunks.join('');
-
-    const decryptedBase64 = decryptSymmetric(encryptedPayload, nonce, ephemeralKey);
-    if (!decryptedBase64) {
-        throw new Error('Failed to decrypt media payload');
+    // 2. Check IPFS Fallback
+    if (manifest.isIPFS && manifest.cid) {
+        console.log('[MediaTransport] Fetching from IPFS CID:', manifest.cid);
+        if (onProgress) onProgress(20);
+        
+        const encryptedData = await fetchFromIPFS(manifest.cid);
+        
+        if (onProgress) onProgress(80);
+        
+        // The data returned from fetchFromIPFS (via FileReader.readAsDataURL) 
+        // is a data URL. We need the base64 part.
+        const base64Content = encryptedData.split(',')[1];
+        
+        const decrypted = decryptSymmetric(base64Content, manifest.nonce, manifest.ephemeralKey);
+        if (onProgress) onProgress(100);
+        return decrypted;
     }
 
-    console.log('[MediaTransport] Media reconstructed and decrypted successfully!');
-    return decryptedBase64;
+    throw new Error('Media not available (Peer offline and no IPFS fallback found)');
+}
+
+// Memory buffer for incoming P2P chunks
+const p2pBuffers = new Map(); // mediaId -> { packets: [], received: 0, total: 0 }
+
+export function handleIncomingMediaChunk(payload) {
+    const { mediaId, index, total, data } = payload;
+    if (!p2pBuffers.has(mediaId)) {
+        p2pBuffers.set(mediaId, { packets: new Array(total), received: 0, total });
+    }
+    const buffer = p2pBuffers.get(mediaId);
+    if (!buffer.packets[index]) {
+        buffer.packets[index] = data;
+        buffer.received++;
+    }
+}
+
+async function getP2PMediaBuffer(mediaId) {
+    const buffer = p2pBuffers.get(mediaId);
+    if (!buffer || buffer.received < buffer.total) return null;
+    const fullData = buffer.packets.join('');
+    p2pBuffers.delete(mediaId);
+    return fullData;
 }

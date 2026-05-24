@@ -52,12 +52,13 @@ class ErrorBoundary extends Component {
 }
 
 function AppContent() {
-  const { address, isConnected } = useWallet();
+  const { isConnected, address } = useWallet();
   const [username, setUsername] = useState(() => {
     return localStorage.getItem('decentrachat_username') || null;
   });
   const [showUsernameSetup, setShowUsernameSetup] = useState(false);
   const [isSocketReady, setIsSocketReady] = useState(false);
+  const [connectionError, setConnectionError] = useState(null);
 
   useEffect(() => {
     // Inform Capacitor Updater that the JS bundle successfully booted!
@@ -73,6 +74,7 @@ function AppContent() {
 
     (async () => {
       try {
+        setConnectionError(null);
         // Initialize socket
         initSocket();
 
@@ -84,7 +86,7 @@ function AppContent() {
         const storedUsername = localStorage.getItem('decentrachat_username');
         const storedAvatar = localStorage.getItem('decentrachat_avatar') || undefined;
         const storedStatus = localStorage.getItem('decentrachat_status') || undefined;
-        await register(address, keys.publicKey, storedUsername, storedAvatar, storedStatus);
+        await register(address, keys.publicKey, keys.signingPublicKey, storedUsername, storedAvatar, storedStatus);
 
         if (mounted) {
           setIsSocketReady(true);
@@ -101,6 +103,9 @@ function AppContent() {
         }
       } catch (err) {
         console.error('Failed to initialize:', err);
+        if (mounted) {
+            setConnectionError(err.message || 'Failed to connect to signaling server.');
+        }
       }
     })();
 
@@ -152,12 +157,25 @@ function AppContent() {
 
     if (!isSocketReady) {
       return (
-        <div className="wallet-connect-container">
+        <main className="wallet-connect-container">
           <div className="wallet-card glass-card animate-fadeIn">
-            <div className="spinner" style={{ width: '40px', height: '40px', margin: '0 auto' }}></div>
-            <p style={{ marginTop: '16px', color: 'var(--text-secondary)' }}>Connecting to network...</p>
+            {connectionError ? (
+                <>
+                    <div style={{ color: '#ef4444', marginBottom: '16px', textAlign: 'center' }}>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ margin: '0 auto' }}><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                    </div>
+                    <h3 style={{ margin: '0 0 8px 0', color: 'white' }}>Connection Failed</h3>
+                    <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '24px' }}>{connectionError}</p>
+                    <button className="btn btn-primary" onClick={() => window.location.reload()} style={{ width: '100%' }}>Retry Connection</button>
+                </>
+            ) : (
+                <>
+                    <div className="spinner" style={{ width: '40px', height: '40px', margin: '0 auto' }}></div>
+                    <p style={{ marginTop: '16px', color: 'var(--text-secondary)' }}>Connecting to network...</p>
+                </>
+            )}
           </div>
-        </div>
+        </main>
       );
     }
 
@@ -166,10 +184,7 @@ function AppContent() {
     }
 
     return (
-      <>
-        <WalletConnect username={username} />
-        <ChatInterface walletAddress={address} username={username} onDeleteAccount={handleDeleteAccount} />
-      </>
+      <ChatInterface walletAddress={address} username={username} onDeleteAccount={handleDeleteAccount} />
     );
   })();
 

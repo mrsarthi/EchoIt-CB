@@ -25,6 +25,10 @@ export function SettingsModal({ onClose, onDeleteAccount }) {
         return parseInt(localStorage.getItem(STORAGE_KEY)) || 15;
     });
 
+    const [pinataJwt, setPinataJwt] = useState(() => {
+        return localStorage.getItem('decentrachat_pinata_jwt') || '';
+    });
+
     // Update states: idle, checking, available, no-update, downloading, ready, error
     const [updateStatus, setUpdateStatus] = useState('idle');
     const [updateVersion, setUpdateVersion] = useState('');
@@ -40,6 +44,10 @@ export function SettingsModal({ onClose, onDeleteAccount }) {
         document.documentElement.style.fontSize = `${fontSize}px`;
         localStorage.setItem(STORAGE_KEY, fontSize.toString());
     }, [fontSize]);
+
+    useEffect(() => {
+        localStorage.setItem('decentrachat_pinata_jwt', pinataJwt);
+    }, [pinataJwt]);
 
     // Listen for update events while settings is open
     useEffect(() => {
@@ -131,6 +139,38 @@ export function SettingsModal({ onClose, onDeleteAccount }) {
                                     {preset.label}
                                 </button>
                             ))}
+                        </div>
+                    </div>
+
+                    {/* Decentralized Storage (IPFS) */}
+                    <div className="settings-section">
+                        <div className="settings-section-header">
+                            <span className="settings-section-icon">🌐</span>
+                            <h3>Decentralized Storage (IPFS)</h3>
+                        </div>
+                        <p className="settings-description">
+                            Provide your free Pinata JWT to securely upload media when direct P2P transfers fail. This ensures DecentraChat remains entirely decentralized.
+                        </p>
+                        <div className="settings-input-group" style={{ marginTop: '12px' }}>
+                            <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', color: 'var(--text-secondary)' }}>
+                                Pinata JWT
+                            </label>
+                            <input
+                                type="password"
+                                placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                                value={pinataJwt}
+                                onChange={(e) => setPinataJwt(e.target.value)}
+                                style={{ 
+                                    width: '100%', 
+                                    padding: '10px', 
+                                    borderRadius: 'var(--radius-md)', 
+                                    border: '1px solid rgba(255, 255, 255, 0.1)', 
+                                    background: 'var(--bg-tertiary)', 
+                                    color: 'var(--text-primary)',
+                                    fontFamily: 'monospace',
+                                    fontSize: '12px'
+                                }}
+                            />
                         </div>
                     </div>
 

@@ -14,7 +14,9 @@ import {
     onTypingStatus,
     searchUser,
     flushPendingMessages,
-    getUsersStatus
+    getUsersStatus,
+    connectToPeer,
+    decryptReceivedMessage
 } from '../services/messageService';
 import { getStoredKeys } from '../crypto/keyManager';
 import {
@@ -27,36 +29,38 @@ import {
     emitDeleteGroup,
     onGroupCreated,
     onGroupDeleted,
-    emitReaction,
-    onReaction,
-    emitUpdateGroupAvatar,
+    ackOfflineMessages,
     onGroupAvatarUpdated,
-    updateProfile as updateSocketProfile,
-    fetchOfflineMessages,
-    ackOfflineMessages
+    onReaction,
+    updateSocketProfile,
+    emitUpdateGroupAvatar
 } from '../services/socketService';
 import {
     saveMessage,
     getLocalHistory,
-    getMessagesPaginated,
     saveMessagesBulk,
     saveContacts,
     getSavedContacts,
     clearHistory,
     migrateOldHistory,
-    saveMedia,
-    getMedia,
-    setJoinedAt,
-    getJoinedAt
+    setJoinedAt
 } from '../services/storageService';
+import { getLoadedMessages, loadPreviousEpoch, getLatestEpochIndex, migrateToYjs } from '../services/stateEngine';
+
+import { getConversationTopic, subscribeToTopic } from '../services/wakuService';
+import { initSwarmSync } from '../services/swarmSync';
 
 export function useChat(myAddress) {
     const [messages, setMessages] = useState([]);
     const [contacts, setContacts] = useState([]);
     const [activeChat, setActiveChat] = useState(null);
     const [isLoading, setIsLoading] = useState(false);
+    
+    // Pagination (Epochs)
     const [isLoadingMore, setIsLoadingMore] = useState(false);
     const [hasMoreMessages, setHasMoreMessages] = useState(true);
+    const currentEpochRef = useRef(-1);
+    
     const [error, setError] = useState(null);
     const [connectionType, setConnectionType] = useState('offline');
     const [serverConnected, setServerConnected] = useState(false);
@@ -64,10 +68,14 @@ export function useChat(myAddress) {
     // Profile State
     const [myAvatar, setMyAvatar] = useState(() => localStorage.getItem('decentrachat_avatar') || null);
     const [myStatus, setMyStatus] = useState(() => localStorage.getItem('decentrachat_status') || null);
+    const [myTrustScore, setMyTrustScore] = useState(0);
+    const [myTrustStage, setMyTrustStage] = useState(1);
+    const [myRegisteredAt, setMyRegisteredAt] = useState(null);
 
     const activeChatRef = useRef(null);
     const keysRef = useRef(null);
     const initializedRef = useRef(false);
+    const syncCleanupRef = useRef(null);
     const statusUnsubscribeRef = useRef(null);
     const reconnectUnsubscribeRef = useRef(null);
     const [flushingOutbox, setFlushingOutbox] = useState(false);
@@ -94,11 +102,17 @@ export function useChat(myAddress) {
         }
     }, [contacts]);
 
+    const fetchOfflineMessages = async () => {
+        const { getSocket } = await import('../services/socketService');
+        const socket = getSocket();
+        if (socket) socket.emit('fetchOfflineMessages');
+    };
+
     const createGroup = useCallback(async (groupName, memberAddresses) => {
         const groupId = `group_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         const allMembers = [...new Set([myAddress, ...memberAddresses])];
         const groupContact = {
-            address: groupId, // Use groupId as the address key
+            address: groupId, 
             username: groupName,
             isGroup: true,
             members: allMembers,
@@ -111,7 +125,6 @@ export function useChat(myAddress) {
         setContacts(prev => [groupContact, ...prev]);
         setActiveChat({ address: groupId, info: groupContact, isGroup: true, members: groupContact.members });
 
-        // Notify all members via the server so it shows up on their devices
         emitCreateGroup(groupId, groupName, allMembers, [myAddress], null);
 
         return groupContact;
@@ -120,7 +133,6 @@ export function useChat(myAddress) {
     const deleteGroup = useCallback(async (groupId) => {
         if (!groupId) return;
 
-        // Capture members BEFORE removing the group so we can notify them
         let groupMembers = [];
         setContacts(prev => {
             const group = prev.find(c => c.address === groupId && c.isGroup);
@@ -128,17 +140,13 @@ export function useChat(myAddress) {
             return prev;
         });
 
-        // Remove from contacts
         setContacts(prev => prev.filter(c => c.address !== groupId));
-        // Clear local message history
         await clearHistory(groupId);
-        // Close chat if this group is currently open
         if (activeChatRef.current?.address === groupId) {
             setActiveChat(null);
             setMessages([]);
         }
 
-        // Notify all members via the server so they also remove it
         if (groupMembers.length > 0) {
             emitDeleteGroup(groupId, groupMembers);
         }
@@ -148,7 +156,6 @@ export function useChat(myAddress) {
 
     const removeMember = useCallback(async (groupId, memberAddress) => {
         if (!groupId || !memberAddress) return;
-        // If removing self, treat as leaving the group
         if (memberAddress.toLowerCase() === myAddress?.toLowerCase()) {
             await deleteGroup(groupId);
             return;
@@ -156,7 +163,6 @@ export function useChat(myAddress) {
 
         let currentMembers = [];
 
-        // Update the members list in contacts
         setContacts(prev => prev.map(c => {
             if (c.address === groupId && c.isGroup) {
                 currentMembers = c.members || [];
@@ -170,12 +176,11 @@ export function useChat(myAddress) {
             return c;
         }));
 
-        // Notify server to update registry and broadcast
-        import('../services/socketService').then(({ emitRemoveGroupMember }) => {
-            emitRemoveGroupMember(groupId, memberAddress, currentMembers);
-        });
+        const { emitRemoveGroupMember } = await import('../services/socketService');
+        emitRemoveGroupMember(groupId, memberAddress, currentMembers);
 
-        // Also update active chat if this group is open
+        localStorage.setItem(`tripwire_${groupId}`, '100');
+
         if (activeChatRef.current?.address === groupId) {
             setActiveChat(prev => ({
                 ...prev,
@@ -195,7 +200,6 @@ export function useChat(myAddress) {
 
     // ====== REACTIONS ======
 
-    // Helper: apply a reaction mutation to a messages array
     const applyReaction = (msgs, messageId, emoji, from, action) => {
         return msgs.map(m => {
             if (m.id !== messageId) return m;
@@ -221,25 +225,22 @@ export function useChat(myAddress) {
     const toggleReaction = useCallback(async (messageId, emoji) => {
         if (!messageId || !emoji || !myAddress) return;
 
-        // Check if we already reacted with this emoji
         const msg = messages.find(m => m.id === messageId);
         if (!msg) return;
         const existing = (msg.reactions?.[emoji] || []);
         const alreadyReacted = existing.some(a => a.toLowerCase() === myAddress.toLowerCase());
         const action = alreadyReacted ? 'remove' : 'add';
 
-        // Update local state immediately
         setMessages(prev => applyReaction(prev, messageId, emoji, myAddress, action));
 
-        // Persist the updated message to storage
         const chatId = activeChatRef.current?.address;
         if (chatId) {
             const updated = applyReaction([msg], messageId, emoji, myAddress, action)[0];
             await saveMessage(chatId, updated);
         }
 
-        // Emit to server
         const ac = activeChatRef.current;
+        const { emitReaction } = await import('../services/messageService');
         if (ac?.isGroup) {
             emitReaction(messageId, emoji, action, null, ac.address, ac.members);
         } else {
@@ -252,7 +253,6 @@ export function useChat(myAddress) {
         if (!activeChat || !myAddress) return;
 
         if (activeChat.isGroup) {
-            // Send to all members except me
             activeChat.members?.forEach(memberAddr => {
                 if (memberAddr.toLowerCase() !== myAddress.toLowerCase()) {
                     sendTypingStatus(memberAddr, isTyping, activeChat.address);
@@ -270,16 +270,26 @@ export function useChat(myAddress) {
         let mounted = true;
 
         (async () => {
-            // ... (Init logic remains same, but we hook into onTypingStatus too)
             await initMessaging();
-
-            // Run V2 Storage Migration (one-time, no-op if already done)
+            await migrateToYjs();
             await migrateOldHistory();
 
-            // Set "Member Since" date (first-time only)
+            const fetchOwnProfile = async () => {
+                try {
+                    const profile = await getUser(myAddress);
+                    if (profile && mounted) {
+                        if (profile.trustScore !== undefined) setMyTrustScore(profile.trustScore);
+                        if (profile.trustStage !== undefined) setMyTrustStage(profile.trustStage);
+                        if (profile.registeredAt !== undefined) setMyRegisteredAt(profile.registeredAt);
+                    }
+                } catch (err) {
+                    console.debug('Failed to fetch own profile:', err);
+                }
+            };
+            
+            fetchOwnProfile();
             await setJoinedAt(Date.now());
 
-            // --- TASK 6: Group Syncing from Server Registry ---
             const syncGroups = async () => {
                 try {
                     const { getMyGroups } = await import('../services/socketService');
@@ -295,7 +305,6 @@ export function useChat(myAddress) {
                                     newContacts.push(sg);
                                     changed = true;
                                 } else if (JSON.stringify(existing.members) !== JSON.stringify(sg.members)) {
-                                    // Update member list if changed
                                     const idx = newContacts.findIndex(c => c.address.toLowerCase() === sg.address.toLowerCase());
                                     newContacts[idx] = { ...existing, members: sg.members };
                                     changed = true;
@@ -304,65 +313,18 @@ export function useChat(myAddress) {
 
                             return changed ? newContacts : prev;
                         });
-                        console.log(`👥 Synced ${serverGroups.length} groups from server registry.`);
                     }
                 } catch (err) {
                     console.error('Failed to sync groups:', err);
                 }
             };
 
-            // Sync immediately and on every reconnection
             syncGroups();
-            const unsubReconnectGroups = onReconnect(syncGroups);
+            onReconnect(syncGroups);
 
-            // --- TASK 11: Group History Catch-up ---
-            const catchUpGroups = async () => {
-                const currentContacts = await getSavedContacts();
-                const groupChats = currentContacts.filter(c => c.isGroup);
-                
-                for (const group of groupChats) {
-                    try {
-                        const { getMessagesPaginated } = await import('../services/storageService');
-                        const localMsgs = await getMessagesPaginated(group.address, 1);
-                        const lastSeq = localMsgs.length > 0 ? (localMsgs[0].sequence_no || 0) : 0;
-                        
-                        console.log(`🔄 Catching up group ${group.address.slice(0, 8)} from seq ${lastSeq}...`);
-                        const missed = await socketService.syncGroup(group.address, lastSeq);
-                        
-                        if (missed && missed.length > 0) {
-                            console.log(`📥 Integrating ${missed.length} missed messages for group ${group.address.slice(0, 8)}`);
-                            for (const msg of missed) {
-                                await saveMessage(group.address, msg);
-                            }
-                            
-                            // If this is the active chat, update the UI
-                            if (activeChatRef.current?.address?.toLowerCase() === group.address.toLowerCase()) {
-                                setMessages(prev => {
-                                    const newMsgs = [...prev];
-                                    missed.forEach(m => {
-                                        if (!newMsgs.some(em => em.id === m.id)) {
-                                            newMsgs.push(m);
-                                        }
-                                    });
-                                    return newMsgs.sort((a, b) => a.timestamp - b.timestamp);
-                                });
-                            }
-                        }
-                    } catch (err) {
-                        console.error(`Catch-up failed for group ${group.address}:`, err);
-                    }
-                }
-            };
-
-            catchUpGroups();
-            const unsubReconnectCatchup = onReconnect(catchUpGroups);
-
-            // Load persist contacts immediately
             const cachedContacts = await getSavedContacts();
             if (mounted && cachedContacts.length > 0) {
                 setContacts(cachedContacts);
-                
-                // Fetch latest online/avatar data for all loaded contacts
                 const addresses = cachedContacts.map(c => c.address);
                 getUsersStatus(addresses).then(statuses => {
                     if (!mounted) return;
@@ -374,7 +336,10 @@ export function useChat(myAddress) {
                                 online: statusObj.online, 
                                 lastSeen: statusObj.lastSeen,
                                 ...(statusObj.avatar !== undefined && statusObj.avatar !== null && { avatar: statusObj.avatar }),
-                                ...(statusObj.status !== undefined && statusObj.status !== null && { status: statusObj.status })
+                                ...(statusObj.status !== undefined && statusObj.status !== null && { status: statusObj.status }),
+                                ...(statusObj.trustScore !== undefined && { trustScore: statusObj.trustScore }),
+                                ...(statusObj.trustStage !== undefined && { trustStage: statusObj.trustStage }),
+                                ...(statusObj.registeredAt !== undefined && { registeredAt: statusObj.registeredAt })
                             };
                         }
                         return c;
@@ -386,36 +351,19 @@ export function useChat(myAddress) {
             if (!keys || !mounted) return;
             keysRef.current = keys;
 
-            // IMPORTANT: Set up all message subscriptions BEFORE registering.
-            // The server delivers offline messages immediately on register,
-            // so handlers must be ready before we call registerUser.
-
-            // Subscribe to typing status
             onTypingStatus(({ from, isTyping, groupId }) => {
                 const chatId = groupId || from;
-
                 setTypingStatus(prev => {
                     const chatStatus = prev[chatId] || {};
-
                     if (!isTyping) {
                         const newStatus = { ...chatStatus };
                         delete newStatus[from];
                         return { ...prev, [chatId]: newStatus };
                     }
-
-                    return {
-                        ...prev,
-                        [chatId]: {
-                            ...chatStatus,
-                            [from]: Date.now()
-                        }
-                    };
+                    return { ...prev, [chatId]: { ...chatStatus, [from]: Date.now() } };
                 });
-
-                // Auto-clear after 3 seconds (safety net)
                 const timeoutKey = `${chatId}_${from}`;
                 if (typingTimeoutRef.current[timeoutKey]) clearTimeout(typingTimeoutRef.current[timeoutKey]);
-
                 if (isTyping) {
                     typingTimeoutRef.current[timeoutKey] = setTimeout(() => {
                         setTypingStatus(prev => {
@@ -431,150 +379,81 @@ export function useChat(myAddress) {
 
             subscribeToMessages(async (msg) => {
                 const contactId = msg.groupId || msg.from;
-                
-                // Task 3: Emergency Key Refresh for decryption failures
                 let processedMsg = msg;
                 if (processedMsg.decryptionFailed && !processedMsg.isRetry && !processedMsg.groupId) {
-                    console.log(`🔍 Decryption failed for message from ${processedMsg.from?.slice(0, 10)}. Triggering emergency key refresh...`);
                     try {
                         const { verifyRecipientKey, decryptReceivedMessage } = await import('../services/messageService');
                         const contact = contacts.find(c => c.address.toLowerCase() === processedMsg.from?.toLowerCase());
                         const changed = await verifyRecipientKey(processedMsg.from, contact);
-                        
                         if (changed) {
-                            // If key changed, try one more time (though if they used our old key, this still fails)
-                            // But if WE are the sender loading history, this is crucial.
                             const retried = await decryptReceivedMessage({ ...processedMsg, isRetry: true }, keysRef.current, myAddress);
-                            if (!retried.decryptionFailed) {
-                                processedMsg = retried;
-                                console.log('✅ Emergency key refresh recovered the message!');
-                            }
+                            if (!retried.decryptionFailed) processedMsg = retried;
                         }
-                    } catch (err) {
-                        console.error('Emergency key refresh failed:', err);
-                    }
+                    } catch (err) { console.error('Emergency key refresh failed:', err); }
                 }
 
-                console.log('📨 Received message:', {
-                    id: processedMsg.id,
-                    from: processedMsg.from,
-                    to: processedMsg.to,
-                    groupId: processedMsg.groupId,
-                    contactId,
-                    content: processedMsg.content?.slice(0, 20)
-                });
-
-                // Determine if the chat is actively open to mark it read instantly in storage
                 const isActive = activeChatRef.current?.address?.toLowerCase() === contactId?.toLowerCase();
                 if (processedMsg.from && processedMsg.from.toLowerCase() !== myAddress.toLowerCase()) {
-                    if (isActive) {
-                        processedMsg.status = 'read'; 
-                    }
+                    if (isActive) processedMsg.status = 'read'; 
                 }
 
-                // Save to local storage immediately
                 try {
                     await saveMessage(contactId, processedMsg);
                     if (processedMsg.id) ackOfflineMessages([processedMsg.id]);
-                    console.log(`💾 Persisted incoming message from ${contactId}`);
-                } catch (err) {
-                    console.error('❌ Failed to persist incoming message:', err);
-                }
+                } catch (err) { console.error('Failed to persist incoming message:', err); }
 
-                // Send delivery receipts (for DMs and Groups)
                 if (processedMsg.from && processedMsg.from.toLowerCase() !== myAddress.toLowerCase()) {
                     sendDeliveryReceipt(processedMsg.from, processedMsg.id, contactId);
-                    if (isActive) {
-                        sendReadReceipt(processedMsg.from, processedMsg.id, contactId);
-                    }
+                    if (isActive) sendReadReceipt(processedMsg.from, processedMsg.id, contactId);
                 }
 
-                // Handle incoming message
                 setMessages(prev => {
                     const exists = prev.some(m => m.id === processedMsg.id);
                     if (exists) return prev.map(m => m.id === processedMsg.id ? processedMsg : m);
-
-                    // Filter: Only add if it belongs to current active chat
                     const activeAddress = activeChatRef.current?.address?.toLowerCase();
                     if (!activeAddress) return prev;
-
                     const isActiveGroup = activeChatRef.current?.isGroup;
-                    let isRelevant = false;
-
-                    if (isActiveGroup) {
-                        // Active chat is Group. Msg must match group ID.
-                        isRelevant = processedMsg.groupId === activeAddress;
-                    } else {
-                        // Active chat is DM. Msg must be DM (no groupId) and match contact address.
-                        // Either from contact OR sent by me to contact
-                        if (!processedMsg.groupId) {
-                            isRelevant = (processedMsg.from?.toLowerCase() === activeAddress) ||
-                                (processedMsg.to?.toLowerCase() === activeAddress);
-                        }
-                    }
-
-                    if (isRelevant) {
-                        return [...prev, processedMsg];
-                    }
+                    let isRelevant = isActiveGroup ? processedMsg.groupId === activeAddress : (!processedMsg.groupId && (processedMsg.from?.toLowerCase() === activeAddress || processedMsg.to?.toLowerCase() === activeAddress));
+                    if (isRelevant) return [...prev, processedMsg];
                     return prev;
                 });
 
-                // Update contacts / Create Group if needed
                 if (msg.from && msg.from.toLowerCase() !== myAddress.toLowerCase()) {
                     setContacts(prev => {
-                        // Determine the "Contact ID" (User ID or Group ID)
                         const contactId = msg.groupId || msg.from;
                         const isGroup = !!msg.groupId;
-
                         const existingIndex = prev.findIndex(c => c.address.toLowerCase() === contactId.toLowerCase());
                         const isCurrentChat = activeChatRef.current?.address?.toLowerCase() === contactId.toLowerCase();
 
                         if (existingIndex === -1) {
-                            if (isGroup) {
-                                // NEW GROUP DISCOVERED
-                                return [{
-                                    address: msg.groupId,
-                                    username: msg.groupName || 'Unknown Group',
-                                    isGroup: true,
-                                    members: msg.members || [myAddress, msg.from], // Fallback
-                                    lastMessageTime: msg.timestamp,
-                                    unreadCount: isCurrentChat ? 0 : 1,
-                                    online: true
-                                }, ...prev];
-                            } else {
-                                // NEW DM
-                                return [{
-                                    address: msg.from,
-                                    username: msg.senderUsername,
-                                    lastMessageTime: msg.timestamp,
-                                    unreadCount: isCurrentChat ? 0 : 1,
-                                    online: true,
-                                    lastSeen: Date.now()
-                                }, ...prev];
-                            }
-                        } else {
-                            // Update existing
-                            const updated = [...prev];
-                            const existing = updated[existingIndex];
-
-                            updated[existingIndex] = {
-                                ...existing,
+                            const newContact = isGroup ? {
+                                address: msg.groupId,
+                                username: msg.groupName || 'Unknown Group',
+                                isGroup: true,
+                                members: msg.members || [myAddress, msg.from],
                                 lastMessageTime: msg.timestamp,
-                                unreadCount: isCurrentChat ? 0 : (existing.unreadCount || 0) + 1,
+                                unreadCount: isCurrentChat ? 0 : 1,
+                                online: true
+                            } : {
+                                address: msg.from,
+                                username: msg.senderUsername,
+                                lastMessageTime: msg.timestamp,
+                                unreadCount: isCurrentChat ? 0 : 1,
                                 online: true,
                                 lastSeen: Date.now()
                             };
-
-                            // Update group metadata if provided
-                            if (isGroup && msg.members) {
-                                updated[existingIndex].members = msg.members;
-                            }
-                            // Update dm username if provided
-                            if (!isGroup && msg.senderUsername) {
-                                updated[existingIndex].username = msg.senderUsername;
-                            }
-
-                            // Move to top
+                            return [newContact, ...prev];
+                        } else {
+                            const updated = [...prev];
+                            updated[existingIndex] = {
+                                ...updated[existingIndex],
+                                lastMessageTime: msg.timestamp,
+                                unreadCount: isCurrentChat ? 0 : (updated[existingIndex].unreadCount || 0) + 1,
+                                online: true,
+                                lastSeen: Date.now(),
+                                ...(isGroup && msg.members && { members: msg.members }),
+                                ...(!isGroup && msg.senderUsername && { username: msg.senderUsername })
+                            };
                             updated.sort((a, b) => b.lastMessageTime - a.lastMessageTime);
                             return updated;
                         }
@@ -582,465 +461,236 @@ export function useChat(myAddress) {
                 }
             }, keys);
 
-            // Subscribe to server-delivered group messages (handles offline queued delivery)
             onGroupMessage(async (msg) => {
                 if (!msg.groupId) return;
-
-                // Find the matching group contact
-                const groupContact = contacts.find(c => c.isGroup && c.address === msg.groupId);
-                if (!groupContact) return; // Not a group we know about, ignore
-
-                // Persist to local storage
                 try {
                     await saveMessage(msg.groupId, msg);
                     if (msg.id) ackOfflineMessages([msg.id]);
-                } catch (err) {
-                    console.error('Failed to persists group message:', err);
-                }
-
-                // Add to messages state if the group chat is currently open
+                } catch (err) { console.error('Failed to persists group message:', err); }
                 if (activeChatRef.current?.address === msg.groupId) {
-                    setMessages(prev => {
-                        if (prev.some(m => m.id === msg.id)) return prev;
-                        return [...prev, msg];
-                    });
+                    setMessages(prev => prev.some(m => m.id === msg.id) ? prev : [...prev, msg]);
                 } else {
-                    // Increment unread badge on the group contact
-                    setContacts(prev => prev.map(c =>
-                        c.address === msg.groupId
-                            ? { ...c, unreadCount: (c.unreadCount || 0) + 1, lastMessageTime: msg.timestamp }
-                            : c
-                    ));
+                    setContacts(prev => prev.map(c => c.address === msg.groupId ? { ...c, unreadCount: (c.unreadCount || 0) + 1, lastMessageTime: msg.timestamp } : c));
                 }
             });
 
-            // Listen for group created events (other members notifying us)
             onGroupCreated((data) => {
                 const { id, groupId, groupName, members, admins, createdBy } = data;
                 if (!groupId) return;
-
-                // ACK delivery immediately upon processing
                 if (id) ackOfflineMessages([id]);
-
-                // Add group to contacts if we don't already have it
-                setContacts(prev => {
-                    const exists = prev.some(c => c.address.toLowerCase() === groupId.toLowerCase());
-                    if (exists) return prev;
-
-                    console.log(`👥 New group received: ${groupName} (${groupId.slice(0, 10)})`);
-                    return [{
-                        address: groupId,
-                        username: groupName || 'Unknown Group',
-                        isGroup: true,
-                        members: members || [myAddress, createdBy],
-                        admins: admins || [createdBy],
-                        lastMessageTime: data.timestamp || Date.now(),
-                        unreadCount: 0,
-                        online: true
-                    }, ...prev];
-                });
+                setContacts(prev => prev.some(c => c.address.toLowerCase() === groupId.toLowerCase()) ? prev : [{
+                    address: groupId,
+                    username: groupName || 'Unknown Group',
+                    isGroup: true,
+                    members: members || [myAddress, createdBy],
+                    admins: admins || [createdBy],
+                    lastMessageTime: data.timestamp || Date.now(),
+                    unreadCount: 0,
+                    online: true
+                }, ...prev]);
             });
 
-            // Listen for group deleted events (admin deleted the group)
             onGroupDeleted(async (data) => {
                 const { id, groupId } = data;
                 if (!groupId) return;
-
-                console.log(`👥 Group deleted notification: ${groupId.slice(0, 10)}`);
-
-                // ACK delivery immediately
                 if (id) ackOfflineMessages([id]);
-
-                // Remove from contacts
                 setContacts(prev => prev.filter(c => c.address !== groupId));
-
-                // Clear local message history
                 await clearHistory(groupId);
-
-                // Close chat if this group is currently open
                 if (activeChatRef.current?.address === groupId) {
                     setActiveChat(null);
                     setMessages([]);
                 }
             });
 
-            // Listen for group avatar updates from admins
             onGroupAvatarUpdated((data) => {
                 const { id, groupId, avatar } = data;
                 if (!groupId) return;
-
-                // ACK delivery immediately
                 if (id) ackOfflineMessages([id]);
-
-                // Update avatar on the group contact
-                setContacts(prev => prev.map(c =>
-                    c.address === groupId && c.isGroup
-                        ? { ...c, avatar: avatar }
-                        : c
-                ));
-
-                // Update active chat if this group is currently open
+                setContacts(prev => prev.map(c => (c.address === groupId && c.isGroup) ? { ...c, avatar } : c));
                 if (activeChatRef.current?.address === groupId) {
-                    setActiveChat(prev => ({
-                        ...prev,
-                        info: { ...prev.info, avatar: avatar }
-                    }));
+                    setActiveChat(prev => ({ ...prev, info: { ...prev.info, avatar } }));
                 }
-
-                console.log(`👥🖼 Group avatar updated for ${groupId.slice(0, 10)}`);
             });
 
-            // Listen for incoming reactions from other participants
             onReaction((data) => {
                 const { id, messageId, emoji, from, action } = data;
                 if (!messageId || !emoji || !from) return;
-
-                // ACK delivery immediately
                 if (id) ackOfflineMessages([id]);
-
-                // Update messages state if we have this message loaded
-                setMessages(prev => {
-                    const hasMsg = prev.some(m => m.id === messageId);
-                    if (!hasMsg) return prev;
-                    return applyReaction(prev, messageId, emoji, from, action || 'add');
-                });
-
-                // Persist to storage
+                setMessages(prev => prev.some(m => m.id === messageId) ? applyReaction(prev, messageId, emoji, from, action || 'add') : prev);
                 const chatId = activeChatRef.current?.address;
                 if (chatId) {
                     getLocalHistory(chatId).then(history => {
                         const msg = history.find(m => m.id === messageId);
-                        if (msg) {
-                            const updated = applyReaction([msg], messageId, emoji, from, action || 'add')[0];
-                            saveMessage(chatId, updated);
-                        }
+                        if (msg) saveMessage(chatId, applyReaction([msg], messageId, emoji, from, action || 'add')[0]);
                     });
                 }
             });
 
-            // ... (rest of init - receipts, connection, status) ...
-            // Copying existing receipt/connection logic...
             onMessageReceipt(({ messageId, type, from, chatId }) => {
-                // Task 13: Background profile fetch for unknown senders
                 if (from) {
                     setContacts(prev => {
-                        const isKnown = prev.some(c => c.address.toLowerCase() === from.toLowerCase());
-                        if (!isKnown) {
-                            getUser(from).then(freshUser => {
-                                if (freshUser) {
-                                    setContacts(latest => {
-                                        if (latest.some(c => c.address.toLowerCase() === from.toLowerCase())) return latest;
-                                        return [...latest, {
-                                            address: freshUser.address,
-                                            username: freshUser.username,
-                                            avatar: freshUser.avatar,
-                                            online: freshUser.online,
-                                            lastMessageTime: Date.now(),
-                                            unreadCount: 0
-                                        }];
-                                    });
-                                }
-                            }).catch(err => console.debug('Background profile fetch failed:', err));
-                        }
+                        if (prev.some(c => c.address.toLowerCase() === from.toLowerCase())) return prev;
+                        getUser(from).then(freshUser => {
+                            if (freshUser) {
+                                setContacts(latest => latest.some(c => c.address.toLowerCase() === from.toLowerCase()) ? latest : [...latest, {
+                                    address: freshUser.address,
+                                    username: freshUser.username,
+                                    avatar: freshUser.avatar,
+                                    online: freshUser.online,
+                                    lastMessageTime: Date.now(),
+                                    unreadCount: 0,
+                                    trustScore: freshUser.trustScore,
+                                    trustStage: freshUser.trustStage,
+                                    registeredAt: freshUser.registeredAt
+                                }]);
+                            }
+                        }).catch(() => {});
                         return prev;
                     });
                 }
-
-                // Update local state if the chat is currently active
-                setMessages(prev => prev.map(m => {
-                    if (m.id === messageId) {
-                        const newReceipts = { ...(m.receipts || {}) };
-                        newReceipts[from.toLowerCase()] = type;
-                        return { ...m, receipts: newReceipts };
-                    }
-                    return m;
-                }));
-                
-                // Persist the receipt into storage so it survives app restarts
+                setMessages(prev => prev.map(m => m.id === messageId ? { ...m, receipts: { ...(m.receipts || {}), [from.toLowerCase()]: type } } : m));
                 if (from && messageId) {
-                    import('../services/storageService').then(s => {
-                         // Pass chatId to enable localized high-performance writes to both DB versions
-                         s.updateMessageReceipt(chatId, [messageId], from, type).catch(err => console.debug('Failed updating receipt:', err));
-                    });
+                    import('../services/storageService').then(s => s.updateMessageReceipt(chatId, [messageId], from, type).catch(() => {}));
                 }
             });
 
             onConnectionChange(async (isConnected) => {
                 setServerConnected(isConnected);
                 if (!isConnected) setConnectionType('offline');
-                // ... sync status logic ...
             });
 
-            // Listen for user status updates (online/offline)
             statusUnsubscribeRef.current = onUserStatus((data) => {
-                const { address: userAddr, online, lastSeen, avatar, status } = data;
-                
-                // Update contacts
-                setContacts(prev => prev.map(c => {
-                    if (!c.isGroup && c.address.toLowerCase() === userAddr.toLowerCase()) {
-                        return { 
-                            ...c, 
-                            online, 
-                            lastSeen,
-                            // Only overwrite avatar/status if server actually has data.
-                            // When server restarts, these come back as null/undefined — don't erase local cache.
-                            ...(avatar && { avatar }),
-                            ...(status && { status })
-                        };
-                    }
-                    return c;
-                }));
-                
-                // Update active chat info if viewing that user
+                const { address: userAddr, online, lastSeen, avatar, status, trustScore, trustStage, registeredAt } = data;
+                setContacts(prev => prev.map(c => (!c.isGroup && c.address.toLowerCase() === userAddr.toLowerCase()) ? { 
+                    ...c, online, lastSeen, 
+                    ...(avatar && { avatar }), 
+                    ...(status && { status }),
+                    ...(trustScore !== undefined && { trustScore }),
+                    ...(trustStage !== undefined && { trustStage }),
+                    ...(registeredAt !== undefined && { registeredAt })
+                } : c));
                 if (activeChatRef.current?.address?.toLowerCase() === userAddr.toLowerCase() && !activeChatRef.current.isGroup) {
                     setActiveChat(prev => ({ 
-                        ...prev, 
-                        online, 
-                        lastSeen,
-                        ...(avatar && { avatar }),
-                        ...(status && { status })
+                        ...prev, online, lastSeen, 
+                        ...(avatar && { avatar }), 
+                        ...(status && { status }),
+                        info: {
+                            ...prev.info,
+                            online,
+                            lastSeen,
+                            ...(avatar && { avatar }),
+                            ...(status && { status }),
+                            ...(trustScore !== undefined && { trustScore }),
+                            ...(trustStage !== undefined && { trustStage }),
+                            ...(registeredAt !== undefined && { registeredAt })
+                        }
                     }));
                 }
-
-                // When a contact comes online, flush any queued messages for them
                 if (online && myAddress) {
                     flushPendingMessages(myAddress, ({ id, msgStatus }) => {
-                        setMessages(prev => prev.map(m =>
-                            m.id === id ? { ...m, status: msgStatus, transport: 'relay' } : m
-                        ));
-                    }).catch(err => console.debug('Flush on status change failed:', err));
+                        setMessages(prev => prev.map(m => m.id === id ? { ...m, status: msgStatus, transport: 'relay' } : m));
+                    }).catch(() => {});
                 }
             });
 
-            // NOW register — all handlers are ready to receive offline messages
-            await registerUser(myAddress, keys.publicKey);
             if (!mounted) return;
-
-            // Handlers are up, Explicitly ask server to dump offline messages
             fetchOfflineMessages();
-
             initializedRef.current = true;
 
-            // === RECONNECT HANDLER ===
-            // On reconnect: flush outbox + sync missed messages for all contacts
             reconnectUnsubscribeRef.current = onReconnect(async () => {
-                console.log('🔄 Reconnect detected. Syncing offline messages...');
-
-                // 0. Fetch anything queued in the server's volatile offlineMessages map
+                console.log('🔄 Reconnect detected. Syncing...');
                 fetchOfflineMessages();
-
-                // 1. Flush outbox (send queued messages)
+                fetchOwnProfile();
                 setFlushingOutbox(true);
                 try {
-                    const result = await flushPendingMessages(myAddress, ({ id, status }) => {
-                        // Update message status in active chat if visible
-                        setMessages(prev => prev.map(m =>
-                            m.id === id ? { ...m, status, transport: 'relay' } : m
-                        ));
+                    await flushPendingMessages(myAddress, ({ id, status }) => {
+                        setMessages(prev => prev.map(m => m.id === id ? { ...m, status, transport: 'relay' } : m));
                     });
-                    if (result.sent > 0) {
-                        console.log(`📤 Flushed ${result.sent} queued messages`);
-                    }
-                } catch (err) {
-                    console.error('Outbox flush failed:', err);
-                } finally {
-                    setFlushingOutbox(false);
-                }
+                } catch (err) { console.error('Outbox flush failed:', err); } finally { setFlushingOutbox(false); }
 
-                // 2. Sync missed messages for all contacts
                 setContacts(currentContacts => {
-                    // Use the latest contacts state
                     const contactsToSync = [...currentContacts];
-
-                    // Fire async sync but don't await in the setState
                     (async () => {
                         for (const contact of contactsToSync) {
-                            if (contact.isGroup) continue; // Groups use fan-out, skip
+                            if (contact.isGroup) continue;
                             try {
                                 const serverHistory = await getHistory(contact.address);
                                 if (serverHistory && serverHistory.length > 0) {
                                     const localHistory = await getLocalHistory(contact.address);
                                     const existingIds = new Set(localHistory.map(m => m.id));
                                     const newMsgs = serverHistory.filter(m => !existingIds.has(m.id));
-
                                     if (newMsgs.length > 0) {
                                         await saveMessagesBulk(contact.address, newMsgs);
-                                        console.log(`📥 Synced ${newMsgs.length} missed messages for ${contact.address.slice(0, 10)}`);
-
-                                        // Update unread count for this contact
-                                        const incomingCount = newMsgs.filter(
-                                            m => m.from?.toLowerCase() !== myAddress.toLowerCase()
-                                        ).length;
-
-                                        if (incomingCount > 0) {
-                                            const isActiveChat = activeChatRef.current?.address?.toLowerCase() === contact.address.toLowerCase();
-                                            setContacts(prev => prev.map(c => {
-                                                if (c.address.toLowerCase() === contact.address.toLowerCase()) {
-                                                    return {
-                                                        ...c,
-                                                        lastMessageTime: Math.max(c.lastMessageTime || 0, ...newMsgs.map(m => m.timestamp))
-                                                    };
-                                                }
-                                                return c;
-                                            }));
-
-                                            // If the active chat is open for this contact, add to visible messages
-                                            if (isActiveChat && keysRef.current) {
-                                                const { decryptReceivedMessage } = await import('../services/messageService');
-                                                for (const msg of newMsgs) {
-                                                    const decrypted = await decryptReceivedMessage(msg, keysRef.current, myAddress);
-                                                    setMessages(prev => {
-                                                        if (prev.some(m => m.id === decrypted.id)) return prev;
-                                                        return [...prev, decrypted].sort((a, b) => {
-                                                            const aTime = a.savedAt || a.timestamp;
-                                                            const bTime = b.savedAt || b.timestamp;
-                                                            const timeDiff = aTime - bTime;
-                                                            if (timeDiff !== 0) return timeDiff;
-                                                            return (a.id || '').localeCompare(b.id || '');
-                                                        });
-                                                    });
-                                                }
+                                        const isActiveChat = activeChatRef.current?.address?.toLowerCase() === contact.address.toLowerCase();
+                                        setContacts(prev => prev.map(c => c.address.toLowerCase() === contact.address.toLowerCase() ? { ...c, lastMessageTime: Math.max(c.lastMessageTime || 0, ...newMsgs.map(m => m.timestamp)) } : c));
+                                        if (isActiveChat && keysRef.current) {
+                                            const { decryptReceivedMessage } = await import('../services/messageService');
+                                            for (const msg of newMsgs) {
+                                                const decrypted = await decryptReceivedMessage(msg, keysRef.current, myAddress);
+                                                setMessages(prev => prev.some(m => m.id === decrypted.id) ? prev : [...prev, decrypted].sort((a, b) => (a.savedAt || a.timestamp) - (b.savedAt || b.timestamp) || (a.id || '').localeCompare(b.id || '')));
                                             }
                                         }
                                     }
                                 }
-                            } catch (err) {
-                                console.debug(`Could not sync history for ${contact.address.slice(0, 10)}:`, err.message);
+                            } catch {
+                                // Silent skip for sync failures
                             }
                         }
                     })();
-
-                    return currentContacts; // Return unchanged for this setState call
+                    return currentContacts;
                 });
             });
         })();
 
-        // Send read receipts when window gains focus OR Android app is resumed from background
         const handleFocus = () => {
             const chat = activeChatRef.current;
             if (!chat) return;
-
-            // Get current messages and send read receipts for all unread incoming messages
             setMessages(prev => {
-                const unread = prev.filter(m =>
-                    m.from?.toLowerCase() !== myAddress?.toLowerCase() &&
-                    m.status !== 'read'
-                );
-                // Pass active conversation address as the chatId scope
+                const unread = prev.filter(m => m.from?.toLowerCase() !== myAddress?.toLowerCase() && m.status !== 'read');
                 unread.forEach(m => sendReadReceipt(m.from, m.id, chat.address));
                 return prev;
             });
         };
-
         window.addEventListener('focus', handleFocus);
-
-        // Bridge native Android Capacitor app state wake cycles to handleFocus
         let nativeListener = null;
         if (Capacitor.isNativePlatform()) {
-            nativeListener = CapacitorApp.addListener('appStateChange', ({ isActive }) => {
-                if (isActive) {
-                    console.log('📱 Android App Wake detected. Refreshing read receipts.');
-                    handleFocus();
-                }
-            });
+            nativeListener = CapacitorApp.addListener('appStateChange', ({ isActive }) => { if (isActive) handleFocus(); });
         }
-
         return () => {
             mounted = false;
             window.removeEventListener('focus', handleFocus);
-            if (nativeListener) {
-                nativeListener.then(l => l.remove()).catch(() => {});
-            }
+            if (nativeListener) nativeListener.then(l => l.remove()).catch(() => {
+                // Already removed
+            });
             if (statusUnsubscribeRef.current) statusUnsubscribeRef.current();
             if (reconnectUnsubscribeRef.current) reconnectUnsubscribeRef.current();
-            // Clear typing timeouts
             Object.values(typingTimeoutRef.current).forEach(t => clearTimeout(t));
         };
     }, [myAddress]);
+
     useEffect(() => {
         if (!activeChatRef.current || activeChatRef.current.isGroup) return;
-
-        setContacts(prev => {
-            const hasUnread = prev.some(c => 
-                c.address.toLowerCase() === activeChatRef.current.address.toLowerCase() && c.unreadCount > 0
-            );
-
-            if (hasUnread) {
-                return prev.map(c => 
-                    c.address.toLowerCase() === activeChatRef.current.address.toLowerCase()
-                        ? { ...c, unreadCount: 0 }
-                        : c
-                );
-            }
-            return prev;
-        });
+        setContacts(prev => prev.some(c => c.address.toLowerCase() === activeChatRef.current.address.toLowerCase() && c.unreadCount > 0) ? prev.map(c => c.address.toLowerCase() === activeChatRef.current.address.toLowerCase() ? { ...c, unreadCount: 0 } : c) : prev);
     }, [messages, activeChat]);
-
-    // ... (UseEffect for updates remains similar) ...
 
     const sendMessage = useCallback(async (content, replyTo = null, type = 'text', metadata = {}) => {
         if (!activeChat || !myAddress) {
             setError('No active chat');
             return;
         }
-
         try {
             if (activeChat.isGroup) {
-                // Fan-out to all members
                 const start = Date.now();
-                const promises = activeChat.members
-                    .filter(m => m.toLowerCase() !== myAddress.toLowerCase())
-                    .map(memberAddr => sendEncryptedMessage(
-                        myAddress,
-                        memberAddr,
-                        content,
-                        replyTo,
-                        {
-                            groupId: activeChat.address,
-                            groupName: activeChat.info?.username || 'Group',
-                            members: activeChat.members, // Propagate members list
-                            type: type,
-                            ...metadata // Forward mediaId, manifest, etc.
-                        }
-                    ));
-
-                const results = await Promise.allSettled(promises);
-                const failedCount = results.filter(r => r.status === 'rejected').length;
-                if (failedCount > 0) {
-                    console.warn(`[Group] Message delivery failed for ${failedCount} members (they may be offline), but proceeded for the rest.`);
-                }
-
-                // Add to local state
-                const sentMessage = {
-                    id: `msg_${start}_${myAddress}`, // Pseudo ID
-                    from: myAddress,
-                    content,
-                    replyTo, // Link parent message context for proper threaded rendering locally
-                    timestamp: start,
-                    status: 'sent',
-                    groupId: activeChat.address,
-                    isGroup: true,
-                    type: type,
-                    ...metadata // Spread mediaId etc.
-                };
-
-                await saveMessage(activeChat.address, sentMessage); // Persist
-
+                const { sendGroupMessage } = await import('../services/messageService');
+                await sendGroupMessage(activeChat.address, content, activeChat.members, replyTo, { groupName: activeChat.info?.username || 'Group', type, ...metadata });
+                const sentMessage = { id: `msg_${start}_${myAddress}`, from: myAddress, content, replyTo, timestamp: start, status: 'sent', groupId: activeChat.address, isGroup: true, type, ...metadata };
+                await saveMessage(activeChat.address, sentMessage);
                 setMessages(prev => [...prev, sentMessage]);
                 return sentMessage;
             } else {
-                // DM
-                const sentMessage = await sendEncryptedMessage(
-                    myAddress,
-                    activeChat.address,
-                    content,
-                    replyTo,
-                    { type: type, ...metadata }, // Forward mediaId, manifest, etc.
-                    activeChat.publicKey // Inject caller-level fallback key
-                );
-                // Attach metadata (mediaId) to the persisted message
+                const sentMessage = await sendEncryptedMessage(myAddress, activeChat.address, content, replyTo, { type, ...metadata }, activeChat.publicKey);
                 const enrichedMessage = { ...sentMessage, ...metadata };
-                await saveMessage(activeChat.address, enrichedMessage); // Persist
+                await saveMessage(activeChat.address, enrichedMessage);
                 setMessages(prev => [...prev, enrichedMessage]);
                 return enrichedMessage;
             }
@@ -1051,183 +701,82 @@ export function useChat(myAddress) {
     }, [activeChat, myAddress]);
 
     const openChat = useCallback(async (address, userInfo = null) => {
-        // If clicking same chat, do nothing
         if (activeChatRef.current?.address?.toLowerCase() === address.toLowerCase()) return;
-
-        // Find contact info
         let contact = contacts.find(c => c.address.toLowerCase() === address.toLowerCase());
-
-        // If not in contacts but we have userInfo (from search), use it
         if (!contact && userInfo) {
-            contact = {
-                address: userInfo.address,
-                username: userInfo.username,
-                lastMessageTime: Date.now(),
-                unreadCount: 0,
-                online: false
-            };
+            contact = { address: userInfo.address, username: userInfo.username, lastMessageTime: Date.now(), unreadCount: 0, online: false };
             setContacts(prev => [contact, ...prev]);
         }
-
         if (contact) {
-            // Mark as read immediately utilizing a functional update to prevent stale closure resurrections
-            setContacts(prev => prev.map(c =>
-                c.address.toLowerCase() === address.toLowerCase()
-                    ? { ...c, unreadCount: 0 }
-                    : c
-            ));
+            setContacts(prev => prev.map(c => c.address.toLowerCase() === address.toLowerCase() ? { ...c, unreadCount: 0 } : c));
         }
-
-        // Set active
-        setActiveChat({
-            address,
-            info: contact || userInfo || { address },
-            isGroup: contact?.isGroup || false,
-            members: contact?.members || []
-        });
-
-        // Task 3: Proactive Key Verification (Ghost Key Shield)
+        setActiveChat({ address, info: contact || userInfo || { address }, isGroup: contact?.isGroup || false, members: contact?.members || [] });
         if (contact && !contact.isGroup) {
             import('../services/messageService').then(async ({ verifyRecipientKey }) => {
                 const changed = await verifyRecipientKey(address, contact);
                 if (changed) {
-                    // Update local contact record with the fresh key if we can
-                    const { getUser } = await import('../services/socketService');
                     const freshUser = await getUser(address);
                     if (freshUser) {
-                        setContacts(prev => prev.map(c => 
-                            c.address.toLowerCase() === address.toLowerCase() 
-                                ? { ...c, publicKey: freshUser.publicKey, isVerified: false } 
-                                : c
-                        ));
-                        console.log(`🔐 Contact ${address?.slice(0, 10)} public key updated proactively. RESETTING verification.`);
+                        setContacts(prev => prev.map(c => c.address.toLowerCase() === address.toLowerCase() ? { ...c, publicKey: freshUser.publicKey, isVerified: false, trustScore: freshUser.trustScore, trustStage: freshUser.trustStage, registeredAt: freshUser.registeredAt } : c));
                     }
                 }
-            }).catch(err => console.debug('Key verification failed:', err));
+            }).catch(() => {});
         }
-
-        // Load messages for this chat
+        const topic = await getConversationTopic(address, myAddress, contact?.isGroup || false);
+        subscribeToTopic(topic);
+        if (syncCleanupRef.current) syncCleanupRef.current();
+        initSwarmSync(address, myAddress, address, contact?.isGroup || false).then(cleanup => { syncCleanupRef.current = cleanup; });
+        if (!contact?.isGroup && myAddress.toLowerCase() > address.toLowerCase()) {
+            connectToPeer(address).catch(() => {});
+        }
         setMessages([]);
         setIsLoading(true);
-        setHasMoreMessages(true); // Reset pagination for new chat
-
+        setHasMoreMessages(true);
         try {
-            // 1. Load Local History
+            currentEpochRef.current = await getLatestEpochIndex(address);
             const localHistory = await getLocalHistory(address);
-            console.debug(`📖 openChat: Loaded ${localHistory?.length} local messages for ${address}`);
             let merged = [...(localHistory || [])];
-
-            // 2. Fetch Server History (if available)
             try {
                 const serverHistory = await getHistory(address);
-                // Merge and deduplicate
                 const existingIds = new Set(merged.map(m => m.id));
                 const newServerMsgsRaw = serverHistory.filter(m => !existingIds.has(m.id));
-                
-                // CRITICAL: Decrypt the server messages before merging them into active state!
-                // Otherwise oversized un-cached payloads (like images) render as blank encrypted lock emojis.
-                const { decryptReceivedMessage } = await import('../services/messageService');
                 const newServerMsgs = [];
                 for (const msg of newServerMsgsRaw) {
                     const decrypted = await decryptReceivedMessage(msg, keysRef.current, myAddress);
                     newServerMsgs.push(decrypted);
                 }
-
-                merged = [...merged, ...newServerMsgs].sort((a, b) => {
-                    // Sort by savedAt (local device time) to avoid cross-device clock skew
-                    const aTime = a.savedAt || a.timestamp;
-                    const bTime = b.savedAt || b.timestamp;
-                    const timeDiff = aTime - bTime;
-                    if (timeDiff !== 0) return timeDiff;
-                    return (a.id || '').localeCompare(b.id || '');
-                });
-
-                // Save new messages to local for next time
-                if (newServerMsgs.length > 0) {
-                    saveMessagesBulk(address, newServerMsgs);
-                }
-            } catch (e) {
-                // Ignore if no server history
-            }
-
-            // Filter out group messages from DM history (they may have been
-            // stored before the server-side fix was deployed)
-            const isGroupChat = contact?.isGroup || false;
-            if (!isGroupChat) {
-                merged = merged.filter(m => !m.groupId);
-            }
-
+                merged = [...merged, ...newServerMsgs].sort((a, b) => (a.savedAt || a.timestamp) - (b.savedAt || b.timestamp) || (a.id || '').localeCompare(b.id || ''));
+                if (newServerMsgs.length > 0) saveMessagesBulk(address, newServerMsgs);
+            } catch {}
+            if (!(contact?.isGroup)) merged = merged.filter(m => !m.groupId);
             const unreadIds = [];
             const mappedMessages = merged.map(m => {
-                // Send explicit read receipts for missed incoming messages (Groups or DMs) that we are now opening
-                const isIncoming = m.from?.toLowerCase() !== myAddress?.toLowerCase();
-                if (isIncoming && m.status !== 'read') {
-                    // Pass active conversation address as the chatId scope for direct writes
+                if (m.from?.toLowerCase() !== myAddress?.toLowerCase() && m.status !== 'read') {
                     sendReadReceipt(m.from, m.id, address);
                     unreadIds.push(m.id);
-                    return {
-                        ...m,
-                        status: 'read'
-                    };
+                    return { ...m, status: 'read' };
                 }
                 return m;
             });
-
             setMessages(mappedMessages);
-
-            // Persist the read status locally so we don't re-emit receipts next session
             if (unreadIds.length > 0) {
                 const { updateMessageReceipt } = await import('../services/storageService');
-                updateMessageReceipt(address, unreadIds, myAddress, 'read').catch(e => console.debug('Local status persistence failed', e));
+                updateMessageReceipt(address, unreadIds, myAddress, 'read').catch(() => {});
             }
-        } catch (err) {
-            console.error('Error loading chat:', err);
-        } finally {
-            setIsLoading(false);
-        }
-
-        setConnectionType('p2p'); // Default assumption, will update on connect
-
-        // If it's a DM, try to connect/status
-        if (!contact?.isGroup) {
-            // connection logic handled by effect
-        }
+        } catch (err) { console.error('Error loading chat:', err); } finally { setIsLoading(false); }
+        setConnectionType('p2p');
     }, [contacts, myAddress]);
 
-    // Load older messages (scroll-to-load pagination)
     const loadMoreMessages = useCallback(async () => {
         if (!activeChat || isLoadingMore || !hasMoreMessages) return;
-
         const chatId = activeChat.address;
-        const oldestMsg = messages[0]; // First message = oldest visible
-        if (!oldestMsg) return;
-
+        if (currentEpochRef.current <= 0) { setHasMoreMessages(false); return; }
         setIsLoadingMore(true);
-
         try {
-            const PAGE_SIZE = 50;
-            const olderMessages = await getMessagesPaginated(
-                chatId,
-                PAGE_SIZE,
-                oldestMsg.savedAt || oldestMsg.timestamp
-            );
-
-            if (olderMessages.length === 0) {
-                setHasMoreMessages(false);
-            } else {
-                // Deduplicate and prepend
-                const existingIds = new Set(messages.map(m => m.id));
-                const uniqueOlder = olderMessages.filter(m => !existingIds.has(m.id));
-                if (uniqueOlder.length < PAGE_SIZE) {
-                    setHasMoreMessages(false); // Got less than a full page
-                }
-                setMessages(prev => [...uniqueOlder, ...prev]);
-            }
-        } catch (err) {
-            console.error('Error loading more messages:', err);
-        } finally {
-            setIsLoadingMore(false);
-        }
+            const prevEpoch = await loadPreviousEpoch(chatId, currentEpochRef.current);
+            if (!prevEpoch || prevEpoch.ymap.size === 0) { setHasMoreMessages(false); currentEpochRef.current = 0; }
+            else { currentEpochRef.current -= 1; setMessages(getLoadedMessages(chatId)); }
+        } catch (err) { console.error('Error loading previous epoch:', err); } finally { setIsLoadingMore(false); }
     }, [activeChat, messages, isLoadingMore, hasMoreMessages]);
 
     const searchAndAddContact = useCallback(async (query) => {
@@ -1236,12 +785,10 @@ export function useChat(myAddress) {
             if (user) {
                 const exists = contacts.find(c => c.address.toLowerCase() === user.address.toLowerCase());
                 if (!exists) {
-                    const newContact = {
-                        address: user.address,
-                        username: user.username || null,
-                        lastMessageTime: Date.now(),
-                        unreadCount: 0,
-                        online: user.online || false
+                    const newContact = { 
+                        address: user.address, username: user.username || null, 
+                        lastMessageTime: Date.now(), unreadCount: 0, online: user.online || false,
+                        trustScore: user.trustScore, trustStage: user.trustStage, registeredAt: user.registeredAt
                     };
                     setContacts(prev => [newContact, ...prev]);
                     return newContact;
@@ -1249,35 +796,17 @@ export function useChat(myAddress) {
                 return exists;
             }
             return null;
-        } catch (err) {
-            console.error('Search failed:', err);
-            return null;
-        }
+        } catch (err) { console.error('Search failed:', err); return null; }
     }, [contacts]);
 
     const updateGroupAvatar = useCallback((groupId, avatarBase64) => {
         if (!groupId) return;
-
-        // Find the group to get its members
         const group = contacts.find(c => c.address === groupId && c.isGroup);
         if (!group) return;
-
-        // Update local state
-        setContacts(prev => prev.map(c =>
-            c.address === groupId && c.isGroup
-                ? { ...c, avatar: avatarBase64 }
-                : c
-        ));
-
-        // Update active chat if viewing this group
+        setContacts(prev => prev.map(c => c.address === groupId && c.isGroup ? { ...c, avatar: avatarBase64 } : c));
         if (activeChatRef.current?.address === groupId) {
-            setActiveChat(prev => ({
-                ...prev,
-                info: { ...prev.info, avatar: avatarBase64 }
-            }));
+            setActiveChat(prev => ({ ...prev, info: { ...prev.info, avatar: avatarBase64 } }));
         }
-
-        // Broadcast to all members via server
         emitUpdateGroupAvatar(groupId, avatarBase64, group.members || []);
     }, [contacts]);
 
@@ -1292,10 +821,7 @@ export function useChat(myAddress) {
             else localStorage.setItem('decentrachat_status', newStatus);
             setMyStatus(newStatus);
         }
-        updateSocketProfile(
-            newAvatar !== undefined ? newAvatar : myAvatar,
-            newStatus !== undefined ? newStatus : myStatus
-        );
+        updateSocketProfile(newAvatar !== undefined ? newAvatar : myAvatar, newStatus !== undefined ? newStatus : myStatus);
     }, [myAvatar, myStatus]);
 
     const closeChat = useCallback(() => {
@@ -1305,59 +831,21 @@ export function useChat(myAddress) {
         setTypingStatus({});
     }, []);
 
-    // --- Task 10: Verify Peer Identity ---
     const verifyContact = useCallback(async (address, isVerified) => {
         if (!address) return;
-        
-        setContacts(prev => {
-            const next = prev.map(c => 
-                c.address.toLowerCase() === address.toLowerCase() 
-                    ? { ...c, isVerified } 
-                    : c
-            );
-            return next;
-        });
-
-        // Update active chat if it matches
+        setContacts(prev => prev.map(c => c.address.toLowerCase() === address.toLowerCase() ? { ...c, isVerified } : c));
         if (activeChatRef.current?.address?.toLowerCase() === address.toLowerCase()) {
-            setActiveChat(prev => ({
-                ...prev,
-                info: { ...prev.info, isVerified }
-            }));
+            setActiveChat(prev => ({ ...prev, info: { ...prev.info, isVerified } }));
         }
-
-        console.log(`🛡️ Verification status for ${address.slice(0, 10)} set to: ${isVerified}`);
+        if (isVerified) {
+            const { emitVerifyContact } = await import('../services/socketService');
+            emitVerifyContact(address).then(response => {
+                if (response && response.success) alert(`Successfully verified! They received +${response.pointsAwarded} POC points.`);
+            });
+        }
     }, []);
 
-
     return {
-        activeChat,
-        messages,
-        contacts,
-        isLoading,
-        isLoadingMore,
-        hasMoreMessages,
-        error,
-        connectionType,
-        serverConnected,
-        typingStatus,
-        flushingOutbox, // Export new state
-        openChat,
-        closeChat,
-        sendMessage,
-        sendTyping,
-        createGroup,
-        deleteGroup,
-        removeMember,
-        searchAndAddContact,
-        toggleReaction,
-        loadMoreMessages,
-        myAvatar,
-        myStatus,
-        saveProfile,
-        updateGroupAvatar,
-        verifyContact, // Task 10
-        clearError: () => setError(null),
+        activeChat, messages, contacts, isLoading, isLoadingMore, hasMoreMessages, error, connectionType, serverConnected, typingStatus, flushingOutbox, openChat, closeChat, sendMessage, sendTyping, createGroup, deleteGroup, removeMember, searchAndAddContact, toggleReaction, loadMoreMessages, myAvatar, myStatus, myTrustScore, myTrustStage, myRegisteredAt, saveProfile, updateGroupAvatar, verifyContact, clearError: () => setError(null),
     };
 }
-

@@ -1,0 +1,213 @@
+<!DOCTYPE html><html class="dark" lang="en"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>Secure Mesh - Identity Verification</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=Geist:wght@500;600&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "surface": "#121316",
+                    "background": "#121316",
+                    "inverse-surface": "#e3e2e6",
+                    "secondary-container": "#18a479",
+                    "on-tertiary-fixed": "#191c1e",
+                    "error-container": "#93000a",
+                    "on-surface": "#e3e2e6",
+                    "surface-bright": "#38393c",
+                    "inverse-primary": "#4b5a9c",
+                    "surface-container-highest": "#343538",
+                    "outline-variant": "#454650",
+                    "surface-container": "#1f1f23",
+                    "on-secondary": "#003827",
+                    "inverse-on-surface": "#303034",
+                    "secondary": "#62dcad",
+                    "on-error": "#690005",
+                    "on-primary-fixed": "#001354",
+                    "primary": "#c9d1ff",
+                    "on-secondary-container": "#003121",
+                    "outline": "#8f909b",
+                    "on-tertiary-fixed-variant": "#444749",
+                    "secondary-fixed": "#80f9c8",
+                    "primary-fixed-dim": "#b8c4ff",
+                    "primary-container": "#a5b4fc",
+                    "on-primary": "#1a2b6a",
+                    "on-surface-variant": "#c6c5d2",
+                    "on-tertiary-container": "#45494b",
+                    "secondary-fixed-dim": "#62dcad",
+                    "surface-container-high": "#292a2d",
+                    "tertiary-container": "#b5b8ba",
+                    "on-secondary-fixed-variant": "#00513a",
+                    "tertiary": "#d1d3d5",
+                    "on-error-container": "#ffdad6",
+                    "tertiary-fixed": "#e0e3e5",
+                    "primary-fixed": "#dde1ff",
+                    "on-primary-container": "#354484",
+                    "tertiary-fixed-dim": "#c4c7c9",
+                    "on-background": "#e3e2e6",
+                    "surface-container-low": "#1b1b1f",
+                    "surface-container-lowest": "#0d0e11",
+                    "surface-tint": "#b8c4ff",
+                    "surface-variant": "#343538",
+                    "on-secondary-fixed": "#002115",
+                    "on-primary-fixed-variant": "#334282",
+                    "error": "#ffb4ab",
+                    "surface-dim": "#121316",
+                    "on-tertiary": "#2d3133"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.25rem",
+                    "lg": "0.5rem",
+                    "xl": "0.75rem",
+                    "full": "9999px"
+            },
+            "spacing": {
+                    "gutter": "1.5rem",
+                    "container-padding-mobile": "1.25rem",
+                    "unit": "8px",
+                    "container-padding-desktop": "2.5rem",
+                    "stack-sm": "0.5rem",
+                    "stack-md": "1rem",
+                    "stack-lg": "2rem"
+            },
+            "fontFamily": {
+                    "headline-lg-mobile": ["Geist"],
+                    "body-md": ["Inter"],
+                    "label-sm": ["Geist"],
+                    "body-lg": ["Inter"],
+                    "label-md": ["Geist"],
+                    "headline-lg": ["Geist"],
+                    "headline-md": ["Geist"]
+            },
+            "fontSize": {
+                    "headline-lg-mobile": ["24px", {"lineHeight": "1.2", "letterSpacing": "-0.01em", "fontWeight": "600"}],
+                    "body-md": ["16px", {"lineHeight": "1.6", "fontWeight": "400"}],
+                    "label-sm": ["12px", {"lineHeight": "1.4", "fontWeight": "500"}],
+                    "body-lg": ["18px", {"lineHeight": "1.6", "fontWeight": "400"}],
+                    "label-md": ["14px", {"lineHeight": "1.4", "letterSpacing": "0.01em", "fontWeight": "500"}],
+                    "headline-lg": ["32px", {"lineHeight": "1.2", "letterSpacing": "-0.02em", "fontWeight": "600"}],
+                    "headline-md": ["24px", {"lineHeight": "1.3", "fontWeight": "500"}]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        body {
+            background-color: #0e0f12;
+            color: #e3e2e6;
+        }
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .safety-number-block {
+            background: rgba(31, 31, 35, 0.6);
+            backdrop-filter: blur(8px);
+        }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+  </head>
+<body class="font-body-md text-body-md antialiased overflow-x-hidden">
+<!-- Top Navigation Bar -->
+<nav class="fixed top-0 w-full flex items-center justify-between px-gutter h-16 w-full bg-surface dark:bg-surface z-50 transition-colors duration-200">
+<div class="flex items-center gap-3">
+<button class="p-2 -ml-2 hover:bg-surface-container dark:hover:bg-surface-container rounded-full transition-colors">
+<span class="material-symbols-outlined text-on-surface">arrow_back</span>
+</button>
+<span class="font-headline-md text-headline-md-mobile text-primary dark:text-primary">Secure Mesh</span>
+</div>
+<div class="flex items-center">
+<button class="p-2 hover:bg-surface-container dark:hover:bg-surface-container rounded-full transition-colors">
+<span class="material-symbols-outlined text-on-surface">search</span>
+</button>
+</div>
+</nav>
+<!-- Main Content Canvas -->
+<main class="pt-24 pb-32 px-gutter max-w-lg mx-auto min-h-screen flex flex-col">
+<!-- Identity Header Section -->
+<header class="text-center mb-10">
+<div class="relative inline-block mb-6">
+<div class="w-24 h-24 rounded-full overflow-hidden border-4 border-surface-container-high shadow-xl mx-auto">
+<img alt="Sarthi Profile" class="w-full h-full object-cover" data-alt="A professional and friendly portrait of a person with a warm expression, captured in soft, cinematic lighting. The background is a clean, modern workspace with a subtle indigo and charcoal color palette, emphasizing a digital-first, secure professional identity. The aesthetic is high-end, clean, and minimalist, matching a premium security application interface." src="https://lh3.googleusercontent.com/aida-public/AB6AXuB0VlNNRN1DKTVUUmDcPxlsHP6jyb51aj9QCVjtXqRgiKqO87mC1KnwfqjAukAehkqq0OqaLDor73rrBflJxXO_099-3C8TFggyG9oQuvcqvAvbbg7SD-ZKQCaqoJZ0Ly-L8JufQlhdbDDVS_WE-Fc0ShIJa-1bik0VvjrvI_NFYjWjA8QRPBN0KJfzwcMen1cMPEcxMnGGo9x5n6WQHFVtwJxrffapwWlq05_HAD_fJ7QldlvkLzEhWRL90Z1yjcsvpXs78IreTrQ">
+</div>
+<div class="absolute bottom-0 right-0 bg-secondary rounded-full p-1.5 border-4 border-[#0e0f12]">
+<span class="material-symbols-outlined text-on-secondary text-[18px]" style="font-variation-settings: 'FILL' 1;">verified</span>
+</div>
+</div>
+<h1 class="font-headline-lg-mobile text-headline-lg-mobile text-on-surface mb-3">Sarthi</h1>
+<p class="text-on-surface-variant max-w-xs mx-auto">
+                Verify this code with Sarthi to ensure 100% private chat.
+            </p>
+</header>
+<!-- Safety Numbers Grid -->
+<section class="grid grid-cols-2 gap-4 mb-10">
+<!-- Number Blocks - Grouped for Legibility -->
+<div class="safety-number-block p-6 rounded-xl border border-outline-variant/30 text-center">
+<span class="text-secondary font-headline-md text-headline-md tracking-widest">4829</span>
+</div>
+<div class="safety-number-block p-6 rounded-xl border border-outline-variant/30 text-center">
+<span class="text-secondary font-headline-md text-headline-md tracking-widest">1053</span>
+</div>
+<div class="safety-number-block p-6 rounded-xl border border-outline-variant/30 text-center">
+<span class="text-secondary font-headline-md text-headline-md tracking-widest">9921</span>
+</div>
+<div class="safety-number-block p-6 rounded-xl border border-outline-variant/30 text-center">
+<span class="text-secondary font-headline-md text-headline-md tracking-widest">3307</span>
+</div>
+<div class="safety-number-block p-6 rounded-xl border border-outline-variant/30 text-center">
+<span class="text-secondary font-headline-md text-headline-md tracking-widest">0482</span>
+</div>
+<div class="safety-number-block p-6 rounded-xl border border-outline-variant/30 text-center">
+<span class="text-secondary font-headline-md text-headline-md tracking-widest">7718</span>
+</div>
+</section>
+<!-- Information Card -->
+<div class="bg-surface-container rounded-xl p-6 mb-8 border border-outline-variant/20">
+<div class="flex items-start gap-4">
+<div class="mt-1">
+<span class="material-symbols-outlined text-primary">security</span>
+</div>
+<div>
+<h3 class="font-label-md text-label-md text-on-surface mb-1">What are Safety Numbers?</h3>
+<p class="text-label-sm text-on-surface-variant leading-relaxed">
+                        To confirm that encryption is working correctly with Sarthi, compare the numbers above with the numbers on their device. If they match, your connection is verified and private.
+                    </p>
+</div>
+</div>
+</div>
+<!-- Action Button -->
+<div class="mt-auto">
+<button class="w-full bg-secondary-container text-on-secondary-container font-label-md text-label-md py-4 rounded-full transition-transform active:scale-95 duration-200 shadow-lg flex items-center justify-center gap-2">
+<span class="material-symbols-outlined text-[20px]" style="font-variation-settings: 'FILL' 1;">check_circle</span>
+                Mark as Verified
+            </button>
+<p class="text-center text-label-sm text-on-surface-variant mt-4">
+                Last updated: June 12, 2024
+            </p>
+</div>
+</main>
+<!-- Bottom Navigation Bar (Shell Persistence) -->
+<nav class="fixed bottom-0 w-full z-50 flex justify-around items-center h-20 px-4 pb-2 bg-surface-container dark:bg-surface-container rounded-t-xl shadow-sm"><div class="flex flex-col items-center justify-center text-on-surface-variant dark:text-on-surface-variant px-4 py-1 hover:text-on-surface transition-colors cursor-pointer">
+<span class="material-symbols-outlined mb-1">chat_bubble</span>
+<span class="font-label-md text-label-md">Chats</span>
+</div>
+<div class="flex flex-col items-center justify-center text-on-surface-variant dark:text-on-surface-variant px-4 py-1 hover:text-on-surface transition-colors cursor-pointer">
+<span class="material-symbols-outlined mb-1">contacts</span>
+<span class="font-label-md text-label-md">Contacts</span>
+</div>
+<div class="flex flex-col items-center justify-center text-on-surface-variant dark:text-on-surface-variant px-4 py-1 hover:text-on-surface transition-colors cursor-pointer">
+<span class="material-symbols-outlined mb-1">settings</span>
+<span class="font-label-md text-label-md">Settings</span>
+</div></nav>
+
+
+</body></html>

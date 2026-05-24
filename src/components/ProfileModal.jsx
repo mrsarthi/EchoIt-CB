@@ -1,4 +1,5 @@
 import { useState, useRef } from 'react';
+import { Camera, User, Check, Copy, X, Trash2 } from 'lucide-react';
 import './ProfileModal.css';
 
 export function ProfileModal({ 
@@ -12,12 +13,14 @@ export function ProfileModal({
     const [avatar, setAvatar] = useState(currentAvatar || null);
     const [status, setStatus] = useState(currentStatus || '');
     const [isSaving, setIsSaving] = useState(false);
+    const [copied, setCopied] = useState(false);
     const fileInputRef = useRef(null);
 
     const handleCopyId = () => {
         try {
             navigator.clipboard.writeText(walletAddress);
-            alert('Address copied to clipboard! 📋');
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
         } catch (err) {
             console.error(err);
         }
@@ -27,13 +30,8 @@ export function ProfileModal({
         const file = e.target.files?.[0];
         if (!file) return;
 
-        // Basic validation
-        if (!file.type.startsWith('image/')) {
-            alert('Please select an image file.');
-            return;
-        }
+        if (!file.type.startsWith('image/')) return;
 
-        // Compress image to base64
         const reader = new FileReader();
         reader.onload = (event) => {
             const img = new Image();
@@ -42,8 +40,7 @@ export function ProfileModal({
                 let width = img.width;
                 let height = img.height;
 
-                // Max dimensions
-                const MAX_SIZE = 200;
+                const MAX_SIZE = 400;
                 if (width > height) {
                     if (width > MAX_SIZE) {
                         height *= MAX_SIZE / width;
@@ -61,8 +58,7 @@ export function ProfileModal({
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(img, 0, 0, width, height);
 
-                // Use high compression JPEG
-                const compressedBase64 = canvas.toDataURL('image/jpeg', 0.6);
+                const compressedBase64 = canvas.toDataURL('image/jpeg', 0.8);
                 setAvatar(compressedBase64);
             };
             img.src = event.target.result;
@@ -70,39 +66,34 @@ export function ProfileModal({
         reader.readAsDataURL(file);
     };
 
-    const handleRemoveAvatar = () => {
-        setAvatar(null);
-    };
-
     const handleSubmit = async (e) => {
         e.preventDefault();
         setIsSaving(true);
-        // Call saveProfile on useChat hook
         onSave(avatar, status.trim());
         setIsSaving(false);
         onClose();
     };
 
     return (
-        <div className="modal-overlay animate-fadeIn" onClick={onClose}>
-            <div className="modal-content profile-modal glass-card zoomIn" onClick={e => e.stopPropagation()}>
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-content profile-modal animate-scaleIn" onClick={e => e.stopPropagation()}>
                 <div className="modal-header">
-                    <h2>Profile Settings</h2>
-                    <button className="btn-icon" onClick={onClose}>✕</button>
+                    <h2>Edit Profile</h2>
+                    <button className="btn btn-ghost" onClick={onClose}><X size={24} /></button>
                 </div>
                 
                 <form onSubmit={handleSubmit} className="profile-form">
                     <div className="profile-avatar-section">
-                        <div className="profile-avatar-preview" onClick={() => fileInputRef.current?.click()}>
+                        <div className="profile-avatar-wrapper" onClick={() => fileInputRef.current?.click()}>
                             {avatar ? (
                                 <img src={avatar} alt="Avatar" className="profile-avatar-img" />
                             ) : (
                                 <div className="profile-avatar-placeholder">
-                                    {(username && username.length > 1) ? username.replace('@', '')[0]?.toUpperCase() : (walletAddress ? walletAddress.slice(2, 4).toUpperCase() : 'U')}
+                                    <User size={40} />
                                 </div>
                             )}
-                            <div className="profile-avatar-overlay">
-                                <span>📷 Edit</span>
+                            <div className="avatar-edit-overlay">
+                                <Camera size={20} />
                             </div>
                         </div>
                         <input 
@@ -113,51 +104,46 @@ export function ProfileModal({
                             style={{ display: 'none' }} 
                         />
                         {avatar && (
-                            <button type="button" className="btn btn-danger btn-sm mt-2" onClick={handleRemoveAvatar}>
-                                Remove Photo
+                            <button type="button" className="btn btn-ghost btn-sm text-error" onClick={() => setAvatar(null)}>
+                                <Trash2 size={14} /> Remove Photo
                             </button>
                         )}
                     </div>
 
-                    <div className="input-group">
-                        <label>Your Username (@)</label>
+                    <div className="settings-group">
+                        <label className="settings-group-title">Display Name</label>
                         <input 
                             type="text" 
                             className="input" 
                             value={username || 'Anonymous'} 
                             disabled 
-                            style={{ opacity: 0.7 }}
                         />
+                        <p className="input-hint">Your blockchain handle is permanent</p>
                     </div>
 
-                    <div className="input-group">
-                        <label>Status Tagline</label>
+                    <div className="settings-group">
+                        <label className="settings-group-title">Status Message</label>
                         <input 
                             type="text" 
                             className="input" 
-                            placeholder="Available, Busy, etc..." 
+                            placeholder="How are you feeling?" 
                             value={status}
                             onChange={(e) => setStatus(e.target.value)}
                             maxLength={50}
                         />
-                        <span className="text-xs text-muted" style={{ display: 'block', textAlign: 'right', marginTop: '4px' }}>
-                            {status.length}/50
-                        </span>
                     </div>
 
-
-
-                    <div className="profile-id-section">
-                        <label>Wallet Address</label>
-                        <div className="profile-id-box" onClick={handleCopyId} title="Click to copy">
-                            <span className="profile-id-text">{walletAddress}</span>
-                            <button type="button" className="btn-icon">📋</button>
+                    <div className="settings-group">
+                        <label className="settings-group-title">Blockchain Identity</label>
+                        <div className="wallet-pill full-width" onClick={handleCopyId}>
+                            <code>{walletAddress?.slice(0, 16)}...{walletAddress?.slice(-14)}</code>
+                            {copied ? <Check size={14} className="text-trust" /> : <Copy size={14} />}
                         </div>
                     </div>
 
-                    <div className="modal-actions" style={{ marginTop: '24px' }}>
-                        <button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button>
-                        <button type="submit" className="btn btn-primary" disabled={isSaving}>
+                    <div className="modal-actions">
+                        <button type="button" className="btn btn-secondary flex-1" onClick={onClose}>Cancel</button>
+                        <button type="submit" className="btn btn-primary flex-1" disabled={isSaving}>
                             {isSaving ? 'Saving...' : 'Save Changes'}
                         </button>
                     </div>

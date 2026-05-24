@@ -10,6 +10,8 @@ let signalCallback = null;
 let receiptCallback = null;
 let connectionChangeCallback = null;
 let currentUser = null;
+let isRegistered = false;
+let registrationPromise = null;
 let userStatusListeners = [];
 let reconnectCallbacks = []; // Fired when socket reconnects after a disconnect
 let wasDisconnected = false; // Track if we were previously disconnected
@@ -23,7 +25,7 @@ let groupAvatarUpdatedCallback = null;
  * Initialize socket connection
  */
 export function initSocket() {
-    if (socket?.connected) return socket;
+    if (socket) return socket;
 
     // Wake up Render server (cold start can take 30-60s on free tier)
     // Fire an HTTP request BEFORE opening the socket so the server spins up
@@ -50,19 +52,30 @@ export function initSocket() {
         // We call the full register() function to attempt a signed challenge-response.
         // If the signer (MetaMask) is unavailable, it falls back to the legacy
         // unsigned emit which the server's grace period accepts.
-        if (currentUser) {
+        if (currentUser && isRegistered) {
             console.log('🔄 Re-registering session with challenge-response...');
             register(
                 currentUser.address,
                 currentUser.publicKey,
+                currentUser.signingPublicKey,
                 currentUser.username,
                 currentUser.avatar,
                 currentUser.status,
-                currentUser.signMessage // may be undefined on Electron/mobile reconnects
+                currentUser.signMessage,
+                currentUser.getPoW,
+                currentUser.pushToken
             ).catch(err => {
                 // Fallback: emit directly if full registration flow fails (e.g., wallet locked)
                 console.warn('⚠️ Challenge-response re-registration failed, using legacy path:', err.message);
-                socket.emit('register', currentUser);
+                socket.emit('register', {
+                    address: currentUser.address,
+                    publicKey: currentUser.publicKey,
+                    signingPublicKey: currentUser.signingPublicKey,
+                    username: currentUser.username,
+                    avatar: currentUser.avatar,
+                    status: currentUser.status,
+                    pushToken: currentUser.pushToken
+                });
             });
         }
 
@@ -96,6 +109,10 @@ export function initSocket() {
         // Removed aggressive alert, rely on connectionChangeCallback for UI state
     });
 
+    socket.on('syncYjsState', (data) => {
+        if (syncYjsStateCallback) syncYjsStateCallback(data);
+    });
+
     // Handle incoming messages
     socket.on('message', (msg) => {
         console.log('📩 Received message via server');
@@ -117,7 +134,7 @@ export function initSocket() {
         // Allow hooking into generic signals (like typing indicators)
         if (data.signal?.type === 'typing') {
             console.log('⌨️ Typing signal:', data.from?.slice(0, 10), data.signal.isTyping);
-            if (signalCallback) signalCallback(data); // Pass it through
+            if (typingCallback) typingCallback(data);
             return;
         }
 
@@ -204,20 +221,6 @@ export function requestChallenge() {
 }
 
 /**
- * Get a time-limited authorization token for media relay uploads
- * @returns {Promise<string>}
- */
-export function getUploadToken() {
-    if (!socket?.connected) return Promise.resolve(null);
-
-    return new Promise((resolve) => {
-        socket.emit('getUploadToken', (response) => {
-            resolve(response?.token || null);
-        });
-    });
-}
-
-/**
  * Get all groups for the current user from the server registry
  * @returns {Promise<Array>}
  */
@@ -280,48 +283,69 @@ export function fetchPreKey(address) {
  * @param {string} [avatar] Optional base64 avatar
  * @param {string} [status] Optional status text
  * @param {Function} [signMessage] Optional function to sign the challenge
+ * @param {Function} [getPoW] Optional function to solve Argon2 PoW (challenge => Promise<hash>)
+ * @param {string} [pushToken] Optional FCM/APNs token for background push
  * @returns {Promise<{address: string, username?: string}>}
  */
-export async function register(address, publicKey, username, avatar, status, signMessage) {
+export async function register(address, publicKey, signingPublicKey, username, avatar, status, signMessage, getPoW, pushToken) {
+    if (registrationPromise) return registrationPromise;
+
     if (!socket) initSocket();
 
     // Store credentials so they persist across socket disconnects/reconnects
-    currentUser = { address, publicKey, username, avatar, status, signMessage };
+    currentUser = { address, publicKey, signingPublicKey, username, avatar, status, signMessage, getPoW, pushToken };
 
-    let challenge = null;
-    let signature = null;
-
-    // If a signMessage function is provided, we perform the challenge-response handshake
-    if (signMessage) {
+    registrationPromise = (async () => {
         try {
-            console.log('🛡️ Requesting registration challenge...');
-            challenge = await requestChallenge();
-            const message = `Authorize DecentraChat Registration: ${challenge}`;
-            console.log('🛡️ Signing registration challenge...');
-            signature = await signMessage(message);
-        } catch (err) {
-            console.warn('⚠️ Challenge-response failed, falling back to legacy registration:', err.message);
-        }
-    }
+            let challenge = null;
+            let signature = null;
+            let proofOfWork = null;
 
-    return new Promise((resolve, reject) => {
-        let isResolved = false;
+            // If a signMessage function is provided, we perform the challenge-response handshake
+            if (signMessage) {
+                try {
+                    console.log('🛡️ Requesting registration challenge...');
+                    challenge = await requestChallenge();
+                    
+                    // Perform PoW if solver provided
+                    if (getPoW) {
+                        console.log('🛡️ Solving Sybil-resistance PoW...');
+                        proofOfWork = await getPoW(challenge);
+                    }
 
-        const timeout = setTimeout(() => {
-            if (!isResolved) {
-                alert(`Network Timeout: Failed to register session after 15 seconds. Please restart the app.`);
-                reject(new Error(`Timeout waiting for 'registered' event from server.`));
+                    const message = `Authorize DecentraChat Registration: ${challenge}`;
+                    console.log('🛡️ Signing registration challenge...');
+                    signature = await signMessage(message);
+                } catch (err) {
+                    console.warn('⚠️ Challenge-response failed, falling back to legacy registration:', err.message);
+                }
             }
-        }, 15000);
 
-        socket.emit('register', { address, publicKey, username, avatar, status, challenge, signature });
-        socket.once('registered', (data) => {
-            isResolved = true;
-            clearTimeout(timeout);
-            console.log('✓ Registered with server:', data.address?.slice(0, 10), data.username ? `(@${data.username})` : '');
-            resolve(data);
-        });
-    });
+            return await new Promise((resolve, reject) => {
+                let isResolved = false;
+
+                const timeout = setTimeout(() => {
+                    if (!isResolved) {
+                        alert(`Network Timeout: Failed to register session after 15 seconds. Please restart the app.`);
+                        reject(new Error(`Timeout waiting for 'registered' event from server.`));
+                    }
+                }, 15000);
+
+                socket.emit('register', { address, publicKey, signingPublicKey: currentUser.signingPublicKey, username, avatar, status, challenge, signature, proofOfWork, pushToken });
+                socket.once('registered', (data) => {
+                    isResolved = true;
+                    isRegistered = true;
+                    clearTimeout(timeout);
+                    console.log('✓ Registered with server:', data.address?.slice(0, 10), data.username ? `(@${data.username})` : '');
+                    resolve(data);
+                });
+            });
+        } finally {
+            registrationPromise = null;
+        }
+    })();
+
+    return registrationPromise;
 }
 
 /**
@@ -535,11 +559,24 @@ export function emitReaction(messageId, emoji, action, to, groupId, members) {
     socket.emit('messageReaction', { messageId, emoji, action, to, groupId, members });
 }
 
+let typingCallback = null;
+
+export function onTypingStatus(cb) {
+    typingCallback = cb;
+}
+
 /**
- * Subscribe to incoming reaction events
+ * Send typing status indicator
  */
-export function onReaction(callback) {
-    reactionCallback = callback;
+export function sendTypingStatus(toAddress, isTyping, groupId = null) {
+    if (!socket?.connected) return;
+    
+    // Send as a special generic signal
+    socket.emit('signal', {
+        to: toAddress,
+        groupId: groupId,
+        signal: { type: 'typing', isTyping }
+    });
 }
 
 /**
@@ -563,15 +600,45 @@ export function onGroupAvatarUpdated(callback) {
  * @param {string} address
  */
 export function getUser(address) {
+    if (!socket?.connected) return Promise.resolve(null);
     return new Promise((resolve) => {
-        if (!socket?.connected) {
-            resolve(null);
-            return;
-        }
         socket.emit('getUser', { address }, (user) => {
             resolve(user);
         });
     });
+}
+
+/**
+ * Emit cryptographic verification of a peer to award POC points
+ * @param {string} address The verified peer's wallet address
+ */
+export function emitVerifyContact(address) {
+    return new Promise((resolve) => {
+        if (!socket?.connected) {
+            resolve({ success: false, error: 'Offline' });
+            return;
+        }
+        socket.emit('verifyContact', { address }, (response) => {
+            resolve(response);
+        });
+    });
+}
+
+/**
+ * Emit a Yjs sync state vector or update to a peer
+ */
+export function emitSyncYjsState(toAddress, chatId, epochIndex, updateBase64) {
+    if (!socket?.connected) return;
+    socket.emit('syncYjsState', { toAddress, chatId, epochIndex, updateBase64 });
+}
+
+let syncYjsStateCallback = null;
+
+/**
+ * Subscribe to incoming Yjs state updates
+ */
+export function onSyncYjsState(callback) {
+    syncYjsStateCallback = callback;
 }
 
 /**
@@ -759,6 +826,22 @@ export function disconnect() {
     if (socket) {
         socket.disconnect();
         socket = null;
+    }
+    currentUser = null;
+    isRegistered = false;
+}
+
+
+
+export function onReaction(callback) {
+    if (socket) {
+        socket.on('reaction', callback);
+    }
+}
+
+export function updateSocketProfile(avatar, status) {
+    if (socket) {
+        socket.emit('update_profile', { avatar, status });
     }
 }
 

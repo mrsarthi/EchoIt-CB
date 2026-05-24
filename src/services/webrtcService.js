@@ -1,5 +1,6 @@
 // WebRTC Service - P2P peer connection management
 import * as socketService from './socketService';
+import { handleIncomingMediaChunk } from './mediaTransport';
 
 
 // SimplePeer will be loaded dynamically
@@ -65,11 +66,12 @@ export async function init() {
  * Handle incoming WebRTC signal
  */
 function handleIncomingSignal(fromAddress, signal) {
-    let peer = peers.get(fromAddress);
+    const addressKey = fromAddress.toLowerCase();
+    let peer = peers.get(addressKey);
 
     // If no peer exists, create one (we're receiving a call)
     if (!peer) {
-        peer = createPeer(fromAddress, false);
+        peer = createPeer(addressKey, false);
     }
 
     // Apply the signal (only if peer was created successfully)
@@ -84,14 +86,15 @@ function handleIncomingSignal(fromAddress, signal) {
  * @param {boolean} initiator - Whether we're initiating the connection
  */
 function createPeer(peerAddress, initiator) {
+    const addressKey = peerAddress.toLowerCase();
     if (!SimplePeer) {
         console.error('SimplePeer not loaded yet');
         return null;
     }
 
-    console.log(`🔗 Creating peer connection to ${peerAddress.slice(0, 10)}... (initiator: ${initiator})`);
+    console.log(`🔗 Creating peer connection to ${addressKey.slice(0, 10)}... (initiator: ${initiator})`);
 
-    connectionStates.set(peerAddress, 'connecting');
+    connectionStates.set(addressKey, 'connecting');
 
     const peer = new SimplePeer({
         initiator,
@@ -113,14 +116,21 @@ function createPeer(peerAddress, initiator) {
 
     // Connection established
     peer.on('connect', () => {
-        console.log(`⚡ P2P connected to ${peerAddress.slice(0, 10)}!`);
-        connectionStates.set(peerAddress, 'connected');
+        console.log(`⚡ P2P connected to ${addressKey.slice(0, 10)}!`);
+        connectionStates.set(addressKey, 'connected');
     });
 
     // Receive data from peer
     peer.on('data', (data) => {
         try {
             const message = JSON.parse(data.toString());
+            
+            // --- Layer 4: Media Chunk Routing ---
+            if (message.type === 'MEDIA_CHUNK') {
+                handleIncomingMediaChunk(message);
+                return;
+            }
+
             console.log(`📩 Received P2P message from ${peerAddress.slice(0, 10)}`);
             if (dataCallback) {
                 dataCallback(message, peerAddress);
@@ -132,19 +142,19 @@ function createPeer(peerAddress, initiator) {
 
     // Connection closed
     peer.on('close', () => {
-        console.log(`🔌 P2P connection closed with ${peerAddress.slice(0, 10)}`);
-        connectionStates.set(peerAddress, 'disconnected');
-        peers.delete(peerAddress);
+        console.log(`🔌 P2P connection closed with ${addressKey.slice(0, 10)}`);
+        connectionStates.set(addressKey, 'disconnected');
+        peers.delete(addressKey);
     });
 
     // Error handling
     peer.on('error', (err) => {
-        console.error(`P2P error with ${peerAddress.slice(0, 10)}:`, err.message);
-        connectionStates.set(peerAddress, 'disconnected');
-        peers.delete(peerAddress);
+        console.error(`P2P error with ${addressKey.slice(0, 10)}:`, err.message);
+        connectionStates.set(addressKey, 'disconnected');
+        peers.delete(addressKey);
     });
 
-    peers.set(peerAddress, peer);
+    peers.set(addressKey, peer);
     return peer;
 }
 
@@ -153,21 +163,22 @@ function createPeer(peerAddress, initiator) {
  * @param {string} peerAddress
  */
 export async function connectToPeer(peerAddress) {
+    const addressKey = peerAddress.toLowerCase();
     // Check if already connected
-    const existingPeer = peers.get(peerAddress);
+    const existingPeer = peers.get(addressKey);
     if (existingPeer && !existingPeer.destroyed) {
         return existingPeer;
     }
 
     // Check if peer is online
-    const isOnline = await socketService.checkOnline(peerAddress);
+    const isOnline = await socketService.checkOnline(addressKey);
     if (!isOnline) {
-        console.log(`Peer ${peerAddress.slice(0, 10)} is offline, using relay`);
+        console.log(`Peer ${addressKey.slice(0, 10)} is offline, using relay`);
         return null;
     }
 
     // Create new connection as initiator
-    return createPeer(peerAddress, true);
+    return createPeer(addressKey, true);
 }
 
 /**
@@ -177,12 +188,13 @@ export async function connectToPeer(peerAddress) {
  * @returns {boolean} Success
  */
 export function sendToPeer(peerAddress, data) {
-    const peer = peers.get(peerAddress);
+    const addressKey = peerAddress.toLowerCase();
+    const peer = peers.get(addressKey);
 
     if (peer && peer.connected && !peer.destroyed) {
         try {
             peer.send(JSON.stringify(data));
-            console.log(`⚡ Sent P2P message to ${peerAddress.slice(0, 10)}`);
+            console.log(`⚡ Sent P2P message to ${addressKey.slice(0, 10)}`);
             return true;
         } catch (err) {
             console.error('P2P send failed:', err);
@@ -207,11 +219,12 @@ export function onData(callback) {
  * @returns {'p2p' | 'relay' | 'offline'}
  */
 export function getConnectionType(peerAddress) {
-    const state = connectionStates.get(peerAddress);
+    const addressKey = peerAddress.toLowerCase();
+    const state = connectionStates.get(addressKey);
     if (state === 'connected') return 'p2p';
 
     // Check if online via relay
-    const peer = peers.get(peerAddress);
+    const peer = peers.get(addressKey);
     if (!peer || peer.destroyed) {
         return 'relay'; // Will use server relay
     }
@@ -224,7 +237,8 @@ export function getConnectionType(peerAddress) {
  * @param {string} peerAddress
  */
 export function isPeerConnected(peerAddress) {
-    const peer = peers.get(peerAddress);
+    const addressKey = peerAddress.toLowerCase();
+    const peer = peers.get(addressKey);
     return peer && peer.connected && !peer.destroyed;
 }
 
@@ -233,11 +247,12 @@ export function isPeerConnected(peerAddress) {
  * @param {string} peerAddress
  */
 export function destroyPeer(peerAddress) {
-    const peer = peers.get(peerAddress);
+    const addressKey = peerAddress.toLowerCase();
+    const peer = peers.get(addressKey);
     if (peer) {
         peer.destroy();
-        peers.delete(peerAddress);
-        connectionStates.delete(peerAddress);
+        peers.delete(addressKey);
+        connectionStates.delete(addressKey);
     }
 }
 

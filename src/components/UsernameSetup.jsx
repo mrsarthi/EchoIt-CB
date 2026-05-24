@@ -1,5 +1,5 @@
-// UsernameSetup Component - First-time username selection
 import { useState } from 'react';
+import { AtSign, ChevronRight } from 'lucide-react';
 import { setUsername as setUsernameOnServer } from '../services/socketService';
 import './UsernameSetup.css';
 
@@ -14,7 +14,6 @@ export function UsernameSetup({ onComplete }) {
 
         const trimmed = username.trim();
 
-        // Client-side validation
         if (trimmed.length < 3) {
             setError('Username must be at least 3 characters');
             return;
@@ -34,13 +33,12 @@ export function UsernameSetup({ onComplete }) {
             const result = await setUsernameOnServer(trimmed);
 
             if (result.success) {
-                // Save to localStorage
                 localStorage.setItem('decentrachat_username', result.username);
                 onComplete(result.username);
             } else {
                 setError(result.error || 'Failed to set username');
             }
-        } catch (err) {
+        } catch {
             setError('Connection error. Please try again.');
         } finally {
             setIsSubmitting(false);
@@ -48,22 +46,24 @@ export function UsernameSetup({ onComplete }) {
     };
 
     return (
-        <div className="username-setup-container">
-            <div className="username-card glass-card animate-fadeIn">
+        <main className="username-setup-container">
+            <div className="username-card animate-fadeIn">
                 <div className="username-header">
-                    <span className="username-icon">🏷️</span>
-                    <h2>Choose Your Username</h2>
+                    <div className="icon-badge">
+                        <AtSign size={24} className="text-primary" />
+                    </div>
+                    <h2>Secure Identity</h2>
                     <p className="text-secondary">
-                        Your friends can find you using this tag
+                        Choose a unique handle for your decentralized profile.
                     </p>
                 </div>
 
                 <form onSubmit={handleSubmit} className="username-form">
-                    <div className="input-wrapper">
-                        <span className="input-prefix">@</span>
+                    <div className="input-field">
+                        <AtSign size={18} className="input-icon" />
                         <input
                             type="text"
-                            className="input username-input"
+                            className="username-input"
                             placeholder="username"
                             value={username}
                             onChange={(e) => setUsername(e.target.value)}
@@ -72,36 +72,29 @@ export function UsernameSetup({ onComplete }) {
                         />
                     </div>
 
-                    <p className="input-hint text-muted">
-                        3-20 characters, letters, numbers, underscores only
+                    <p className="input-hint">
+                        3-20 characters • Alphanumeric & underscores
                     </p>
 
                     {error && (
-                        <div className="error-message animate-fadeIn">
+                        <div className="error-message">
                             {error}
                         </div>
                     )}
 
-                    <div className="username-actions">
-                        <button
-                            type="submit"
-                            className="btn btn-primary"
-                            disabled={isSubmitting || username.length < 3}
-                        >
-                            {isSubmitting ? (
-                                <>
-                                    <span className="spinner"></span>
-                                    Saving...
-                                </>
-                            ) : (
-                                'Set Username'
-                            )}
-                        </button>
-
-
-                    </div>
+                    <button
+                        type="submit"
+                        className="btn btn-primary full-width"
+                        disabled={isSubmitting || username.length < 3}
+                    >
+                        {isSubmitting ? (
+                            <div className="spinner-small"></div>
+                        ) : (
+                            <>Continue <ChevronRight size={18} /></>
+                        )}
+                    </button>
                 </form>
             </div>
-        </div>
+        </main>
     );
 }

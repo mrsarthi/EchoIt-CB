@@ -1,43 +1,49 @@
-/* Premium Design System - DecentraChat */
+/* Secure Premium Design System - DecentraChat */
 
 /* Import Google Font */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
 /* CSS Custom Properties */
 :root {
-  /* Color Palette - Dark Mode */
-  --bg-primary: #0a0a0f;
-  --bg-secondary: #12121a;
-  --bg-tertiary: #1a1a25;
-  --bg-glass: rgba(255, 255, 255, 0.03);
-  --bg-glass-hover: rgba(255, 255, 255, 0.06);
-
-  /* Accent Colors */
-  --accent-primary: #6366f1;
-  --accent-secondary: #8b5cf6;
-  --accent-gradient: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%);
-  --accent-glow: rgba(99, 102, 241, 0.4);
-
-  /* Text Colors */
-  --text-primary: #ffffff;
-  --text-secondary: #a0a0b0;
-  --text-muted: #606070;
-
-  /* Status Colors */
+  /* Graphite Surface System */
+  --bg-primary: #0e0f12;     /* Deep Graphite */
+  --bg-secondary: #16171d;   /* Surface 1 */
+  --bg-tertiary: #1f2029;    /* Surface 2 */
+  --bg-elevated: #282a36;    /* Surface 3 */
+  
+  /* Semantic Colors */
+  --primary: #818cf8;        /* Pastel Indigo */
+  --primary-hover: #6366f1;
+  --accent-primary: #818cf8;
+  --accent-secondary: #34d399;
+  --accent-gradient: linear-gradient(135deg, #818cf8 0%, #a78bfa 50%, #c084fc 100%);
+  --accent-glow: rgba(129, 140, 248, 0.3);
+  
+  --trust: #34d399;          /* Trust Mint */
+  --trust-soft: rgba(52, 211, 153, 0.1);
+  --warning: #f59e0b;        /* Amber Warning */
+  --error: #ef4444;          /* Red Destructive */
   --success: #10b981;
-  --warning: #f59e0b;
-  --error: #ef4444;
-  --online: #22c55e;
-
-  /* Borders */
+  
+  /* Text Colors */
+  --text-primary: #f8fafc;
+  --text-secondary: #cbd5e1; /* Brighter for better contrast */
+  --text-muted: #94a3b8;     /* WCAG AA compliant on dark bg */
+  
+  /* Typography */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: monospace, ui-monospace, SFMono-Regular, Consolas;
+  
+  /* Borders & Accents */
   --border-subtle: rgba(255, 255, 255, 0.06);
-  --border-medium: rgba(255, 255, 255, 0.1);
+  --border-medium: rgba(255, 255, 255, 0.12);
+  --bg-glass: rgba(255, 255, 255, 0.04);
+  --bg-glass-hover: rgba(255, 255, 255, 0.08);
 
   /* Shadows */
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 8px 40px rgba(0, 0, 0, 0.5);
-  --shadow-glow: 0 0 40px var(--accent-glow);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 24px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 8px 48px rgba(0, 0, 0, 0.6);
 
   /* Spacing */
   --space-xs: 0.25rem;
@@ -45,9 +51,8 @@
   --space-md: 1rem;
   --space-lg: 1.5rem;
   --space-xl: 2rem;
-  --space-2xl: 3rem;
 
-  /* Border Radius */
+  /* Border Radius - Modern Standard */
   --radius-sm: 0.5rem;
   --radius-md: 0.75rem;
   --radius-lg: 1rem;
@@ -55,68 +60,28 @@
   --radius-full: 9999px;
 
   /* Typography */
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --font-mono: 'SF Mono', 'Fira Code', monospace;
-
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  
   /* Transitions */
-  --transition-fast: 150ms ease;
-  --transition-normal: 250ms ease;
-  --transition-slow: 400ms ease;
-}
-
-/* WhatsApp Android Design Overrides */
-.platform-capacitor,
-.platform-android {
-  --bg-primary: #111b21;
-  --bg-secondary: #222e35;
-  --bg-tertiary: #2a3942;
-  --accent-primary: #00a884;
-  --accent-secondary: #005c4b;
-  --accent-gradient: linear-gradient(135deg, #00a884 0%, #008069 100%);
-  --accent-glow: rgba(0, 168, 132, 0.2);
-
-  --text-primary: #e9edef;
-  --text-secondary: #8696a0;
-  --text-muted: #667781;
-
-  --bubble-sent: #005c4b;
-  --bubble-received: #202c33;
-  --wa-teal: #008069;
-
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --radius-lg: 0px;
-  /* Linear headers for WA */
-  --radius-md: 18px;
-  /* Chat bubble default */
-}
-
-/* WhatsApp specific layout resets */
-.platform-capacitor.app,
-.platform-android.app {
-  background: var(--bg-primary);
-}
-
-.platform-capacitor body,
-.platform-android body {
-  /* This will apply if we apply class to body, but let's be safe */
-  background: var(--bg-primary);
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-normal: 250ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* Reset & Base */
-*,
-*::before,
-*::after {
+*, *::before, *::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+  -webkit-tap-highlight-color: transparent;
 }
 
 html {
-  font-size: 100%;
+  font-size: 16px;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   height: 100%;
   width: 100%;
+  background: var(--bg-primary);
 }
 
 body {
@@ -127,9 +92,7 @@ body {
   width: 100%;
   overflow: hidden;
   position: absolute;
-  top: 0;
-  left: 0;
-  line-height: 1.6;
+  line-height: 1.5;
 }
 
 #root {
@@ -148,7 +111,7 @@ body {
 
 /* Scrollbar Styling */
 ::-webkit-scrollbar {
-  width: 0.375rem;
+  width: 5px;
 }
 
 ::-webkit-scrollbar-track {
@@ -160,55 +123,31 @@ body {
   border-radius: var(--radius-full);
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
-}
-
-/* Glass Card Component */
-.glass-card {
-  background: var(--bg-glass);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  transition: all var(--transition-normal);
-}
-
-.glass-card:hover {
-  background: var(--bg-glass-hover);
-  border-color: var(--border-medium);
-}
-
-/* Button Styles */
+/* Common UI Elements */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--space-sm);
-  padding: var(--space-sm) var(--space-lg);
-  font-family: var(--font-sans);
-  font-size: 0.95rem;
+  padding: 0.75rem 1.25rem;
+  font-size: 0.9375rem;
   font-weight: 500;
   border: none;
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: all var(--transition-fast);
-  text-decoration: none;
+  min-height: 48px; /* Android touch target */
 }
 
 .btn-primary {
-  background: var(--accent-gradient);
-  color: var(--text-primary);
-  box-shadow: var(--shadow-sm), 0 0 20px var(--accent-glow);
-}
-
-.btn-primary:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-md), 0 0 30px var(--accent-glow);
+  background: var(--accent-primary);
+  color: #0e0f12; /* Dark text for contrast on pastel */
+  box-shadow: 0 4px 14px var(--accent-glow);
 }
 
 .btn-primary:active {
-  transform: translateY(0);
+  background: var(--primary-hover);
+  transform: scale(0.98);
 }
 
 .btn-secondary {
@@ -217,293 +156,54 @@ body {
   border: 1px solid var(--border-medium);
 }
 
-.btn-secondary:hover {
-  background: var(--bg-glass-hover);
-  border-color: var(--accent-primary);
-}
-
 .btn-ghost {
   background: transparent;
   color: var(--text-secondary);
 }
 
-.btn-ghost:hover {
-  background: var(--bg-glass);
-  color: var(--text-primary);
-}
-
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-  transform: none !important;
 }
 
-/* Input Styles */
 .input {
   width: 100%;
-  padding: var(--space-sm) var(--space-md);
-  font-family: var(--font-sans);
-  font-size: 0.95rem;
-  color: var(--text-primary);
-  background: var(--bg-tertiary);
+  padding: 0.75rem 1rem;
+  background: var(--bg-secondary);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  outline: none;
-  transition: all var(--transition-fast);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 1rem;
+  transition: border-color var(--transition-fast);
 }
 
 .input:focus {
-  border-color: var(--accent-primary);
-  box-shadow: 0 0 0 3px var(--accent-glow);
+  outline: none;
+  border-color: var(--primary);
 }
 
-.input::placeholder {
-  color: var(--text-muted);
-}
+/* Utility Classes */
+.text-secondary { color: var(--text-secondary); }
+.text-muted { color: var(--text-muted); }
+.text-sm { font-size: 0.875rem; }
+.text-xs { font-size: 0.75rem; }
+.font-medium { font-weight: 500; }
+.font-semibold { font-weight: 600; }
 
-/* Badge Component */
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-xs);
-  padding: 2px var(--space-sm);
-  font-size: 0.75rem;
-  font-weight: 500;
-  border-radius: var(--radius-full);
-}
-
-.badge-success {
-  background: rgba(16, 185, 129, 0.15);
-  color: var(--success);
-}
-
-.badge-warning {
-  background: rgba(245, 158, 11, 0.15);
-  color: var(--warning);
-}
-
-.badge-accent {
-  background: rgba(99, 102, 241, 0.15);
-  color: var(--accent-primary);
-}
-
-/* Avatar Component */
-.avatar {
-  width: 2.5rem;
-  height: 2.5rem;
-  border-radius: var(--radius-full);
-  background: var(--accent-gradient);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 600;
-  font-size: 0.9rem;
-  color: white;
-  flex-shrink: 0;
-}
-
-.avatar-sm {
-  width: 2rem;
-  height: 2rem;
-  font-size: 0.75rem;
-}
-
-.avatar-lg {
-  width: 3.5rem;
-  height: 3.5rem;
-  font-size: 1.2rem;
-}
-
-/* Online Indicator */
-.online-indicator {
-  width: 0.625rem;
-  height: 0.625rem;
-  border-radius: var(--radius-full);
-  background: var(--online);
-  box-shadow: 0 0 0.5rem var(--online);
-  animation: pulse 2s infinite;
-}
-
-@keyframes pulse {
-
-  0%,
-  100% {
-    opacity: 1;
-  }
-
-  50% {
-    opacity: 0.5;
-  }
-}
-
-/* Animations */
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@keyframes slideIn {
-  from {
-    opacity: 0;
-    transform: translateX(-20px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-
-@keyframes scaleIn {
-  from {
-    opacity: 0;
-    transform: scale(0.95);
-  }
-
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
+.flex { display: flex; }
+.flex-col { flex-direction: column; }
+.items-center { align-items: center; }
+.justify-center { justify-content: center; }
+.justify-between { justify-content: space-between; }
+.gap-sm { gap: var(--space-sm); }
+.gap-md { gap: var(--space-md); }
 
 .animate-fadeIn {
-  animation: fadeIn var(--transition-normal) ease forwards;
+  animation: fadeIn var(--transition-normal) ease-out;
 }
 
-.animate-slideIn {
-  animation: slideIn var(--transition-normal) ease forwards;
-}
-
-.animate-scaleIn {
-  animation: scaleIn var(--transition-fast) ease forwards;
-}
-
-/* Gradient Text */
-.gradient-text {
-  background: var(--accent-gradient);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-}
-
-/* Encrypted Icon Animation */
-@keyframes lockPulse {
-
-  0%,
-  100% {
-    transform: scale(1);
-  }
-
-  50% {
-    transform: scale(1.1);
-  }
-}
-
-.encrypted-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 0.7rem;
-  color: var(--success);
-  animation: lockPulse 3s ease infinite;
-}
-
-/* Layout Utilities */
-.flex {
-  display: flex;
-}
-
-.flex-col {
-  flex-direction: column;
-}
-
-.items-center {
-  align-items: center;
-}
-
-.justify-center {
-  justify-content: center;
-}
-
-.justify-between {
-  justify-content: space-between;
-}
-
-.gap-xs {
-  gap: var(--space-xs);
-}
-
-.gap-sm {
-  gap: var(--space-sm);
-}
-
-.gap-md {
-  gap: var(--space-md);
-}
-
-.gap-lg {
-  gap: var(--space-lg);
-}
-
-/* Text Utilities */
-.text-sm {
-  font-size: 0.875rem;
-}
-
-.text-xs {
-  font-size: 0.75rem;
-}
-
-.text-muted {
-  color: var(--text-muted);
-}
-
-.text-secondary {
-  color: var(--text-secondary);
-}
-
-.font-medium {
-  font-weight: 500;
-}
-
-.font-semibold {
-  font-weight: 600;
-}
-
-/* Spacing Utilities */
-.p-md {
-  padding: var(--space-md);
-}
-
-.p-lg {
-  padding: var(--space-lg);
-}
-
-.mt-md {
-  margin-top: var(--space-md);
-}
-
-.mb-md {
-  margin-bottom: var(--space-md);
-}
-
-/* Message Status Ticks */
-.message-status {
-  font-size: 0.8rem;
-  margin-left: 4px;
-  color: var(--text-muted);
-  /* Grey by default (Sent/Delivered) */
-  font-weight: bold;
-}
-
-.message-status.read {
-  color: #ff3b3b;
-  text-shadow: 0 0 4px rgba(255, 59, 59, 0.5);
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
