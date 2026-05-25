@@ -14,9 +14,11 @@ const activeSubscriptions = new Map(); // topic -> subscription
 
 let messageCallback = null;
 
+import nacl from 'tweetnacl';
+
 /**
  * Derive a unique, opaque Waku Content Topic for a conversation.
- * Uses SHA-256 to prevent communication graph leakage.
+ * Uses SHA-512 (truncated to 32 bytes) to prevent communication graph leakage.
  */
 export async function getConversationTopic(toAddress, fromAddress = null, isGroup = false) {
     let id;
@@ -28,11 +30,11 @@ export async function getConversationTopic(toAddress, fromAddress = null, isGrou
         id = sorted.join('_');
     }
 
-    // Hash the ID to make it opaque
+    // Hash the ID to make it opaque (using tweetnacl to avoid secure context issues)
     const encoder = new TextEncoder();
     const data = encoder.encode(id);
-    const hashBuffer = await window.crypto.subtle.digest('SHA-256', data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hashBuffer = nacl.hash(data).slice(0, 32); // first 32 bytes
+    const hashArray = Array.from(hashBuffer);
     const hashedId = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 
     const type = isGroup ? 'group' : 'dm';

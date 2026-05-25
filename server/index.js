@@ -565,7 +565,7 @@ io.on('connection', (socket) => {
     socket.on('lookupByUsername', ({ username }, callback) => {
         const normalizedUsername = username.toLowerCase().trim().replace('@', '');
         
-        db.get(`SELECT * FROM users WHERE LOWER(username) = ?`, [normalizedUsername], (err, row) => {
+        db.get(`SELECT * FROM users WHERE LOWER(username) LIKE ?`, [`%${normalizedUsername}%`], (err, row) => {
             if (err || !row) {
                 callback(null);
                 return;
