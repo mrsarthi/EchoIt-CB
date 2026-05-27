@@ -16,6 +16,12 @@ self.onmessage = async (e) => {
             case 'hmacSha256':
                 result = await hmacSha256(payload.key, payload.data);
                 break;
+            case 'dhBefore':
+                result = dhBefore(payload.publicKeyBase64, payload.secretKeyBase64);
+                break;
+            case 'generateKeyPair':
+                result = generateKeyPair();
+                break;
             case 'ratchetEpochKey':
                 result = ratchetEpochKey(payload.currentKeyBase64);
                 break;
@@ -119,4 +125,19 @@ function decryptGroupMessage(epochKeyBase64, ciphertextBase64, nonceBase64, sign
     if (!decrypted) throw new Error('Invalid MAC');
 
     return encodeUTF8(decrypted);
+}
+
+function dhBefore(publicKeyBase64, secretKeyBase64) {
+    const pub = decodeBase64(publicKeyBase64);
+    const sec = decodeBase64(secretKeyBase64);
+    const shared = nacl.box.before(pub, sec);
+    return encodeBase64(shared);
+}
+
+function generateKeyPair() {
+    const kp = nacl.box.keyPair();
+    return {
+        publicKey: encodeBase64(kp.publicKey),
+        secretKey: encodeBase64(kp.secretKey)
+    };
 }

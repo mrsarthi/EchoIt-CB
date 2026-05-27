@@ -3,13 +3,21 @@ import {
     ChevronDown, 
     MessageSquare, 
     ShieldCheck, 
-    ExternalLink
+    ExternalLink,
+    AlertTriangle
 } from 'lucide-react';
 import { formatAddress } from '../blockchain/web3Provider';
 import './ContactProfileModal.css';
 
-export default function ContactProfileModal({ user, onClose, onStartChat, onVerify, isVerified, sharedMedia = [] }) {
+export default function ContactProfileModal({ user, onClose, onStartChat, onVerify, onReportSpam, isVerified, sharedMedia = [] }) {
     if (!user) return null;
+
+    const handleReport = () => {
+        if (window.confirm(`Are you sure you want to report ${user.username || formatAddress(user.address)} for spam? This will apply a heavy reputation penalty to them.`)) {
+            onReportSpam(user.address, 'spam');
+            onClose();
+        }
+    };
 
     return (
         <div className="contact-profile-overlay" onClick={onClose}>
@@ -43,6 +51,12 @@ export default function ContactProfileModal({ user, onClose, onStartChat, onVeri
                                 <ShieldCheck size={22} className={isVerified ? 'text-trust' : ''} />
                             </div>
                             <span>{isVerified ? 'Verified' : 'Verify'}</span>
+                        </button>
+                        <button className="hero-action-btn danger" onClick={handleReport}>
+                            <div className="action-icon-circle">
+                                <AlertTriangle size={22} />
+                            </div>
+                            <span>Report</span>
                         </button>
                     </div>
                 </div>

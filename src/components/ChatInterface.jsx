@@ -61,7 +61,8 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
         myTrustStage,
         saveProfile,
         updateGroupAvatar,
-        verifyContact
+        verifyContact,
+        reportSpam
     } = useChat(walletAddress);
 
     const [newMessage, setNewMessage] = useState('');
@@ -498,23 +499,32 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
 
     const typingText = getTypingText();
 
-    const { lastReadMessageIds } = useMemo(() => {
-        const reads = {}; 
-        for (let i = messages.length - 1; i >= 0; i--) {
-            const msg = messages[i];
-            if (msg.from?.toLowerCase() === walletAddress?.toLowerCase()) {
-                if (msg.receipts) {
-                    Object.entries(msg.receipts).forEach(([address, status]) => {
-                        const lowerAddr = address.toLowerCase();
-                        if (status === 'read' && !reads[lowerAddr]) reads[lowerAddr] = msg.id;
-                    });
-                } else if (msg.status === 'read' && activeChat && !activeChat.isGroup) {
-                    const lowerAddr = activeChat.address.toLowerCase();
-                    if (!reads[lowerAddr]) reads[lowerAddr] = msg.id;
+    const receiptMap = useMemo(() => {
+        const reads = {};      // address -> msgId
+        const delivered = {};  // address -> msgId
+        
+        const peers = activeChat?.isGroup ? (activeChat.info?.members || []) : [activeChat?.address];
+        
+        peers.forEach(peer => {
+            if (!peer) return;
+            const lowerPeer = peer.toLowerCase();
+            if (lowerPeer === walletAddress?.toLowerCase()) return;
+
+            for (let i = messages.length - 1; i >= 0; i--) {
+                const msg = messages[i];
+                if (msg.from?.toLowerCase() !== walletAddress?.toLowerCase()) continue;
+
+                const status = msg.receipts?.[lowerPeer];
+                if (status === 'read' && !reads[lowerPeer]) {
+                    reads[lowerPeer] = msg.id;
+                    break; // Found latest read, stop for this peer
+                } else if (status === 'delivered' && !delivered[lowerPeer] && !reads[lowerPeer]) {
+                    delivered[lowerPeer] = msg.id;
                 }
             }
-        }
-        return { lastReadMessageIds: reads };
+        });
+
+        return { lastReadMessageIds: reads, lastDeliveredMessageIds: delivered };
     }, [messages, walletAddress, activeChat]);
 
     return (
@@ -673,7 +683,34 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                             <div className="reaction-pills">{Object.entries(msg.reactions).map(([emoji, users]) => (<button key={emoji} className="reaction-pill" onClick={() => setReactionDetailModal({ emoji, users, msgId: msg.id })}><span>{emoji}</span>{users.length > 1 && <span className="text-xs">{users.length}</span>}</button>))}</div>
                                         )}
                                         {msg.from?.toLowerCase() === walletAddress?.toLowerCase() && (
-                                            <div className="receipt-anchors">{Object.entries(lastReadMessageIds).filter(([, msgId]) => msgId === msg.id).map(([address]) => (<div key={address} className="receipt-avatar"><div style={{ background: 'var(--primary)', width: '100%', height: '100%' }} /></div>))}</div>
+                                            <div className="receipt-anchors">
+                                                {/* 1. Seen Receipts (Avatars) */}
+                                                {Object.entries(receiptMap.lastReadMessageIds)
+                                                    .filter(([, msgId]) => msgId === msg.id)
+                                                    .map(([address]) => {
+                                                        const contact = contacts.find(c => c.address.toLowerCase() === address.toLowerCase());
+                                                        return (
+                                                            <div key={`${address}-read`} className="receipt-avatar" title={`Seen by ${contact?.username || formatAddress(address)}`}>
+                                                                {contact?.avatar ? (
+                                                                    <img src={contact.avatar} alt="pfp" />
+                                                                ) : (
+                                                                    <div className="receipt-avatar-fallback">
+                                                                        {(contact?.username || address).slice(0, 1).toUpperCase()}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })
+                                                }
+                                                
+                                                {/* 2. Delivered Receipts (Hollow Circles) */}
+                                                {Object.entries(receiptMap.lastDeliveredMessageIds)
+                                                    .filter(([, msgId]) => msgId === msg.id)
+                                                    .map(([address]) => (
+                                                        <div key={`${address}-delivered`} className="receipt-avatar delivered" title="Delivered" />
+                                                    ))
+                                                }
+                                            </div>
                                         )}
                                     </div>
                                 ))
@@ -785,6 +822,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                     onClose={() => setShowContactProfile(false)}
                     onStartChat={() => setShowContactProfile(false)}
                     onVerify={() => setShowSafetyNumbers(true)}
+                    onReportSpam={reportSpam}
                 />
             )}
 

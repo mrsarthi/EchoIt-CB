@@ -95,20 +95,25 @@ export async function sendViaWaku(payload, toAddress, fromAddress, isGroup = fal
         const message = WakuMessage.create({ payload: payloadStr });
         const serialized = WakuMessage.encode(message).finish();
 
-        // Push to the network using Lightpush (saves bandwidth)
-        const result = await wakuNode.lightpush.send(encoder, {
-            payload: serialized
-        });
+        // Push to the network using Lightpush or Relay
+        let result;
+        if (wakuNode.lightpush) {
+            result = await wakuNode.lightpush.send(encoder, { payload: serialized });
+        } else if (wakuNode.relay) {
+            result = await wakuNode.relay.send(encoder, { payload: serialized });
+        } else {
+            throw new Error('Waku node has no valid transport (lightpush or relay)');
+        }
 
-        if (result.errors && result.errors.length > 0) {
-            console.error(`⚠️ Waku Lightpush errors on topic ${topic}:`, result.errors);
+        if (result && result.errors && result.errors.length > 0) {
+            console.error(`⚠️ Waku push errors on topic ${topic}:`, result.errors);
             return false;
         }
 
         console.log(`🚀 Waku: Message pushed to mesh on isolated topic: ${topic}`);
         return true;
     } catch (err) {
-        console.error('Waku send error:', err);
+        console.error('⚠️ Waku send error:', err);
         return false;
     }
 }

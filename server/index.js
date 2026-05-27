@@ -12,6 +12,8 @@ const path = require('path');
 const admin = require('firebase-admin');
 const sqlite3 = require('sqlite3').verbose();
 
+const { argon2id } = require('hash-wasm');
+
 // ===== Registration Challenge Setup =====
 const pendingChallenges = new Map(); // socket.id -> { challenge, timestamp }
 const CHALLENGE_TIMEOUT = 60000; // 60 seconds
@@ -31,13 +33,13 @@ db.serialize(() => {
         avatar TEXT,
         status TEXT,
         registered_at INTEGER,
-        trust_score INTEGER DEFAULT 0,
+        trust_score INTEGER DEFAULT 100,
         push_token TEXT,
         os_platform TEXT
     )`);
 
     // Ensure trust_score column exists for existing databases
-    db.run(`ALTER TABLE users ADD COLUMN trust_score INTEGER DEFAULT 0`, (err) => {});
+    db.run(`ALTER TABLE users ADD COLUMN trust_score INTEGER DEFAULT 100`, (err) => {});
     db.run(`ALTER TABLE users ADD COLUMN push_token TEXT`, (err) => {});
     db.run(`ALTER TABLE users ADD COLUMN os_platform TEXT`, (err) => {});
     db.run(`ALTER TABLE users ADD COLUMN signing_public_key TEXT`, (err) => {});
@@ -51,6 +53,15 @@ db.serialize(() => {
         verified TEXT NOT NULL,
         timestamp INTEGER NOT NULL,
         PRIMARY KEY(verifier, verified)
+    )`);
+
+    // NEW: Reports table for spam detection and reputation penalties
+    db.run(`CREATE TABLE IF NOT EXISTS reports (
+        reporter TEXT NOT NULL,
+        reported TEXT NOT NULL,
+        reason TEXT,
+        timestamp INTEGER NOT NULL,
+        PRIMARY KEY(reporter, reported)
     )`);
 
     // --- TASK 6: Server-Side Group Registry Tables ---
@@ -272,12 +283,63 @@ setInterval(() => {
 function getTrustStage(registeredAt, trustScore) {
     const ageDays = (Date.now() - registeredAt) / (1000 * 60 * 60 * 24);
     if (ageDays >= 30 && (trustScore || 0) > 150) return 3; 
-    if (ageDays >= 7 && (trustScore || 0) >= 10) return 2;  
+    if (ageDays >= 7 && (trustScore || 0) >= 110) return 2;  
     return 1; 
 }
 
 function incrementTrustScore(address, points) {
     db.run(`UPDATE users SET trust_score = COALESCE(trust_score, 0) + ? WHERE address = ?`, [points, address.toLowerCase()]);
+}
+
+// --- V3 Staged Privileges & Rate Limiting ---
+const messageCounters = new Map(); // address -> { count, resetAt }
+const groupCreationCounters = new Map(); // address -> { count, resetAt }
+
+async function checkPrivileges(address, action) {
+    const user = await new Promise(resolve => {
+        db.get(`SELECT * FROM users WHERE address = ?`, [address.toLowerCase()], (err, row) => resolve(row));
+    });
+    if (!user) return { allowed: false, error: 'User not found' };
+
+    const stage = getTrustStage(user.registered_at, user.trust_score);
+    const now = Date.now();
+
+    if (action === 'sendMessage') {
+        if (stage >= 2) return { allowed: true }; // Stage 2+ unlimited
+        
+        const limit = messageCounters.get(address) || { count: 0, resetAt: now + 60000 };
+        if (now > limit.resetAt) {
+            limit.count = 1;
+            limit.resetAt = now + 60000;
+        } else {
+            limit.count++;
+        }
+        messageCounters.set(address, limit);
+
+        if (limit.count > 10) {
+            return { allowed: false, error: 'Rate limit exceeded for Stage 1. Verify a contact to unlock higher limits.' };
+        }
+    }
+
+    if (action === 'createGroup') {
+        if (stage >= 3) return { allowed: true }; // Stage 3 unlimited
+        
+        const limit = groupCreationCounters.get(address) || { count: 0, resetAt: now + (24 * 60 * 60 * 1000) };
+        if (now > limit.resetAt) {
+            limit.count = 1;
+            limit.resetAt = now + (24 * 60 * 60 * 1000);
+        } else {
+            limit.count++;
+        }
+        groupCreationCounters.set(address, limit);
+
+        const maxGroups = stage === 2 ? 5 : 1;
+        if (limit.count > maxGroups) {
+            return { allowed: false, error: `Daily group limit reached for Stage ${stage}.` };
+        }
+    }
+
+    return { allowed: true };
 }
 
 app.post('/api/auth/callback', rateLimitMiddleware, (req, res) => {
@@ -331,8 +393,35 @@ io.on('connection', (socket) => {
     socket.on('register', async ({ address, publicKey, signingPublicKey, username, avatar, status, registeredAt, challenge, signature, proofOfWork, pushToken, osPlatform }) => {
         const normalizedAddress = address.toLowerCase();
 
-        if (!challenge || !signature) {
-            return socket.emit('registrationError', { error: 'Missing challenge or signature.' });
+        if (!challenge || !signature || !proofOfWork) {
+            return socket.emit('registrationError', { error: 'Missing challenge, signature, or security proof.' });
+        }
+
+        // 1. Verify PoW (Sybil Resistance)
+        try {
+            const salt = normalizedAddress.slice(0, 16);
+            const computedHashHex = await argon2id({
+                password: challenge,
+                salt: salt,
+                iterations: 2,
+                memory: 16384,
+                parallelism: 1,
+                hashLength: 32,
+                outputType: 'hex',
+            });
+            
+            const proofOfWorkBuffer = Buffer.from(proofOfWork, 'base64');
+            const proofOfWorkHex = proofOfWorkBuffer.toString('hex');
+
+            if (computedHashHex !== proofOfWorkHex) {
+                console.warn(`🛡️ Sybil Alert: Invalid PoW from ${normalizedAddress.slice(0, 10)}`);
+                return socket.emit('registrationError', { error: 'Invalid security proof. Bot detected.' });
+            }
+        } catch (err) {
+            console.error('PoW Validation Error:', err.message);
+            if (!GRACE_PERIOD_ENABLED) {
+                return socket.emit('registrationError', { error: 'Security verification failed.' });
+            }
         }
 
         if (!pendingChallenges.has(socket.id) || pendingChallenges.get(socket.id).challenge !== challenge) {
@@ -371,12 +460,11 @@ io.on('connection', (socket) => {
         const finalRegisteredAt = dbUser?.registered_at || (registeredAt || Date.now());
         const finalPushToken = pushToken || dbUser?.push_token;
         const finalOsPlatform = osPlatform || dbUser?.os_platform;
-        const trustScore = dbUser?.trust_score || 0;
+        const trustScore = dbUser?.trust_score !== undefined ? dbUser.trust_score : 100;
 
-        db.run(`INSERT OR REPLACE INTO users (address, username, public_key, signing_public_key, avatar, status, registered_at, trust_score, push_token, os_platform) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, 
+        db.run(`INSERT OR REPLACE INTO users (address, username, public_key, signing_public_key, avatar, status, registered_at, trust_score, push_token, os_platform)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [normalizedAddress, finalUsername, publicKey, signingPublicKey, finalAvatar, finalStatus, finalRegisteredAt, trustScore, finalPushToken, finalOsPlatform]);
-
         users.set(normalizedAddress, {
             socketId: socket.id,
             publicKey,
@@ -507,10 +595,38 @@ io.on('connection', (socket) => {
             return;
         }
 
-        const points = verifierStage === 3 ? 5 : 2;
+        const points = 10;
         db.run(`INSERT INTO verifications (verifier, verified, timestamp) VALUES (?, ?, ?)`, [verifier, verified, Date.now()]);
         incrementTrustScore(verified, points);
         if (callback) callback({ success: true, pointsAwarded: points });
+    });
+
+    socket.on('reportSpam', async ({ address, reason }, callback) => {
+        if (!socket.address) return;
+        const reporter = socket.address.toLowerCase();
+        const reported = address.toLowerCase();
+
+        if (reporter === reported) {
+            if (callback) callback({ success: false, error: 'You cannot report yourself.' });
+            return;
+        }
+
+        const alreadyReported = await new Promise(resolve => {
+            db.get(`SELECT * FROM reports WHERE reporter = ? AND reported = ?`, [reporter, reported], (err, row) => resolve(row));
+        });
+
+        if (alreadyReported) {
+            if (callback) callback({ success: false, error: 'You have already reported this user.' });
+            return;
+        }
+
+        const penalty = -50;
+        db.run(`INSERT INTO reports (reporter, reported, reason, timestamp) VALUES (?, ?, ?, ?)`, [reporter, reported, reason || 'spam', Date.now()]);
+        incrementTrustScore(reported, penalty);
+        
+        console.log(`🛡️ Spam Report: ${reporter.slice(0, 10)} reported ${reported.slice(0, 10)}. Penalty applied: ${penalty}`);
+        
+        if (callback) callback({ success: true, penaltyApplied: penalty });
     });
 
     socket.on('setUsername', async ({ username }, callback) => {
@@ -658,6 +774,11 @@ io.on('connection', (socket) => {
         const { to, ...rest } = messageData;
         const toAddress = to.toLowerCase();
         if (!socket.address) return;
+
+        const { allowed, error } = await checkPrivileges(socket.address, 'sendMessage');
+        if (!allowed) {
+            return socket.emit('error', { message: error });
+        }
 
         const fullMessage = {
             ...rest,
@@ -836,8 +957,14 @@ io.on('connection', (socket) => {
         );
     });
 
-    socket.on('createGroup', ({ groupId, groupName, members, avatar }) => {
+    socket.on('createGroup', async ({ groupId, groupName, members, avatar }) => {
         if (!socket.address) return;
+        
+        const { allowed, error } = await checkPrivileges(socket.address, 'createGroup');
+        if (!allowed) {
+            return socket.emit('error', { message: error });
+        }
+
         if (!groupId || !Array.isArray(members) || members.length === 0) return;
         const creator = socket.address;
         const timestamp = Date.now();

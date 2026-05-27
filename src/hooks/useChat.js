@@ -325,6 +325,16 @@ export function useChat(myAddress) {
             const cachedContacts = await getSavedContacts();
             if (mounted && cachedContacts.length > 0) {
                 setContacts(cachedContacts);
+                
+                // Subscribe to Waku topics for all contacts
+                cachedContacts.forEach(async (c) => {
+                    const topic = await getConversationTopic(c.address, myAddress, c.isGroup);
+                    subscribeToTopic(topic);
+                });
+
+                // Also subscribe to our own "discovery" topic for new incoming chats
+                getConversationTopic(myAddress).then(topic => subscribeToTopic(topic));
+
                 const addresses = cachedContacts.map(c => c.address);
                 getUsersStatus(addresses).then(statuses => {
                     if (!mounted) return;
@@ -378,7 +388,22 @@ export function useChat(myAddress) {
             });
 
             subscribeToMessages(async (msg) => {
+                // Handle batch history updates from Swarm Sync (Layer 5)
+                if (msg.type === 'SWARM_SYNC_BATCH') {
+                    if (activeChatRef.current?.address?.toLowerCase() === msg.chatId?.toLowerCase()) {
+                        console.log(`🐝 SwarmSync: Refreshing messages for ${msg.chatId}`);
+                        const refreshedMessages = getLoadedMessages(msg.chatId);
+                        setMessages(refreshedMessages);
+                    }
+                    return;
+                }
+
                 const contactId = msg.groupId || msg.from;
+                const isGroup = !!msg.groupId;
+
+                // Trigger Waku subscription for new conversation
+                getConversationTopic(contactId, myAddress, isGroup).then(topic => subscribeToTopic(topic));
+
                 let processedMsg = msg;
                 if (processedMsg.decryptionFailed && !processedMsg.isRetry && !processedMsg.groupId) {
                     try {
@@ -701,8 +726,14 @@ export function useChat(myAddress) {
     }, [activeChat, myAddress]);
 
     const openChat = useCallback(async (address, userInfo = null) => {
-        if (activeChatRef.current?.address?.toLowerCase() === address.toLowerCase()) return;
+        console.log('🔵 openChat called:', { address, userInfo: userInfo?.username, activeChatRef: activeChatRef.current?.address });
+        if (!address) { console.error('❌ openChat called with no address'); return; }
+        if (activeChatRef.current?.address?.toLowerCase() === address.toLowerCase()) {
+            console.log('🔵 openChat: already viewing this chat, skipping');
+            return;
+        }
         let contact = contacts.find(c => c.address.toLowerCase() === address.toLowerCase());
+        console.log('🔵 openChat: contact found?', !!contact, contact?.username);
         if (!contact && userInfo) {
             contact = { address: userInfo.address, username: userInfo.username, lastMessageTime: Date.now(), unreadCount: 0, online: false };
             setContacts(prev => [contact, ...prev]);
@@ -710,6 +741,7 @@ export function useChat(myAddress) {
         if (contact) {
             setContacts(prev => prev.map(c => c.address.toLowerCase() === address.toLowerCase() ? { ...c, unreadCount: 0 } : c));
         }
+        console.log('🔵 openChat: setting activeChat now');
         setActiveChat({ address, info: contact || userInfo || { address }, isGroup: contact?.isGroup || false, members: contact?.members || [] });
         if (contact && !contact.isGroup) {
             import('../services/messageService').then(async ({ verifyRecipientKey }) => {
@@ -722,10 +754,15 @@ export function useChat(myAddress) {
                 }
             }).catch(() => {});
         }
-        const topic = await getConversationTopic(address, myAddress, contact?.isGroup || false);
-        subscribeToTopic(topic);
-        if (syncCleanupRef.current) syncCleanupRef.current();
-        initSwarmSync(address, myAddress, address, contact?.isGroup || false).then(cleanup => { syncCleanupRef.current = cleanup; });
+        // Waku topic & swarm sync (non-blocking — don't let failures prevent chat from opening)
+        try {
+            const topic = await getConversationTopic(address, myAddress, contact?.isGroup || false);
+            subscribeToTopic(topic);
+        } catch (err) { console.warn('⚠️ Failed to subscribe to Waku topic:', err); }
+        try {
+            if (syncCleanupRef.current) syncCleanupRef.current();
+            initSwarmSync(address, myAddress, address, contact?.isGroup || false).then(cleanup => { syncCleanupRef.current = cleanup; }).catch(() => {});
+        } catch (err) { console.warn('⚠️ Failed to init swarm sync:', err); }
         if (!contact?.isGroup && myAddress.toLowerCase() > address.toLowerCase()) {
             connectToPeer(address).catch(() => {});
         }
@@ -747,7 +784,7 @@ export function useChat(myAddress) {
                 }
                 merged = [...merged, ...newServerMsgs].sort((a, b) => (a.savedAt || a.timestamp) - (b.savedAt || b.timestamp) || (a.id || '').localeCompare(b.id || ''));
                 if (newServerMsgs.length > 0) saveMessagesBulk(address, newServerMsgs);
-            } catch {}
+            } catch (histErr) { console.warn('⚠️ Server history fetch failed, using local only:', histErr); }
             if (!(contact?.isGroup)) merged = merged.filter(m => !m.groupId);
             const unreadIds = [];
             const mappedMessages = merged.map(m => {
@@ -845,7 +882,21 @@ export function useChat(myAddress) {
         }
     }, []);
 
+    const reportSpam = useCallback(async (address, reason) => {
+        if (!address) return;
+        const { emitReportSpam } = await import('../services/socketService');
+        return emitReportSpam(address, reason).then(response => {
+            if (response && response.success) {
+                alert(`Reported for spam. Reputation penalty applied: ${response.penaltyApplied} POC.`);
+                return true;
+            } else {
+                alert(`Report failed: ${response?.error || 'Unknown error'}`);
+                return false;
+            }
+        });
+    }, []);
+
     return {
-        activeChat, messages, contacts, isLoading, isLoadingMore, hasMoreMessages, error, connectionType, serverConnected, typingStatus, flushingOutbox, openChat, closeChat, sendMessage, sendTyping, createGroup, deleteGroup, removeMember, searchAndAddContact, toggleReaction, loadMoreMessages, myAvatar, myStatus, myTrustScore, myTrustStage, myRegisteredAt, saveProfile, updateGroupAvatar, verifyContact, clearError: () => setError(null),
+        activeChat, messages, contacts, isLoading, isLoadingMore, hasMoreMessages, error, connectionType, serverConnected, typingStatus, flushingOutbox, openChat, closeChat, sendMessage, sendTyping, createGroup, deleteGroup, removeMember, searchAndAddContact, toggleReaction, loadMoreMessages, myAvatar, myStatus, myTrustScore, myTrustStage, myRegisteredAt, saveProfile, updateGroupAvatar, verifyContact, reportSpam, clearError: () => setError(null),
     };
 }

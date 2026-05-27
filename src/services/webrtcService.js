@@ -96,6 +96,18 @@ function createPeer(peerAddress, initiator) {
 
     connectionStates.set(addressKey, 'connecting');
 
+    // V3 Hardening: Add a connection timeout
+    const connectionTimeout = setTimeout(() => {
+        if (connectionStates.get(addressKey) === 'connecting') {
+            console.warn(`⏳ P2P connection to ${addressKey.slice(0, 10)} timed out.`);
+            connectionStates.set(addressKey, 'disconnected');
+            if (peers.has(addressKey)) {
+                peers.get(addressKey).destroy();
+                peers.delete(addressKey);
+            }
+        }
+    }, 7000); // 7 seconds (aggressive for mobile failover)
+
     const peer = new SimplePeer({
         initiator,
         trickle: true,
@@ -116,6 +128,7 @@ function createPeer(peerAddress, initiator) {
 
     // Connection established
     peer.on('connect', () => {
+        clearTimeout(connectionTimeout);
         console.log(`⚡ P2P connected to ${addressKey.slice(0, 10)}!`);
         connectionStates.set(addressKey, 'connected');
     });

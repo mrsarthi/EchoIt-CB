@@ -49,9 +49,6 @@
 }
 
 .avatar-xxl {
-    width: 100px;
-    height: 100px;
-    font-size: 2.5rem;
     margin-bottom: var(--space-md);
     position: relative;
     border: 3px solid var(--bg-primary);
@@ -119,6 +116,14 @@
 .hero-action-btn:active .action-icon-circle {
     background: var(--bg-elevated);
     transform: scale(0.9);
+}
+
+.hero-action-btn.danger .action-icon-circle {
+    color: var(--error);
+}
+
+.hero-action-btn.danger:active .action-icon-circle {
+    background: rgba(239, 68, 68, 0.1);
 }
 
 .profile-scroll-content {

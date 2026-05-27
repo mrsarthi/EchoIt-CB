@@ -625,6 +625,23 @@ export function emitVerifyContact(address) {
 }
 
 /**
+ * Report a user for spam/abuse
+ * @param {string} address 
+ * @param {string} reason 
+ */
+export function emitReportSpam(address, reason = 'spam') {
+    return new Promise((resolve) => {
+        if (!socket?.connected) {
+            resolve({ success: false, error: 'Offline' });
+            return;
+        }
+        socket.emit('reportSpam', { address, reason }, (response) => {
+            resolve(response);
+        });
+    });
+}
+
+/**
  * Emit a Yjs sync state vector or update to a peer
  */
 export function emitSyncYjsState(toAddress, chatId, epochIndex, updateBase64) {

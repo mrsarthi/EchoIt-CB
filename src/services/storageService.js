@@ -2,6 +2,8 @@ import localforage from 'localforage';
 import { insertMessage } from './stateEngine';
 import { encryptSymmetric, decryptSymmetric } from '../crypto/crypto';
 
+import { hashArgon2 } from '../crypto/argon2Client';
+
 // In-memory session key for local storage encryption (volatile)
 let storageSessionKey = null;
 
@@ -9,7 +11,7 @@ let storageSessionKey = null;
  * Set the session key for local storage encryption (derived from PIN)
  * @param {string} pin 
  */
-export async function setStorageSessionKey(pin) {
+export async function setStorageSessionKey(pin, address = null) {
     if (!pin) {
         storageSessionKey = null;
         return;
@@ -17,29 +19,15 @@ export async function setStorageSessionKey(pin) {
 
     // Derive a strong 32-byte key from the PIN using Argon2
     // Use the user's wallet address as salt for the hash
-    const address = localStorage.getItem('decentrachat_address') || 'default_salt';
+    const saltAddress = address || localStorage.getItem('decentrachat_address') || 'default_salt';
     
-    return new Promise((resolve, reject) => {
-        const worker = new Worker(new URL('../workers/argon2.worker.js', import.meta.url), { type: 'module' });
-        worker.onmessage = (e) => {
-            const { success, hash, error } = e.data;
-            worker.terminate();
-            if (success) {
-                // The hash returned from the worker is the encoded version
-                // We use the raw 32 bytes for our symmetric key
-                storageSessionKey = hash; 
-                console.debug('🔐 Storage session key derived via Argon2 and cached');
-                resolve();
-            } else {
-                reject(new Error(error));
-            }
-        };
-        worker.onerror = (err) => {
-            worker.terminate();
-            reject(err);
-        };
-        worker.postMessage({ challenge: pin, salt: address.slice(0, 16) });
-    });
+    try {
+        const hash = await hashArgon2(pin, saltAddress.slice(0, 16));
+        storageSessionKey = hash; 
+        console.debug('🔐 Storage session key derived via Argon2 and cached');
+    } catch (error) {
+        throw error;
+    }
 }
 
 /**

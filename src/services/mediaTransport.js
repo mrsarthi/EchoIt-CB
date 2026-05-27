@@ -1,9 +1,16 @@
 import { generateSymmetricKey, encryptSymmetric, decryptSymmetric } from '../crypto/crypto';
 import * as webrtcService from './webrtcService';
+import * as wakuService from './wakuService';
 import { uploadToIPFS, fetchFromIPFS } from './ipfsService';
+import localforage from 'localforage';
 
 const WEBRTC_PACKET_SIZE = 16 * 1024; // 16 KB packets for P2P Data Channels
 const PINATA_JWT_KEY = 'decentrachat_pinata_jwt';
+
+const mediaStore = localforage.createInstance({
+    name: 'decentrachat',
+    storeName: 'media_cache',
+});
 
 /**
  * Encrypts a media payload and transmits it.
@@ -22,23 +29,38 @@ export async function sliceAndTransmitMedia(base64Data, mimeType, onProgress, re
         nonce
     };
 
-    // --- Layer 4: Try Direct P2P Pipe first ---
+    // --- Layer 6: Try Direct P2P Pipe first ---
     if (recipientAddress && webrtcService.isPeerConnected(recipientAddress)) {
         console.log(`[MediaTransport] Peer ${recipientAddress.slice(0, 10)} connected. Attempting P2P direct pipe...`);
         try {
-            const p2pSuccess = await pipeMediaViaWebRTC(recipientAddress, manifest.mediaId, encrypted, onProgress);
+            const p2pSuccess = await pipeMedia(recipientAddress, manifest.mediaId, encrypted, onProgress, 'p2p');
             if (p2pSuccess) {
                 manifest.isP2P = true;
                 return manifest;
             }
         } catch (err) {
-            console.warn('[MediaTransport] P2P pipe failed, falling back to IPFS:', err.message);
+            console.warn('[MediaTransport] P2P pipe failed, falling back to Waku/IPFS:', err.message);
         }
     }
 
-    // --- Layer 6 Fallback: IPFS (Pinata) ---
+    // --- Layer 6 Fallback 1: Stateless Waku/MQTT Fallback (Chunked) ---
+    // If file is reasonably small (< 500KB), try chunked Waku delivery
+    if (recipientAddress && encrypted.length < 512000) {
+        console.log('[MediaTransport] Attempting chunked Waku delivery...');
+        try {
+            const wakuSuccess = await pipeMedia(recipientAddress, manifest.mediaId, encrypted, onProgress, 'waku');
+            if (wakuSuccess) {
+                manifest.isWaku = true;
+                return manifest;
+            }
+        } catch (err) {
+            console.warn('[MediaTransport] Waku delivery failed:', err);
+        }
+    }
+
+    // --- Layer 6 Fallback 2: IPFS (Pinata) ---
     console.log('[MediaTransport] Uploading to IPFS...');
-    if (onProgress) onProgress(10); // Start progress
+    if (onProgress) onProgress(10); 
 
     const pinataJwt = localStorage.getItem(PINATA_JWT_KEY);
     if (!pinataJwt) {
@@ -46,12 +68,6 @@ export async function sliceAndTransmitMedia(base64Data, mimeType, onProgress, re
     }
 
     try {
-        // Since we already have the encrypted blob as a base64 string from encryptSymmetric
-        // we can pass it directly to uploadToIPFS.
-        // Wait, encryptSymmetric returns a base64 string? Let me check crypto.js
-        // No, encryptSymmetric in crypto.js returns { encrypted, nonce }. 
-        // Let's check what 'encrypted' is. In crypto.js, it's encodeBase64(nacl.secretbox(...))
-        
         const cid = await uploadToIPFS(encrypted, pinataJwt);
         manifest.cid = cid;
         manifest.isIPFS = true;
@@ -65,9 +81,9 @@ export async function sliceAndTransmitMedia(base64Data, mimeType, onProgress, re
 }
 
 /**
- * Directly pipes media data over WebRTC in small 16KB fragments.
+ * Directly pipes media data over WebRTC or Waku in small fragments.
  */
-async function pipeMediaViaWebRTC(peerAddress, mediaId, data, onProgress) {
+async function pipeMedia(peerAddress, mediaId, data, onProgress, transport = 'p2p') {
     const totalSize = data.length;
     const totalPackets = Math.ceil(totalSize / WEBRTC_PACKET_SIZE);
     
@@ -76,13 +92,21 @@ async function pipeMediaViaWebRTC(peerAddress, mediaId, data, onProgress) {
         const end = Math.min(start + WEBRTC_PACKET_SIZE, totalSize);
         const packet = data.slice(start, end);
         
-        const success = webrtcService.sendToPeer(peerAddress, {
+        const payload = {
             type: 'MEDIA_CHUNK',
             mediaId,
             index: i,
             total: totalPackets,
             data: packet
-        });
+        };
+
+        let success = false;
+        if (transport === 'p2p') {
+            success = webrtcService.sendToPeer(peerAddress, payload);
+        } else {
+            // Waku fallback (stateless)
+            success = await wakuService.sendViaWaku({ ...payload, to: peerAddress }, peerAddress, null, false);
+        }
 
         if (!success) return false;
 
@@ -90,8 +114,8 @@ async function pipeMediaViaWebRTC(peerAddress, mediaId, data, onProgress) {
             onProgress(Math.round((i / totalPackets) * 100));
         }
         
-        // Minor delay to prevent flooding the data channel buffer
-        if (i % 10 === 0) await new Promise(r => setTimeout(r, 10));
+        // Prevent flooding
+        if (i % 10 === 0) await new Promise(r => setTimeout(r, 20));
     }
 
     if (onProgress) onProgress(100);
@@ -102,10 +126,10 @@ async function pipeMediaViaWebRTC(peerAddress, mediaId, data, onProgress) {
  * Downloads and decrypts media from manifest.
  */
 export async function fetchAndReconstructMedia(manifest, onProgress) {
-    // 1. Check P2P Buffer
-    if (manifest.isP2P) {
-        console.log('[MediaTransport] P2P Media Reassembling from local buffer...');
-        const buffered = await getP2PMediaBuffer(manifest.mediaId);
+    // 1. Check Local P2P/Waku Buffer (Persisted in localforage)
+    if (manifest.isP2P || manifest.isWaku) {
+        console.log('[MediaTransport] Reassembling from local persistent buffer...');
+        const buffered = await getMediaBuffer(manifest.mediaId);
         if (buffered) {
             return decryptSymmetric(buffered, manifest.nonce, manifest.ephemeralKey);
         }
@@ -120,37 +144,66 @@ export async function fetchAndReconstructMedia(manifest, onProgress) {
         
         if (onProgress) onProgress(80);
         
-        // The data returned from fetchFromIPFS (via FileReader.readAsDataURL) 
-        // is a data URL. We need the base64 part.
         const base64Content = encryptedData.split(',')[1];
-        
         const decrypted = decryptSymmetric(base64Content, manifest.nonce, manifest.ephemeralKey);
         if (onProgress) onProgress(100);
         return decrypted;
     }
 
-    throw new Error('Media not available (Peer offline and no IPFS fallback found)');
+    throw new Error('Media not available (Offline or still downloading)');
 }
 
-// Memory buffer for incoming P2P chunks
-const p2pBuffers = new Map(); // mediaId -> { packets: [], received: 0, total: 0 }
-
-export function handleIncomingMediaChunk(payload) {
+/**
+ * Handle incoming media chunks and persist them.
+ */
+export async function handleIncomingMediaChunk(payload) {
     const { mediaId, index, total, data } = payload;
-    if (!p2pBuffers.has(mediaId)) {
-        p2pBuffers.set(mediaId, { packets: new Array(total), received: 0, total });
+    
+    // Key format: chunk_{mediaId}_{index}
+    const chunkKey = `chunk_${mediaId}_${index}`;
+    await mediaStore.setItem(chunkKey, data);
+
+    // Track progress in meta
+    const metaKey = `meta_${mediaId}`;
+    const meta = (await mediaStore.getItem(metaKey)) || { received: [], total };
+    
+    if (!meta.received.includes(index)) {
+        meta.received.push(index);
+        await mediaStore.setItem(metaKey, meta);
     }
-    const buffer = p2pBuffers.get(mediaId);
-    if (!buffer.packets[index]) {
-        buffer.packets[index] = data;
-        buffer.received++;
+
+    if (meta.received.length === total) {
+        console.log(`[MediaTransport] Media ${mediaId} fully received (${total} chunks)`);
+        // Notify UI if needed (could use an event emitter here)
     }
 }
 
-async function getP2PMediaBuffer(mediaId) {
-    const buffer = p2pBuffers.get(mediaId);
-    if (!buffer || buffer.received < buffer.total) return null;
-    const fullData = buffer.packets.join('');
-    p2pBuffers.delete(mediaId);
+async function getMediaBuffer(mediaId) {
+    const metaKey = `meta_${mediaId}`;
+    const meta = await mediaStore.getItem(metaKey);
+    
+    if (!meta || meta.received.length < meta.total) {
+        console.warn(`[MediaTransport] Media ${mediaId} incomplete: ${meta?.received.length || 0}/${meta?.total || 0}`);
+        return null;
+    }
+
+    // Reconstruct
+    let fullData = '';
+    for (let i = 0; i < meta.total; i++) {
+        const chunk = await mediaStore.getItem(`chunk_${mediaId}_${i}`);
+        if (!chunk) return null;
+        fullData += chunk;
+    }
+
+    // Cleanup (Optional - maybe keep for a while?)
+    // await cleanupMedia(mediaId, meta.total);
+
     return fullData;
+}
+
+async function cleanupMedia(mediaId, total) {
+    await mediaStore.removeItem(`meta_${mediaId}`);
+    for (let i = 0; i < total; i++) {
+        await mediaStore.removeItem(`chunk_${mediaId}_${i}`);
+    }
 }

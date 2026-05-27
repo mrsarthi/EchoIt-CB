@@ -37,13 +37,37 @@ export async function getEpochDoc(chatId, epochIndex) {
     if (activeDocs.has(key)) return activeDocs.get(key);
 
     const doc = new Y.Doc();
-    const provider = new IndexeddbPersistence(key, doc);
+    let provider;
+    try {
+        provider = new IndexeddbPersistence(key, doc);
+    } catch (err) {
+        console.error(`⚠️ Failed to initialize IndexeddbPersistence for ${key}:`, err);
+        // Fallback: Mock provider to prevent app crash
+        provider = {
+            synced: true,
+            once: (event, cb) => { if (event === 'synced') cb(); },
+            destroy: () => {}
+        };
+    }
     
     await new Promise((resolve) => {
         if (provider.synced) {
             resolve();
         } else {
-            provider.once('synced', resolve);
+            const timeout = setTimeout(() => {
+                console.warn(`⚠️ IndexedDB sync timeout for ${key}, proceeding anyway`);
+                resolve();
+            }, 3000);
+            try {
+                provider.once('synced', () => {
+                    clearTimeout(timeout);
+                    resolve();
+                });
+            } catch (err) {
+                console.error(`Failed to bind synced event:`, err);
+                clearTimeout(timeout);
+                resolve();
+            }
         }
     });
 
@@ -55,8 +79,10 @@ export async function getEpochDoc(chatId, epochIndex) {
     if (activeDocs.size > 20) {
         const firstKey = activeDocs.keys().next().value;
         const context = activeDocs.get(firstKey);
-        context.provider.destroy();
-        context.doc.destroy();
+        try {
+            context.provider.destroy();
+            context.doc.destroy();
+        } catch (e) {}
         activeDocs.delete(firstKey);
     }
     
@@ -81,6 +107,44 @@ export async function getActiveEpoch(chatId) {
 }
 
 /**
+ * Hashes a message object deterministically for Merkle DAG chaining.
+ */
+export async function hashMessage(message) {
+    if (!message) return 'genesis';
+    // We only hash core immutable fields to ensure deterministic results across peers
+    const core = {
+        id: message.id,
+        from: message.from,
+        chatId: message.chatId?.toLowerCase(),
+        content: message.content,
+        timestamp: message.timestamp,
+        parentHash: message.parentHash || 'genesis',
+        type: message.type || 'text',
+        groupId: message.groupId
+    };
+    const dataToHash = new TextEncoder().encode(JSON.stringify(core));
+    const hashBuffer = await window.crypto.subtle.digest('SHA-256', dataToHash);
+    return btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
+}
+
+/**
+ * Returns the hash of the latest message in a chat for DAG linking.
+ */
+export async function getLatestMessageHash(chatId) {
+    let index = await getLatestEpochIndex(chatId);
+    while (index >= 0) {
+        const context = await getEpochDoc(chatId, index);
+        const lastId = context.ymap.get('last_id');
+        if (lastId) {
+            const lastMsg = context.ymap.get(lastId);
+            if (lastMsg) return await hashMessage(lastMsg);
+        }
+        index--;
+    }
+    return 'genesis';
+}
+
+/**
  * Insert or update a message in the state engine.
  * Automatically handles routing to the correct epoch if updating.
  */
@@ -98,19 +162,8 @@ export async function insertMessage(chatId, message) {
 
     const targetEpoch = foundEpoch || await getActiveEpoch(chatId);
     
-    // Merkle DAG parent-hash tracking
-    const lastMsgId = targetEpoch.ymap.get('last_id');
-    let parentHash = 'genesis';
-    if (lastMsgId) {
-        const lastMsg = targetEpoch.ymap.get(lastMsgId);
-        if (lastMsg) {
-            const dataToHash = new TextEncoder().encode(JSON.stringify(lastMsg));
-            const hashBuffer = await window.crypto.subtle.digest('SHA-256', dataToHash);
-            parentHash = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
-        } else {
-            parentHash = `hash_${lastMsgId}`; // Fallback if missing
-        }
-    }
+    // Ensure parentHash is present for V3 Merkle DAG (Receiver-side fallback)
+    const finalParentHash = message.parentHash || await getLatestMessageHash(chatId);
 
     targetEpoch.doc.transact(() => {
         const existing = targetEpoch.ymap.get(message.id);
@@ -123,11 +176,13 @@ export async function insertMessage(chatId, message) {
             targetEpoch.ymap.set(message.id, merged);
         } else {
             // New insert
-            targetEpoch.ymap.set(message.id, {
+            const msgToInsert = {
                 ...message,
-                parentHash, // Links to previous message to form a DAG
+                parentHash: finalParentHash,
                 syncedAt: Date.now()
-            });
+            };
+            
+            targetEpoch.ymap.set(message.id, msgToInsert);
             targetEpoch.ymap.set('last_id', message.id);
         }
     });

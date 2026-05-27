@@ -93,3 +93,17 @@ screenshot*.png
 
 # Duplicate/Separate Standalone Codebases
 media-relay-server/
+
+# SQLite Temp Files
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Vite Config Temp Files
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Coverage Directory
+coverage/
+.nyc_output/
+

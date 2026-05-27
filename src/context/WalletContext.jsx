@@ -16,7 +16,8 @@ import {
     getStoredKeys, 
     storeKeysFromSignature,
     hasStoredKeys,
-    unlockKeys
+    unlockKeys,
+    getStoredWalletAddress
 } from '../crypto/keyManager';
 import { register as registerUser } from '../services/socketService';
 import { platform, openAuthBrowser, onWalletAuth } from '../services/platformService';
@@ -24,6 +25,7 @@ import { initPushNotifications } from '../services/pushService';
 import { setStorageSessionKey } from '../services/storageService';
 import { setCryptoSessionKey } from '../crypto/doubleRatchet';
 import PINModal from '../components/PINModal';
+import { hashArgon2 } from '../crypto/argon2Client';
 
 const WalletContext = createContext(null);
 
@@ -47,23 +49,15 @@ export function WalletProvider({ children }) {
 
     const activeAuthSessionIdRef = useRef(null);
 
-    const solveProofOfWork = (challenge, addr) => {
+    const solveProofOfWork = async (challenge, addr) => {
         const saltAddr = addr || address || 'default_salt';
-        return new Promise((resolve, reject) => {
-            const worker = new Worker(new URL('../workers/argon2.worker.js', import.meta.url), { type: 'module' });
-            worker.onmessage = (e) => {
-                const { success, hash, error } = e.data;
-                worker.terminate();
-                if (success) resolve(hash);
-                else reject(new Error(error));
-            };
-            worker.onerror = (err) => {
-                worker.terminate();
-                reject(err);
-            };
-            setIsSolvingPoW(true);
-            worker.postMessage({ challenge, salt: saltAddr.slice(0, 16) });
-        });
+        setIsSolvingPoW(true);
+        try {
+            const hash = await hashArgon2(challenge, saltAddr.slice(0, 16));
+            return hash;
+        } finally {
+            setIsSolvingPoW(false);
+        }
     };
 
     const handleElectronAuth = useCallback(async (data, pin = null) => {
@@ -91,7 +85,6 @@ export function WalletProvider({ children }) {
             const encryptionKeys = await storeKeysFromSignature(data.address, data.signature, pin);
             setKeys(encryptionKeys);
             setAddress(data.address);
-            registerUser(data.address, encryptionKeys.publicKey, encryptionKeys.signingPublicKey, null, null, null, signMessage, solveProofOfWork, pushToken);
             setIsConnected(true);
             setIsConnecting(false);
             setShowPINModal(false);
@@ -105,8 +98,18 @@ export function WalletProvider({ children }) {
     const handlePINSubmit = async (pin) => {
         setPinError(null);
         try {
+            // Get the wallet address for consistent salt derivation
+            let saltAddress = address;
+            if (!saltAddress) {
+                if (pendingAuthData) {
+                    saltAddress = pendingAuthData.walletAddress || pendingAuthData.data?.address;
+                }
+                if (!saltAddress) {
+                    saltAddress = await getStoredWalletAddress();
+                }
+            }
             // 🛡️ Step 4: Derive and set storage session key (Argon2)
-            await setStorageSessionKey(pin);
+            await setStorageSessionKey(pin, saltAddress);
             
             // Derive a fast SHA-256 hash for the volatile crypto session key
             // This key is used for encrypting DR sessions and Pre-Key secrets
@@ -122,7 +125,6 @@ export function WalletProvider({ children }) {
                         const { walletAddress } = pendingAuthData;
                         const encryptionKeys = await getOrCreateKeys(walletAddress, signMessage, pin);
                         setKeys(encryptionKeys);
-                        registerUser(walletAddress, encryptionKeys.publicKey, encryptionKeys.signingPublicKey, null, null, null, signMessage, solveProofOfWork, pushToken);
                         setIsConnected(true);
                         setIsConnecting(false);
                         setShowPINModal(false);
@@ -138,7 +140,6 @@ export function WalletProvider({ children }) {
                     setAddress(unlocked.address);
                     setIsConnected(true);
                     setShowPINModal(false);
-                    registerUser(unlocked.address, unlocked.publicKey, unlocked.signingPublicKey, null, null, null, signMessage, solveProofOfWork, pushToken);
                 }
             }
         } catch (err) {
@@ -155,7 +156,6 @@ export function WalletProvider({ children }) {
             if (storedKeys) {
                 setKeys(storedKeys);
                 setIsConnected(true);
-                registerUser(existingAddress, storedKeys.publicKey, storedKeys.signingPublicKey, null, null, null, signMessage, solveProofOfWork, pushToken);
             }
         }
     }, [pushToken]);
@@ -196,7 +196,6 @@ export function WalletProvider({ children }) {
                         setKeys(decrypted);
                         setAddress(decrypted.address);
                         setIsConnected(true);
-                        registerUser(decrypted.address, decrypted.publicKey, decrypted.signingPublicKey, null, null, null, signMessage, solveProofOfWork, pushToken);
                     }
                 }
             } else {
@@ -211,7 +210,6 @@ export function WalletProvider({ children }) {
                         setKeys(decrypted);
                         setAddress(decrypted.address);
                         setIsConnected(true);
-                        registerUser(decrypted.address, decrypted.publicKey, decrypted.signingPublicKey, null, null, null, signMessage, solveProofOfWork, pushToken);
                     }
                 } else {
                     checkBrowserConnection();
@@ -273,7 +271,6 @@ export function WalletProvider({ children }) {
                     } else {
                         const encryptionKeys = await getOrCreateKeys(walletAddress, signMessage);
                         setKeys(encryptionKeys);
-                        registerUser(walletAddress, encryptionKeys.publicKey, encryptionKeys.signingPublicKey, null, null, null, signMessage, solveProofOfWork, pushToken);
                         setIsConnected(true);
                         setIsConnecting(false);
                     }

@@ -175,7 +175,7 @@ export function SettingsTab({ walletAddress, username, onDeleteAccount }) {
                 <div className="settings-footer">
                     <div className="flex items-center gap-sm justify-center text-muted">
                         <Smartphone size={14} />
-                        <span className="text-xs">Version 1.13.0 Premium Redesign</span>
+                        <span className="text-xs">Version 2.1.3 Premium Redesign</span>
                     </div>
                 </div>
             </div>

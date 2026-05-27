@@ -172,6 +172,44 @@
     min-width: 0;
 }
 
+/* Narrow desktop windows (< 768px): toggle sidebar/chat like mobile */
+@media (max-width: 767px) {
+    .chat-container {
+        position: relative;
+    }
+    .sidebar {
+        position: absolute;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        z-index: 10;
+        background: var(--bg-primary);
+        transition: transform var(--transition-normal);
+    }
+    .chat-container.has-active-chat .sidebar {
+        transform: translateX(-100%);
+        pointer-events: none;
+    }
+    .chat-container:not(.has-active-chat) .sidebar {
+        transform: translateX(0);
+    }
+    .chat-main {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 20;
+        background: var(--bg-primary);
+    }
+    .chat-container.has-active-chat .chat-main {
+        display: flex;
+    }
+    .chat-container:not(.has-active-chat) .chat-main:not(.settings-active) {
+        display: none;
+    }
+}
+
 /* WhatsApp Mobile Main Overrides */
 .platform-capacitor .chat-main{
     position: absolute;
@@ -587,6 +625,12 @@
     border: 1px solid var(--accent-primary);
     background: var(--bg-tertiary);
     animation: bounceIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.receipt-avatar.delivered {
+    background: transparent;
+    border: 1px solid var(--text-muted);
+    box-shadow: none;
 }
 
 .receipt-avatar img {

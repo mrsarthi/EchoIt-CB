@@ -3,10 +3,9 @@
  * Uses TweetNaCl for DH key agreement and HMAC-SHA256 for KDF chains.
  * Symmetric message encryption uses nacl.secretbox (xsalsa20-poly1305).
  */
-import nacl from 'tweetnacl';
 import { encodeBase64, decodeBase64, encodeUTF8, decodeUTF8 } from 'tweetnacl-util';
 import localforage from 'localforage';
-import { encryptSymmetric, decryptSymmetric } from './crypto';
+import { cryptoWorker } from './cryptoWorkerClient';
 
 // Storage for Ratchet Sessions
 const sessionStore = localforage.createInstance({
@@ -33,20 +32,20 @@ export function setCryptoSessionKey(key) {
 /**
  * Internal helper to encrypt sensitive state before saving
  */
-function encryptSensitive(data) {
+async function encryptSensitive(data) {
     if (!storageSessionKey) return data;
     const str = JSON.stringify(data);
-    const { encrypted, nonce } = encryptSymmetric(str, storageSessionKey);
-    return { _isEncrypted: true, encrypted, nonce };
+    const { ciphertext, nonce } = await cryptoWorker.encryptSymmetric(str, storageSessionKey);
+    return { _isEncrypted: true, encrypted: ciphertext, nonce };
 }
 
 /**
  * Internal helper to decrypt sensitive state after loading
  */
-function decryptSensitive(data) {
+async function decryptSensitive(data) {
     if (!storageSessionKey || !data._isEncrypted) return data;
     try {
-        const decrypted = decryptSymmetric(data.encrypted, data.nonce, storageSessionKey);
+        const decrypted = await cryptoWorker.decryptSymmetric(data.encrypted, data.nonce, storageSessionKey);
         return decrypted ? JSON.parse(decrypted) : null;
     } catch (err) {
         console.error('Failed to decrypt sensitive DR state:', err);
@@ -61,18 +60,12 @@ const MAX_SKIP = 100;
 // ──────────────────────────────────────────────
 
 async function kdf(key, input) {
-    const keyBuffer = typeof key === 'string' ? decodeBase64(key) : key;
-    let inputBuffer;
-    if (input instanceof Uint8Array) inputBuffer = input;
-    else if (typeof input === 'string') {
-        try {
-            if (/^[A-Za-z0-9+/=]+$/.test(input) && input.length > 20) inputBuffer = decodeBase64(input);
-            else inputBuffer = new TextEncoder().encode(input);
-        } catch { inputBuffer = new TextEncoder().encode(input); }
-    }
-    const importedKey = await window.crypto.subtle.importKey('raw', keyBuffer, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-    const signature = await window.crypto.subtle.sign('HMAC', importedKey, inputBuffer);
-    return new Uint8Array(signature);
+    const keyBase64 = typeof key === 'string' ? key : encodeBase64(key);
+    let inputToWorker = input;
+    if (input instanceof Uint8Array) inputToWorker = encodeBase64(input);
+    
+    const signature = await cryptoWorker.hmacSha256(keyBase64, inputToWorker);
+    return decodeBase64(signature);
 }
 
 async function kdfRootChain(rootKey, dhOutput) {
@@ -84,9 +77,9 @@ async function kdfRootChain(rootKey, dhOutput) {
 }
 
 async function kdfChainKey(chainKey) {
-    const messageKey = await kdf(chainKey, new TextEncoder().encode('msg_key'));
-    const nextChainKey = await kdf(chainKey, new TextEncoder().encode('next_chain'));
-    return { messageKey: messageKey.slice(0, nacl.secretbox.keyLength), nextChainKey: encodeBase64(nextChainKey) };
+    const messageKey = await kdf(chainKey, 'msg_key');
+    const nextChainKey = await kdf(chainKey, 'next_chain');
+    return { messageKey: messageKey.slice(0, 32), nextChainKey: encodeBase64(nextChainKey) };
 }
 
 // ──────────────────────────────────────────────
@@ -96,31 +89,28 @@ async function kdfChainKey(chainKey) {
 function serializeKeyPair(kp) {
     if (!kp) return null;
     return {
-        publicKey: kp.publicKey instanceof Uint8Array ? encodeBase64(kp.publicKey) : kp.publicKey,
-        secretKey: kp.secretKey instanceof Uint8Array ? encodeBase64(kp.secretKey) : kp.secretKey
+        publicKey: kp.publicKey,
+        secretKey: kp.secretKey
     };
 }
 
 function deserializeKeyPair(kp) {
     if (!kp) return null;
     return {
-        publicKey: typeof kp.publicKey === 'string' ? decodeBase64(kp.publicKey) : kp.publicKey,
-        secretKey: typeof kp.secretKey === 'string' ? decodeBase64(kp.secretKey) : kp.secretKey
+        publicKey: kp.publicKey,
+        secretKey: kp.secretKey
     };
 }
 
 async function saveSession(peerAddress, session) {
-    const serialized = { ...session, sendRatchetKeyPair: serializeKeyPair(session.sendRatchetKeyPair) };
-    const encrypted = encryptSensitive(serialized);
+    const encrypted = await encryptSensitive(session);
     await sessionStore.setItem(peerAddress.toLowerCase(), encrypted);
 }
 
 async function loadSession(peerAddress) {
     const data = await sessionStore.getItem(peerAddress.toLowerCase());
     if (!data) return null;
-    const session = decryptSensitive(data);
-    if (!session) return null;
-    session.sendRatchetKeyPair = deserializeKeyPair(session.sendRatchetKeyPair);
+    const session = await decryptSensitive(data);
     return session;
 }
 
@@ -130,7 +120,7 @@ async function loadSession(peerAddress) {
 
 export async function storePreKeySecrets(preKeys) {
     for (const pk of preKeys) {
-        const encrypted = encryptSensitive({ secretKey: pk.secretKey });
+        const encrypted = await encryptSensitive({ secretKey: pk.secretKey instanceof Uint8Array ? encodeBase64(pk.secretKey) : pk.secretKey });
         await preKeySecretStore.setItem(`pk_${pk.id}`, encrypted);
     }
 }
@@ -140,7 +130,7 @@ export async function consumePreKeySecret(keyId) {
     const data = await preKeySecretStore.getItem(key);
     if (data) {
         await preKeySecretStore.removeItem(key);
-        const decrypted = decryptSensitive(data);
+        const decrypted = await decryptSensitive(data);
         return decrypted ? decrypted.secretKey : null;
     }
     return null;
@@ -151,13 +141,15 @@ export async function consumePreKeySecret(keyId) {
 // ──────────────────────────────────────────────
 
 export async function createSession(peerAddress, initialSharedSecret, peerRatchetPublicKey, x3dhParams = null) {
-    const sharedSecretBytes = typeof initialSharedSecret === 'string' ? decodeBase64(initialSharedSecret) : initialSharedSecret;
+    const sharedSecretBase64 = typeof initialSharedSecret === 'string' ? initialSharedSecret : encodeBase64(initialSharedSecret);
+    const newKeyPair = await cryptoWorker.generateKeyPair();
+    
     const session = {
         peerAddress,
-        rootKey: encodeBase64(sharedSecretBytes.slice(0, 32)),
+        rootKey: encodeBase64(decodeBase64(sharedSecretBase64).slice(0, 32)),
         sendChainKey: null,
         recvChainKey: null,
-        sendRatchetKeyPair: nacl.box.keyPair(),
+        sendRatchetKeyPair: newKeyPair,
         recvRatchetPublicKey: peerRatchetPublicKey,
         sendIndex: 0,
         recvIndex: 0,
@@ -166,8 +158,10 @@ export async function createSession(peerAddress, initialSharedSecret, peerRatche
         acknowledged: false,
         x3dhParams
     };
-    const peerPub = decodeBase64(session.recvRatchetPublicKey);
-    const dhOutput = nacl.box.before(peerPub, session.sendRatchetKeyPair.secretKey);
+
+    const dhOutputBase64 = await cryptoWorker.dhBefore(session.recvRatchetPublicKey, session.sendRatchetKeyPair.secretKey);
+    const dhOutput = decodeBase64(dhOutputBase64);
+
     const { rootKey, chainKey } = await kdfRootChain(session.rootKey, dhOutput);
     session.rootKey = rootKey;
     session.sendChainKey = chainKey;
@@ -177,10 +171,10 @@ export async function createSession(peerAddress, initialSharedSecret, peerRatche
 }
 
 export async function createSessionResponder(peerAddress, initialSharedSecret, peerRatchetPublicKey, myRatchetSecretKey) {
-    const sharedSecretBytes = typeof initialSharedSecret === 'string' ? decodeBase64(initialSharedSecret) : initialSharedSecret;
+    const sharedSecretBase64 = typeof initialSharedSecret === 'string' ? initialSharedSecret : encodeBase64(initialSharedSecret);
     const session = {
         peerAddress,
-        rootKey: encodeBase64(sharedSecretBytes.slice(0, 32)),
+        rootKey: encodeBase64(decodeBase64(sharedSecretBase64).slice(0, 32)),
         sendChainKey: null,
         recvChainKey: null,
         sendRatchetKeyPair: null,
@@ -193,16 +187,19 @@ export async function createSessionResponder(peerAddress, initialSharedSecret, p
     };
     
     // Step 1: Initialize receiving chain (matches Initiator's sending chain)
-    const peerPub = decodeBase64(peerRatchetPublicKey);
-    const mySec = decodeBase64(myRatchetSecretKey);
-    const dhRecv = nacl.box.before(peerPub, mySec);
+    const mySec = typeof myRatchetSecretKey === 'string' ? myRatchetSecretKey : encodeBase64(myRatchetSecretKey);
+    const dhRecvBase64 = await cryptoWorker.dhBefore(peerRatchetPublicKey, mySec);
+    const dhRecv = decodeBase64(dhRecvBase64);
+
     const recvResult = await kdfRootChain(session.rootKey, dhRecv);
     session.rootKey = recvResult.rootKey;
     session.recvChainKey = recvResult.chainKey;
     
     // Step 2: Initialize sending chain
-    session.sendRatchetKeyPair = nacl.box.keyPair();
-    const dhSend = nacl.box.before(peerPub, session.sendRatchetKeyPair.secretKey);
+    session.sendRatchetKeyPair = await cryptoWorker.generateKeyPair();
+    const dhSendBase64 = await cryptoWorker.dhBefore(peerRatchetPublicKey, session.sendRatchetKeyPair.secretKey);
+    const dhSend = decodeBase64(dhSendBase64);
+
     const sendResult = await kdfRootChain(session.rootKey, dhSend);
     session.rootKey = sendResult.rootKey;
     session.sendChainKey = sendResult.chainKey;
@@ -222,14 +219,15 @@ export async function encryptRatchet(peerAddress, plaintext) {
     const { messageKey, nextChainKey } = await kdfChainKey(session.sendChainKey);
     session.sendChainKey = nextChainKey;
     const index = session.sendIndex++;
-    const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
-    const encrypted = nacl.secretbox(decodeUTF8(plaintext), nonce, messageKey);
+    
+    const { ciphertext, nonce } = await cryptoWorker.encryptSymmetric(plaintext, encodeBase64(messageKey));
+
     await saveSession(peerAddress, session);
     return {
-        ciphertext: encodeBase64(encrypted),
-        nonce: encodeBase64(nonce),
+        ciphertext,
+        nonce,
         header: {
-            ratchetKey: session.sendRatchetKeyPair.publicKey instanceof Uint8Array ? encodeBase64(session.sendRatchetKeyPair.publicKey) : session.sendRatchetKeyPair.publicKey,
+            ratchetKey: session.sendRatchetKeyPair.publicKey,
             index,
             previousCounter: session.previousCounter
         },
@@ -242,16 +240,19 @@ export async function encryptRatchet(peerAddress, plaintext) {
 // Decrypt
 // ──────────────────────────────────────────────
 
-function trySkippedMessageKeys(session, header, ciphertext, nonce) {
+async function trySkippedMessageKeys(session, header, ciphertext, nonce) {
     const skipKey = `${header.ratchetKey}:${header.index}`;
     const storedKey = session.skippedMessageKeys[skipKey];
     if (storedKey) {
-        const messageKey = decodeBase64(storedKey);
-        delete session.skippedMessageKeys[skipKey];
-        const decrypted = nacl.secretbox.open(decodeBase64(ciphertext), decodeBase64(nonce), messageKey);
-        if (decrypted) {
-            session.acknowledged = true;
-            return encodeUTF8(decrypted);
+        try {
+            const decrypted = await cryptoWorker.decryptSymmetric(ciphertext, nonce, storedKey);
+            if (decrypted) {
+                delete session.skippedMessageKeys[skipKey];
+                session.acknowledged = true;
+                return decrypted;
+            }
+        } catch (err) {
+            return null;
         }
     }
     return null;
@@ -274,13 +275,18 @@ async function dhRatchetStep(session, newPeerRatchetKey) {
     session.sendIndex = 0;
     session.recvIndex = 0;
     session.recvRatchetPublicKey = newPeerRatchetKey;
-    const peerPub = decodeBase64(newPeerRatchetKey);
-    const dhRecv = nacl.box.before(peerPub, session.sendRatchetKeyPair.secretKey);
+    
+    const dhRecvBase64 = await cryptoWorker.dhBefore(newPeerRatchetKey, session.sendRatchetKeyPair.secretKey);
+    const dhRecv = decodeBase64(dhRecvBase64);
+
     const recvResult = await kdfRootChain(session.rootKey, dhRecv);
     session.rootKey = recvResult.rootKey;
     session.recvChainKey = recvResult.chainKey;
-    session.sendRatchetKeyPair = nacl.box.keyPair();
-    const dhSend = nacl.box.before(peerPub, session.sendRatchetKeyPair.secretKey);
+    
+    session.sendRatchetKeyPair = await cryptoWorker.generateKeyPair();
+    const dhSendBase64 = await cryptoWorker.dhBefore(newPeerRatchetKey, session.sendRatchetKeyPair.secretKey);
+    const dhSend = decodeBase64(dhSendBase64);
+
     const sendResult = await kdfRootChain(session.rootKey, dhSend);
     session.rootKey = sendResult.rootKey;
     session.sendChainKey = sendResult.chainKey;
@@ -290,7 +296,7 @@ async function dhRatchetStep(session, newPeerRatchetKey) {
 export async function decryptRatchet(peerAddress, { ciphertext, nonce, header }) {
     let session = await loadSession(peerAddress);
     if (!session) return null;
-    const skippedResult = trySkippedMessageKeys(session, header, ciphertext, nonce);
+    const skippedResult = await trySkippedMessageKeys(session, header, ciphertext, nonce);
     if (skippedResult) { await saveSession(peerAddress, session); return skippedResult; }
     if (header.ratchetKey !== session.recvRatchetPublicKey) {
         if (session.recvChainKey) await skipMessageKeys(session, header.previousCounter);
@@ -302,11 +308,11 @@ export async function decryptRatchet(peerAddress, { ciphertext, nonce, header })
     session.recvChainKey = nextChainKey;
     session.recvIndex = header.index + 1;
     try {
-        const decrypted = nacl.secretbox.open(decodeBase64(ciphertext), decodeBase64(nonce), messageKey);
+        const decrypted = await cryptoWorker.decryptSymmetric(ciphertext, nonce, encodeBase64(messageKey));
         if (!decrypted) return null;
         session.acknowledged = true;
         await saveSession(peerAddress, session);
-        return encodeUTF8(decrypted);
+        return decrypted;
     } catch { return null; }
 }
 

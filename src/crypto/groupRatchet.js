@@ -1,29 +1,6 @@
 import nacl from 'tweetnacl';
-import { encodeBase64, decodeBase64, encodeUTF8, decodeUTF8 } from 'tweetnacl-util';
-
-// Initialize the crypto web worker
-const cryptoWorker = new Worker(new URL('../workers/crypto.worker.js', import.meta.url), { type: 'module' });
-
-// Helper to wrap worker calls in promises
-function runInWorker(type, payload) {
-    return new Promise((resolve, reject) => {
-        const id = Math.random().toString(36).substr(2, 9);
-        
-        const handleMessage = (e) => {
-            if (e.data.id === id) {
-                cryptoWorker.removeEventListener('message', handleMessage);
-                if (e.data.success) {
-                    resolve(e.data.result);
-                } else {
-                    reject(new Error(e.data.error));
-                }
-            }
-        };
-        
-        cryptoWorker.addEventListener('message', handleMessage);
-        cryptoWorker.postMessage({ id, type, payload });
-    });
-}
+import { encodeBase64 } from 'tweetnacl-util';
+import { cryptoWorker } from './cryptoWorkerClient';
 
 /**
  * Generate a random 32-byte Symmetric Epoch Key for O(1) group messaging.
@@ -41,7 +18,7 @@ export function generateEpochKey() {
  * @returns {Promise<string>} next key in the chain (base64)
  */
 export async function ratchetEpochKey(currentKeyBase64) {
-    return runInWorker('ratchetEpochKey', { currentKeyBase64 });
+    return cryptoWorker.ratchetEpochKey(currentKeyBase64);
 }
 
 /**
@@ -55,7 +32,7 @@ export async function ratchetEpochKey(currentKeyBase64) {
  * @returns {Promise<Object>} { ciphertext, nonce, signature } as base64 strings
  */
 export async function encryptGroupMessage(epochKeyBase64, plaintext, myEd25519SecretBase64, messageId, timestamp) {
-    return runInWorker('encryptGroupMessage', { epochKeyBase64, plaintext, myEd25519SecretBase64, messageId, timestamp });
+    return cryptoWorker.encryptGroupMessage(epochKeyBase64, plaintext, myEd25519SecretBase64, messageId, timestamp);
 }
 
 /**
@@ -72,15 +49,7 @@ export async function encryptGroupMessage(epochKeyBase64, plaintext, myEd25519Se
  */
 export async function decryptGroupMessage(epochKeyBase64, ciphertextBase64, nonceBase64, signatureBase64, senderPublicSignKeyBase64, messageId, timestamp) {
     try {
-        return await runInWorker('decryptGroupMessage', {
-            epochKeyBase64,
-            ciphertextBase64,
-            nonceBase64,
-            signatureBase64,
-            senderPublicSignKeyBase64,
-            messageId,
-            timestamp
-        });
+        return await cryptoWorker.decryptGroupMessage(epochKeyBase64, ciphertextBase64, nonceBase64, signatureBase64, senderPublicSignKeyBase64, messageId, timestamp);
     } catch (e) {
         console.error('Group Message Decryption Error (Worker):', e);
         return null;

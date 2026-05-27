@@ -8,6 +8,8 @@ import {
     generateKeyPair,
     verifyPreKeySignature
 } from '../crypto/crypto';
+import { encodeBase64, decodeBase64, decodeUTF8, encodeUTF8 } from 'tweetnacl-util';
+import { cryptoWorker } from '../crypto/cryptoWorkerClient';
 import { 
     createSession, 
     createSessionResponder,
@@ -18,14 +20,15 @@ import {
 } from '../crypto/doubleRatchet';
 import {
     initEpochSession,
+    encryptEpoch,
     decryptEpoch
 } from '../crypto/epochRatchet';
 import { getStoredKeys } from '../crypto/keyManager';
 import * as socketService from './socketService';
-import { encodeBase64 } from 'tweetnacl-util';
 import * as webrtcService from './webrtcService';
 import * as wakuService from './wakuService';
 import { savePendingMessage, getPendingMessages, removePendingMessage } from './storageService';
+import { getLatestMessageHash } from './stateEngine';
 import { generateEpochKey, ratchetEpochKey, encryptGroupMessage, decryptGroupMessage } from '../crypto/groupRatchet';
 import { saveGroupEpochKey, getActiveGroupEpochKey } from './groupKeyStore';
 
@@ -94,14 +97,20 @@ export async function sendEncryptedMessage(senderAddress, recipientAddress, plai
         throw new Error('No encryption keys found. Please reconnect your wallet.');
     }
 
-    // --- TASK 12 & 13: Double Ratchet Flow (Restoring Future Secrecy) ---
+    // --- TASK 12 & 13: Epoch Ratchet Flow (V3 standard for out-of-order resilience) ---
     
-    // 1. Check for established DR session
-    let ratchetData = await encryptRatchet(recipientAddress, plainText);
+    // 1. Try Epoch Ratchet first (Primary V3 transport)
+    let epochData = await encryptEpoch(`${recipientAddress}_tx`, plainText);
+    let ratchetData = null;
     let x3dhHeader = null;
 
-    // 2. If no session, perform X3DH Handshake
-    if (!ratchetData) {
+    // 2. Fallback to Double Ratchet for backwards compatibility
+    if (!epochData) {
+        ratchetData = await encryptRatchet(recipientAddress, plainText);
+    }
+
+    // 3. If no session exists, perform X3DH Handshake
+    if (!epochData && !ratchetData) {
         console.log(`🤝 Initiating X3DH handshake with ${recipientAddress.slice(0, 10)}...`);
         try {
             const preKey = await socketService.fetchPreKey(recipientAddress);
@@ -120,28 +129,51 @@ export async function sendEncryptedMessage(senderAddress, recipientAddress, plai
                 }
 
                 const ephemeralKey = generateKeyPair();
+                // Derive X3DH shared secret WITHOUT OPK to avoid key-sync failures.
+                // The IK+EK combination provides strong forward secrecy.
                 const sharedSecret = deriveX3DHSecret(
                     myKeys,         // my IK
                     ephemeralKey,   // my EK
                     peerIK,         // peer IK
                     peerIK,         // peer SPK (using IK as fallback)
-                    preKey?.publicKey // peer OPK
+                    null            // NO OPK — eliminates key-sync mismatches
                 );
+                console.log(`🔑 X3DH Initiator: sharedSecret[0:4] = ${encodeBase64(sharedSecret.slice(0, 4))}`);
 
                 x3dhHeader = {
                     ephemeralKey: ephemeralKey.publicKey,
                     preKeyId: preKey?.keyId
                 };
 
+                // Seed BOTH sessions for hybrid security
                 await createSession(recipientAddress, sharedSecret, peerIK, x3dhHeader);
-                ratchetData = await encryptRatchet(recipientAddress, plainText);
+                
+                // Split Epoch into TX and RX chains
+                const sharedB64 = encodeBase64(sharedSecret.slice(0, 32));
+                const myAddr = localStorage.getItem('decentrachat_address') || senderAddress;
+                const isSmaller = myAddr.toLowerCase() < recipientAddress.toLowerCase();
+                const txLabel = isSmaller ? 'epoch_A_tx' : 'epoch_B_tx';
+                const rxLabel = isSmaller ? 'epoch_B_tx' : 'epoch_A_tx';
+                
+                const txRoot = await cryptoWorker.hmacSha256(sharedB64, txLabel);
+                const rxRoot = await cryptoWorker.hmacSha256(sharedB64, rxLabel);
+
+                await initEpochSession(`${recipientAddress}_tx`, txRoot);
+                await initEpochSession(`${recipientAddress}_rx`, rxRoot);
+                
+                // V3 Hardening: Add a small "settling buffer" for mobile IndexedDB.
+                // This prevents the recipient from receiving the payload before the keys are fully persisted.
+                await new Promise(r => setTimeout(r, 150));
+
+                // Encrypt with new Epoch session
+                epochData = await encryptEpoch(`${recipientAddress}_tx`, plainText);
             }
         } catch (err) {
             console.warn('X3DH handshake failed:', err.message);
         }
     }
 
-    // 3. Prepare Payload
+    // 4. Prepare Payload
     const messageId = `msg_${now}_${Math.random().toString(36).substr(2, 9)}`;
     const senderUsername = localStorage.getItem('decentrachat_username') || null;
 
@@ -157,10 +189,14 @@ export async function sendEncryptedMessage(senderAddress, recipientAddress, plai
         type: metadata.type || 'text',
         mediaId: metadata.mediaId,
         manifest: metadata.manifest,
-        x3dh: x3dhHeader
+        x3dh: x3dhHeader,
+        parentHash: await getLatestMessageHash(recipientAddress) // Attach Merkle DAG parent
     };
 
-    if (ratchetData) {
+    if (epochData) {
+        payload.epochRatchet = epochData;
+        payload.senderPublicKey = myKeys.publicKey;
+    } else if (ratchetData) {
         payload.ratchet = ratchetData;
         payload.senderPublicKey = myKeys.publicKey;
     } else {
@@ -188,22 +224,39 @@ export async function sendEncryptedMessage(senderAddress, recipientAddress, plai
         sentMessageIds.delete(sentMessageIds.keys().next().value);
     }
 
-    // 4. Dispatch (P2P, Waku, or Relay)
-    const p2pSent = webrtcService.sendToPeer(recipientAddress, { ...payload, to: recipientAddress });
-
-    // Always use Waku as a redundant transport for reliability and metadata privacy
-    const wakuSent = await wakuService.sendViaWaku({ ...payload, to: recipientAddress }, recipientAddress, senderAddress, false);
+    // 5. Sequential Dispatch (Hardened for Mobile Reliability)
+    console.log(`📤 Dispatching message to ${recipientAddress.slice(0, 10)}...`);
     
-    if (!p2pSent && !wakuSent) {
-        if (socketService.isConnected()) {
-            console.log('📡 Using server relay for message delivery');
-            socketService.sendMessage(recipientAddress, payload);
-        } else {
-            console.warn('⚠️ All transports failed. Queuing in outbox.');
-            const outboxMessage = { ...payload, to: recipientAddress, content: plainText, status: 'pending' };
-            await savePendingMessage(outboxMessage);
-            return { ...outboxMessage, status: 'pending', transport: 'queued' };
-        }
+    // First, try live WebRTC (Best performance, no relay)
+    const p2pSent = webrtcService.sendToPeer(recipientAddress, { ...payload, to: recipientAddress });
+    if (p2pSent) {
+        console.log('✅ Also delivered via direct P2P');
+    }
+
+    // Use Waku (Gossip) sequentially
+    const isNewSession = !!x3dhHeader;
+    const wakuTopicAddress = isNewSession ? null : senderAddress;
+    const wakuSent = await wakuService.sendViaWaku({ ...payload, to: recipientAddress }, recipientAddress, wakuTopicAddress, false);
+    
+    // V3 Hardening: If new session, also broadcast to the Discovery topic fallback
+    // ensure the peer catches it even if they haven't switched to the private topic yet.
+    if (isNewSession && wakuSent) {
+        await wakuService.sendViaWaku({ ...payload, to: recipientAddress }, recipientAddress, null, false);
+    }
+
+    // Final Redundancy: Server Relay
+    let relaySent = false;
+    if (socketService.isConnected()) {
+        console.log('📡 Using server relay for redundant delivery');
+        socketService.sendMessage(recipientAddress, payload);
+        relaySent = true;
+    } 
+
+    if (!wakuSent && !relaySent && !p2pSent) {
+        console.warn('⚠️ All transports failed. Queuing in outbox.');
+        const outboxMessage = { ...payload, to: recipientAddress, content: plainText, status: 'pending' };
+        await savePendingMessage(outboxMessage);
+        return { ...outboxMessage, status: 'pending', transport: 'queued' };
     }
 
     return { 
@@ -211,7 +264,7 @@ export async function sendEncryptedMessage(senderAddress, recipientAddress, plai
         to: recipientAddress, 
         content: plainText, 
         status: 'sent', 
-        transport: p2pSent ? 'p2p' : 'relay' 
+        transport: p2pSent ? 'p2p' : (wakuSent ? 'mesh' : 'relay') 
     };
 }
 
@@ -283,7 +336,8 @@ export async function sendGroupMessage(groupId, plainText, members, replyTo = nu
         },
         mediaId: metadata.mediaId,
         manifest: metadata.manifest,
-        replyTo
+        replyTo,
+        parentHash: await getLatestMessageHash(groupId) // Attach Merkle DAG parent
     };
 
     // Track for deduplication
@@ -386,14 +440,15 @@ export async function decryptReceivedMessage(encryptedMessage, cachedKeys = null
 
             const peerIK = encryptedMessage.senderPublicKey || await socketService.getPublicKey(encryptedMessage.from);
 
-            // As responder, derive the same X3DH secret using the responder variant
+            // As responder, derive the same X3DH secret WITHOUT OPK
             const sharedSecret = deriveX3DHResponderSecret(
                 myKeys,                      // my IK
                 { secretKey: myKeys.secretKey }, // my SPK (using IK as fallback)
-                opkSecret || null,            // my OPK secret
+                null,                         // NO OPK — must match sender
                 peerIK,                       // peer IK
                 ephemeralKey                  // peer EK (from payload)
             );
+            console.log(`🔑 X3DH Responder: sharedSecret[0:4] = ${encodeBase64(sharedSecret.slice(0, 4))}`);
 
             // If a Double Ratchet payload was provided, initialize the DR session responder
             if (encryptedMessage.ratchet) {
@@ -406,7 +461,18 @@ export async function decryptReceivedMessage(encryptedMessage, cachedKeys = null
             }
 
             // Always seed the Epoch session immediately after X3DH
-            await initEpochSession(encryptedMessage.from, encodeBase64(sharedSecret.slice(0, 32)));
+            const sharedB64 = encodeBase64(sharedSecret.slice(0, 32));
+            const myAddr = localStorage.getItem('decentrachat_address') || encryptedMessage.to;
+            const isSmaller = myAddr.toLowerCase() < encryptedMessage.from.toLowerCase();
+            // Since this is the responder (RX), their TX is my RX.
+            const txLabel = isSmaller ? 'epoch_A_tx' : 'epoch_B_tx';
+            const rxLabel = isSmaller ? 'epoch_B_tx' : 'epoch_A_tx';
+            
+            const txRoot = await cryptoWorker.hmacSha256(sharedB64, txLabel);
+            const rxRoot = await cryptoWorker.hmacSha256(sharedB64, rxLabel);
+
+            await initEpochSession(`${encryptedMessage.from}_tx`, txRoot);
+            await initEpochSession(`${encryptedMessage.from}_rx`, rxRoot);
         } catch (err) {
             console.error('X3DH handshake response failed:', err);
         }
@@ -415,7 +481,7 @@ export async function decryptReceivedMessage(encryptedMessage, cachedKeys = null
     // 2. Check for Epoch Ratchet Data
     if (encryptedMessage.epochRatchet) {
         try {
-            const decrypted = await decryptEpoch(encryptedMessage.from, encryptedMessage.epochRatchet);
+            const decrypted = await decryptEpoch(`${encryptedMessage.from}_rx`, encryptedMessage.epochRatchet);
             if (decrypted) {
                 return { ...encryptedMessage, content: decrypted, decryptionFailed: false };
             }

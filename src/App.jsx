@@ -6,12 +6,14 @@ import { ChatInterface } from './components/ChatInterface';
 import { UsernameSetup } from './components/UsernameSetup';
 import { initSocket, register, disconnect, updatePushToken } from './services/socketService';
 import { getStoredKeys, clearKeys } from './crypto/keyManager';
+import { signMessage } from './blockchain/web3Provider';
 import { clearAllData } from './services/storageService';
 import { UpdateManager } from './components/UpdateManager';
 import { platform, notifyUpdateReady } from './services/platformService';
 import { initPushNotifications } from './services/pushService';
 import React, { Component } from 'react';
 import './styles/index.css';
+import { hashArgon2 } from './crypto/argon2Client';
 
 // Apply persisted font size on load
 const savedFontSize = localStorage.getItem('decentrachat_font_size');
@@ -52,13 +54,24 @@ class ErrorBoundary extends Component {
 }
 
 function AppContent() {
-  const { isConnected, address } = useWallet();
+  const { isConnected, address, pushToken } = useWallet();
   const [username, setUsername] = useState(() => {
     return localStorage.getItem('decentrachat_username') || null;
   });
   const [showUsernameSetup, setShowUsernameSetup] = useState(false);
   const [isSocketReady, setIsSocketReady] = useState(false);
   const [connectionError, setConnectionError] = useState(null);
+  const [isSolvingPoW, setIsSolvingPoW] = useState(false);
+
+  const solveProofOfWork = async (challenge, addr) => {
+    setIsSolvingPoW(true);
+    try {
+      const hash = await hashArgon2(challenge, (addr || address).slice(0, 16));
+      return hash;
+    } finally {
+      setIsSolvingPoW(false);
+    }
+  };
 
   useEffect(() => {
     // Inform Capacitor Updater that the JS bundle successfully booted!
@@ -82,14 +95,27 @@ function AppContent() {
         const keys = await getStoredKeys();
         if (!keys || !mounted) return;
 
-        // Register with server
+        // Register with server using V3 challenge-response + PoW
         const storedUsername = localStorage.getItem('decentrachat_username');
         const storedAvatar = localStorage.getItem('decentrachat_avatar') || undefined;
         const storedStatus = localStorage.getItem('decentrachat_status') || undefined;
-        await register(address, keys.publicKey, keys.signingPublicKey, storedUsername, storedAvatar, storedStatus);
+        
+        console.log('🛡️ Starting V3 Registration Flow...');
+        await register(
+          address, 
+          keys.publicKey, 
+          keys.signingPublicKey, 
+          storedUsername, 
+          storedAvatar, 
+          storedStatus,
+          signMessage,
+          solveProofOfWork,
+          pushToken
+        );
 
         if (mounted) {
           setIsSocketReady(true);
+          setIsSolvingPoW(false);
           
           // Setup push notifications
           initPushNotifications((token) => {
@@ -105,6 +131,7 @@ function AppContent() {
         console.error('Failed to initialize:', err);
         if (mounted) {
             setConnectionError(err.message || 'Failed to connect to signaling server.');
+            setIsSolvingPoW(false);
         }
       }
     })();
@@ -112,7 +139,7 @@ function AppContent() {
     return () => {
       mounted = false;
     };
-  }, [isConnected, address]);
+  }, [isConnected, address, pushToken]);
 
   const handleUsernameComplete = (newUsername) => {
     setUsername(newUsername);
@@ -171,7 +198,14 @@ function AppContent() {
             ) : (
                 <>
                     <div className="spinner" style={{ width: '40px', height: '40px', margin: '0 auto' }}></div>
-                    <p style={{ marginTop: '16px', color: 'var(--text-secondary)' }}>Connecting to network...</p>
+                    <p style={{ marginTop: '16px', color: 'var(--text-secondary)' }}>
+                        {isSolvingPoW ? 'Solving security puzzle...' : 'Connecting to network...'}
+                    </p>
+                    {isSolvingPoW && (
+                        <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '8px' }}>
+                            This helps prevent spam and protect the network.
+                        </p>
+                    )}
                 </>
             )}
           </div>
