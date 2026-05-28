@@ -1,9 +1,9 @@
 // Array of your active Render / Oracle relay URLs
 // In production, these should be environment variables or user settings.
 const RELAYS = [
-    'https://dicsussion-relay.onrender.com',
-    'https://dicsussion-relay-wikz.onrender.com',
     'https://dicsussion-relay-mitj.onrender.com',
+    'https://dicsussion-relay-wikz.onrender.com',
+    'https://dicsussion-relay.onrender.com',
     'https://dicsussion-relay-47ed.onrender.com'
 ];
 

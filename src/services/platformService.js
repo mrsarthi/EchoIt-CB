@@ -97,13 +97,6 @@ export async function openAuthBrowser() {
     return null; // browser — no separate auth needed
 }
 
-// Ensure valid platform detection logic is registered
-const platformDetails = {}; // Placeholder for platform-specific details
-platformDetails.init = () => {
-    // Determine the environment once, usually on imported load
-    const capInfo = window.Capacitor;
-}
-
 /**
  * Returns the currently running version.
  * - Electron: package.json (via Vite __APP_VERSION__)

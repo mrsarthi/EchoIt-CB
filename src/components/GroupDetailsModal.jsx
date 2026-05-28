@@ -3,14 +3,15 @@ import { formatAddress } from '../blockchain/web3Provider';
 import './CreateGroupModal.css'; // Re-use styles
 
 export function GroupDetailsModal({ group, onClose, myAddress, onDeleteGroup, onRemoveMember, onUpdateGroupAvatar, contacts, onMessageMember }) {
+    const fileInputRef = useRef(null);
+    const [avatarPreview, setAvatarPreview] = useState(group?.avatar || null);
+
     if (!group) return null;
 
     const members = group.members || [];
     // Fallback for groups created before admin feature: treat first member as admin
     const admins = (group.admins && group.admins.length > 0) ? group.admins : (members.length > 0 ? [members[0]] : []);
     const isAdmin = admins.some(a => a.toLowerCase() === myAddress?.toLowerCase());
-    const fileInputRef = useRef(null);
-    const [avatarPreview, setAvatarPreview] = useState(group.avatar || null);
 
     const handleDeleteGroup = () => {
         if (!window.confirm(`Delete "${group.username || 'this group'}"?\n\nThis will remove the group and all its messages from your device. Other members will still have their copy.`)) return;
@@ -129,7 +130,7 @@ export function GroupDetailsModal({ group, onClose, myAddress, onDeleteGroup, on
                         <div className="members-list">
                             {members.map(memberAddr => {
                                 const isSelf = memberAddr.toLowerCase() === myAddress?.toLowerCase();
-                                const isMemberAdmin = admins.includes(memberAddr);
+                                const isMemberAdmin = admins.some(a => a.toLowerCase() === memberAddr.toLowerCase());
                                 const isInContacts = contactAddresses.has(memberAddr.toLowerCase());
                                 const showMessageBtn = !isSelf && !isInContacts;
                                 return (

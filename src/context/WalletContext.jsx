@@ -16,11 +16,16 @@ import {
     getStoredKeys, 
     storeKeysFromSignature,
     hasStoredKeys,
-    unlockKeys
+    unlockKeys,
+    getStoredWalletAddress
 } from '../crypto/keyManager';
 import { register as registerUser } from '../services/socketService';
 import { platform, openAuthBrowser, onWalletAuth } from '../services/platformService';
+import { initPushNotifications } from '../services/pushService';
+import { setStorageSessionKey } from '../services/storageEncryption';
+import { setCryptoSessionKey } from '../crypto/doubleRatchet';
 import PINModal from '../components/PINModal';
+import { hashArgon2 } from '../crypto/argon2Client';
 
 const WalletContext = createContext(null);
 
@@ -34,25 +39,140 @@ export function WalletProvider({ children }) {
     const [error, setError] = useState(null);
     const [keys, setKeys] = useState(null);
     const [isWeb3Detected, setIsWeb3Detected] = useState(false);
-    const [authMode, setAuthMode] = useState(isElectron ? 'electron' : 'browser');
+    const [isSolvingPoW, setIsSolvingPoW] = useState(false);
+    const [pushToken, setPushToken] = useState(null);
 
-    // --- Task 8: PIN State ---
     const [showPINModal, setShowPINModal] = useState(false);
     const [isPINSetup, setIsPINSetup] = useState(false);
     const [pendingAuthData, setPendingAuthData] = useState(null);
     const [pinError, setPinError] = useState(null);
 
-    // Check for existing connection on mount
+    const activeAuthSessionIdRef = useRef(null);
+
+    const solveProofOfWork = async (challenge, addr) => {
+        const saltAddr = addr || address || 'default_salt';
+        setIsSolvingPoW(true);
+        try {
+            const hash = await hashArgon2(challenge, saltAddr.slice(0, 16));
+            return hash;
+        } finally {
+            setIsSolvingPoW(false);
+        }
+    };
+
+    const handleElectronAuth = useCallback(async (data, pin = null) => {
+        try {
+            setError(null);
+            setIsConnecting(true);
+
+            if (data.sessionId || activeAuthSessionIdRef.current) {
+                const sessionId = data.sessionId || activeAuthSessionIdRef.current;
+                const expectedMessage = `Authorize DecentraChat Auth: ${sessionId}`;
+                try {
+                    const recovered = ethers.verifyMessage(expectedMessage, data.signature);
+                    if (recovered.toLowerCase() !== data.address.toLowerCase()) {
+                        setError('Security Error: Auth signature mismatch. Aborting.');
+                        setIsConnecting(false);
+                        return;
+                    }
+                } catch {
+                    setError('Security Error: Invalid signature format.');
+                    setIsConnecting(false);
+                    return;
+                }
+            }
+
+            const encryptionKeys = await storeKeysFromSignature(data.address, data.signature, pin);
+            setKeys(encryptionKeys);
+            setAddress(data.address);
+            setIsConnected(true);
+            setIsConnecting(false);
+            setShowPINModal(false);
+            setPendingAuthData(null);
+        } catch (err) {
+            setError(err.message);
+            setIsConnecting(false);
+        }
+    }, [pushToken]);
+
+    const handlePINSubmit = async (pin) => {
+        setPinError(null);
+        try {
+            // Get the wallet address for consistent salt derivation
+            let saltAddress = address;
+            if (!saltAddress) {
+                if (pendingAuthData) {
+                    saltAddress = pendingAuthData.walletAddress || pendingAuthData.data?.address;
+                }
+                if (!saltAddress) {
+                    saltAddress = await getStoredWalletAddress();
+                }
+            }
+            // 🛡️ Step 4: Derive and set storage session key (Argon2)
+            await setStorageSessionKey(pin, saltAddress);
+            
+            // 🛡️ Step 5: Derive a robust Argon2 hash for the volatile crypto session key
+            // This key is used for encrypting DR sessions and Pre-Key secrets in IndexedDB
+            const b64Key = await hashArgon2(pin, saltAddress.slice(0, 16));
+            setCryptoSessionKey(b64Key);
+
+            if (isPINSetup) {
+                if (pendingAuthData) {
+                    if (pendingAuthData.type === 'browser_connect') {
+                        const { walletAddress } = pendingAuthData;
+                        const encryptionKeys = await getOrCreateKeys(walletAddress, signMessage, pin);
+                        setKeys(encryptionKeys);
+                        setIsConnected(true);
+                        setIsConnecting(false);
+                        setShowPINModal(false);
+                        setPendingAuthData(null);
+                    } else if (pendingAuthData.type === 'electron_auth') {
+                        await handleElectronAuth(pendingAuthData.data, pin);
+                    }
+                }
+            } else {
+                const unlocked = await unlockKeys(pin);
+                if (unlocked) {
+                    setKeys(unlocked);
+                    setAddress(unlocked.address);
+                    setIsConnected(true);
+                    setShowPINModal(false);
+                }
+            }
+        } catch (err) {
+            console.error('❌ PIN Submit failed with error:', err);
+            setPinError('Incorrect PIN. Please try again.');
+        }
+    };
+
+    const checkBrowserConnection = useCallback(async () => {
+        const existingAddress = await getConnectedAddress();
+        if (existingAddress) {
+            setAddress(existingAddress);
+            const storedKeys = await getStoredKeys();
+            if (storedKeys) {
+                setKeys(storedKeys);
+                setIsConnected(true);
+            }
+        }
+    }, [pushToken]);
+
     useEffect(() => {
         const init = async () => {
-            if (isElectron) {
-                // In Electron, check stored auth
-                setIsWeb3Detected(true); // Always show connect button in Electron
+            if (platform.isNativeApp) {
+                initPushNotifications(
+                    (token) => {
+                        setPushToken(token);
+                    },
+                    () => {
+                        console.log('📲 Silent push received');
+                    }
+                );
+            }
 
-                // Listen for auth from browser
+            if (isElectron) {
+                setIsWeb3Detected(true);
                 onWalletAuth(async (data) => {
-                    console.log('Received wallet auth:', data.address);
-                    // For Electron auth relay, we might need a PIN if it's new
                     const exists = await hasStoredKeys();
                     if (!exists) {
                         setPendingAuthData({ type: 'electron_auth', data });
@@ -63,21 +183,20 @@ export function WalletProvider({ children }) {
                     }
                 });
 
-                // Check for existing stored keys
                 const exists = await hasStoredKeys();
                 if (exists) {
                     const decrypted = await getStoredKeys();
                     if (!decrypted) {
-                        setShowPINModal(true); // Need to unlock
+                        setShowPINModal(true); 
                         setIsPINSetup(false);
                     } else {
-                        checkStoredKeys();
+                        setKeys(decrypted);
+                        setAddress(decrypted.address);
+                        setIsConnected(true);
                     }
                 }
             } else {
-                // In browser, check MetaMask
                 setIsWeb3Detected(isWeb3Available());
-                
                 const exists = await hasStoredKeys();
                 if (exists) {
                     const decrypted = await getStoredKeys();
@@ -85,7 +204,9 @@ export function WalletProvider({ children }) {
                         setShowPINModal(true);
                         setIsPINSetup(false);
                     } else {
-                        checkBrowserConnection();
+                        setKeys(decrypted);
+                        setAddress(decrypted.address);
+                        setIsConnected(true);
                     }
                 } else {
                     checkBrowserConnection();
@@ -103,114 +224,7 @@ export function WalletProvider({ children }) {
             }
         };
         init();
-    }, []);
-
-    const checkStoredKeys = async () => {
-        const storedKeys = await getStoredKeys();
-        if (storedKeys) {
-            setKeys(storedKeys);
-            setAddress(storedKeys.address);
-            setIsConnected(true);
-
-            registerUser(storedKeys.address, storedKeys.publicKey, null, null, null, signMessage);
-            console.log('🔄 Re-registered presence for:', storedKeys.address);
-        }
-    };
-
-    const checkBrowserConnection = async () => {
-        const existingAddress = await getConnectedAddress();
-        if (existingAddress) {
-            setAddress(existingAddress);
-            const storedKeys = await getStoredKeys();
-            if (storedKeys) {
-                setKeys(storedKeys);
-                setIsConnected(true);
-
-                registerUser(existingAddress, storedKeys.publicKey, null, null, null, signMessage);
-                console.log('🔄 Re-registered presence for:', existingAddress);
-            }
-        }
-    };
-
-    const activeAuthSessionIdRef = useRef(null);
-
-    const handleElectronAuth = async (data, pin = null) => {
-        try {
-            setError(null);
-            setIsConnecting(true);
-
-            if (data.sessionId || activeAuthSessionIdRef.current) {
-                const sessionId = data.sessionId || activeAuthSessionIdRef.current;
-                const expectedMessage = `Authorize DecentraChat Auth: ${sessionId}`;
-                
-                try {
-                    const recovered = ethers.verifyMessage(expectedMessage, data.signature);
-                    if (recovered.toLowerCase() !== data.address.toLowerCase()) {
-                        setError('Security Error: Auth signature mismatch. Aborting.');
-                        setIsConnecting(false);
-                        return;
-                    }
-                } catch (err) {
-                    setError('Security Error: Invalid signature format.');
-                    setIsConnecting(false);
-                    return;
-                }
-            }
-
-            // Derive keys from the signature
-            const encryptionKeys = await storeKeysFromSignature(data.address, data.signature, pin);
-            setKeys(encryptionKeys);
-            setAddress(data.address);
-
-            registerUser(data.address, encryptionKeys.publicKey);
-
-            setIsConnected(true);
-            setIsConnecting(false);
-            setShowPINModal(false);
-            setPendingAuthData(null);
-            console.log('✅ Mobile Auth successful:', data.address);
-        } catch (err) {
-            setError(err.message);
-            setIsConnecting(false);
-        }
-    };
-
-    const handlePINSubmit = async (pin) => {
-        setPinError(null);
-        try {
-            if (isPINSetup) {
-                // We are setting up a new PIN during a connection flow
-                if (pendingAuthData) {
-                    if (pendingAuthData.type === 'browser_connect') {
-                        const { walletAddress } = pendingAuthData;
-                        const encryptionKeys = await getOrCreateKeys(walletAddress, signMessage, pin);
-                        setKeys(encryptionKeys);
-                        registerUser(walletAddress, encryptionKeys.publicKey, null, null, null, signMessage);
-                        setIsConnected(true);
-                        setIsConnecting(false);
-                        setShowPINModal(false);
-                        setPendingAuthData(null);
-                    } else if (pendingAuthData.type === 'electron_auth') {
-                        await handleElectronAuth(pendingAuthData.data, pin);
-                    }
-                }
-            } else {
-                // We are unlocking existing keys
-                const unlocked = await unlockKeys(pin);
-                if (unlocked) {
-                    setKeys(unlocked);
-                    setAddress(unlocked.address);
-                    setIsConnected(true);
-                    setShowPINModal(false);
-                    
-                    // Re-register presence
-                    registerUser(unlocked.address, unlocked.publicKey, null, null, null, signMessage);
-                }
-            }
-        } catch (err) {
-            setPinError('Incorrect PIN. Please try again.');
-        }
-    };
+    }, [handleElectronAuth, checkBrowserConnection, pushToken, address]);
 
     const handleAppDataReset = async () => {
         await clearKeys();
@@ -220,13 +234,11 @@ export function WalletProvider({ children }) {
     const connect = useCallback(async () => {
         setIsConnecting(true);
         setError(null);
-
         try {
             if (isElectron) {
                 const authResult = await openAuthBrowser();
                 if (authResult && authResult.sessionId) {
                     activeAuthSessionIdRef.current = authResult.sessionId;
-                    
                     const exists = await hasStoredKeys();
                     if (!exists) {
                         setPendingAuthData({ type: 'electron_auth', data: authResult });
@@ -240,17 +252,14 @@ export function WalletProvider({ children }) {
                     setIsConnecting(false);
                 }
             } else {
-                // Standard browser MetaMask flow
                 const { address: walletAddress } = await browserConnectWallet();
                 setAddress(walletAddress);
-
                 const exists = await hasStoredKeys();
                 if (!exists) {
                     setPendingAuthData({ type: 'browser_connect', walletAddress });
                     setIsPINSetup(true);
                     setShowPINModal(true);
                 } else {
-                    // Try to unlock (this should have been triggered by mount effect if keys existed)
                     const decrypted = await getStoredKeys();
                     if (!decrypted) {
                         setPendingAuthData({ type: 'browser_connect', walletAddress });
@@ -259,7 +268,6 @@ export function WalletProvider({ children }) {
                     } else {
                         const encryptionKeys = await getOrCreateKeys(walletAddress, signMessage);
                         setKeys(encryptionKeys);
-                        registerUser(walletAddress, encryptionKeys.publicKey, null, null, null, signMessage);
                         setIsConnected(true);
                         setIsConnecting(false);
                     }
@@ -269,7 +277,7 @@ export function WalletProvider({ children }) {
             setError(err.message);
             setIsConnecting(false);
         }
-    }, []);
+    }, [handleElectronAuth, pushToken]);
 
     const disconnect = useCallback(async () => {
         await clearKeys();
@@ -286,8 +294,9 @@ export function WalletProvider({ children }) {
         error,
         keys,
         isWeb3Detected,
-        authMode,
         isElectron,
+        isSolvingPoW,
+        pushToken,
         connect,
         disconnect,
     };

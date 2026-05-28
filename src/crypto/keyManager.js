@@ -86,10 +86,12 @@ async function decryptWithPin(encryptedData, pin) {
  * Get or create encryption keys for a wallet
  * @param {string} walletAddress - The Ethereum wallet address
  * @param {Function} signMessageFn - Function to sign a message with wallet
- * @param {string} [pin] - Optional PIN for encryption
+ * @param {string} pin - Mandatory PIN for encryption
  * @returns {Promise<Object>} { publicKey, secretKey }
  */
-export async function getOrCreateKeys(walletAddress, signMessageFn, pin = null) {
+export async function getOrCreateKeys(walletAddress, signMessageFn, pin) {
+    if (!pin) throw new Error('PIN_REQUIRED');
+
     // If we have them in memory, return them
     if (sessionKeys && sessionKeys.address === walletAddress) {
         return sessionKeys;
@@ -101,9 +103,6 @@ export async function getOrCreateKeys(walletAddress, signMessageFn, pin = null) 
     if (storedAddress === walletAddress) {
         const encryptedData = await keyStore.getItem(KEY_STORAGE_KEY);
         if (encryptedData) {
-            // If no PIN provided, we can't unlock v2 keys
-            if (!pin) throw new Error('PIN_REQUIRED');
-
             const keys = await decryptWithPin(encryptedData, pin);
             sessionKeys = keys;
             return keys;
@@ -111,29 +110,20 @@ export async function getOrCreateKeys(walletAddress, signMessageFn, pin = null) 
     }
 
     // Need to create new keys
-    // Ask user to sign a message to derive deterministic keys
     const message = `DecentraChat Key Generation\n\nThis signature will logically prove you own this wallet and generate your static end-to-end encryption keys.\nWallet: ${walletAddress.toLowerCase()}`;
 
     const signature = await signMessageFn(message);
     const keys = deriveKeysFromSignature(signature);
 
-    // Add address to keys object
     const keysWithAddress = {
         ...keys,
         address: walletAddress,
     };
 
-    // Store keys locally
+    // Store keys locally with mandatory PIN encryption
     await keyStore.setItem(WALLET_ADDRESS_KEY, walletAddress);
-    
-    if (pin) {
-        const encrypted = await encryptWithPin(keysWithAddress, pin);
-        await keyStore.setItem(KEY_STORAGE_KEY, encrypted);
-    } else {
-        // Fallback or legacy (not recommended but for grace period/unprotected sessions)
-        // In Task 8, we should probably force a PIN.
-        await keyStore.setItem(KEY_STORAGE_KEY + '_unprotected', keysWithAddress);
-    }
+    const encrypted = await encryptWithPin(keysWithAddress, pin);
+    await keyStore.setItem(KEY_STORAGE_KEY, encrypted);
 
     sessionKeys = keysWithAddress;
     return keysWithAddress;
@@ -143,6 +133,7 @@ export async function getOrCreateKeys(walletAddress, signMessageFn, pin = null) 
  * Unlock stored keys using a PIN
  */
 export async function unlockKeys(pin) {
+    if (!pin) throw new Error('PIN_REQUIRED');
     const encryptedData = await keyStore.getItem(KEY_STORAGE_KEY);
     if (!encryptedData) return null;
 
@@ -172,7 +163,6 @@ export async function getStoredWalletAddress() {
  */
 export async function clearKeys() {
     await keyStore.removeItem(KEY_STORAGE_KEY);
-    await keyStore.removeItem(KEY_STORAGE_KEY + '_unprotected');
     await keyStore.removeItem(WALLET_ADDRESS_KEY);
     sessionKeys = null;
 }
@@ -184,35 +174,29 @@ export async function clearKeys() {
 export async function hasStoredKeys() {
     if (sessionKeys) return true;
     const keys = await keyStore.getItem(KEY_STORAGE_KEY);
-    const legacy = await keyStore.getItem(KEY_STORAGE_KEY + '_unprotected');
-    return keys !== null || legacy !== null;
+    return keys !== null;
 }
 
 /**
  * Store keys derived from a signature (for Electron hybrid auth)
  * @param {string} walletAddress - The Ethereum wallet address
  * @param {string} signature - The signature from browser auth
- * @param {string} [pin] - Optional PIN
+ * @param {string} pin - Mandatory PIN for encryption
  * @returns {Promise<Object>} { publicKey, secretKey, address }
  */
-export async function storeKeysFromSignature(walletAddress, signature, pin = null) {
+export async function storeKeysFromSignature(walletAddress, signature, pin) {
+    if (!pin) throw new Error('PIN_REQUIRED');
     const keys = deriveKeysFromSignature(signature);
 
-    // Add address to keys object for later reference
     const keysWithAddress = {
         ...keys,
         address: walletAddress,
     };
 
-    // Store keys locally
+    // Store keys locally with mandatory PIN encryption
     await keyStore.setItem(WALLET_ADDRESS_KEY, walletAddress);
-    
-    if (pin) {
-        const encrypted = await encryptWithPin(keysWithAddress, pin);
-        await keyStore.setItem(KEY_STORAGE_KEY, encrypted);
-    } else {
-        await keyStore.setItem(KEY_STORAGE_KEY + '_unprotected', keysWithAddress);
-    }
+    const encrypted = await encryptWithPin(keysWithAddress, pin);
+    await keyStore.setItem(KEY_STORAGE_KEY, encrypted);
 
     sessionKeys = keysWithAddress;
     return keysWithAddress;

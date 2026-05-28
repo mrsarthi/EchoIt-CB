@@ -1,10 +1,19 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
+import { 
+    X, 
+    Calendar, 
+    Shield, 
+    Activity, 
+    MessageSquare, 
+    User,
+    Lock
+} from 'lucide-react';
 import { formatAddress } from '../blockchain/web3Provider';
 import './ProfilePreviewModal.css';
+import { TrustBadge } from './TrustBadge';
 
-export function ProfilePreviewModal({ user, onClose, onStartChat, myAddress }) {
+export function ProfilePreviewModal({ user, onClose, onStartChat }) {
     if (!user) return null;
-
 
     const displayName = user.username || formatAddress(user.address);
     const isOnline = user.online;
@@ -16,86 +25,73 @@ export function ProfilePreviewModal({ user, onClose, onStartChat, myAddress }) {
         return date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
     };
 
-
-
     return (
         <div className="modal-overlay animate-fadeIn" onClick={onClose}>
-            <div className="profile-preview-card glass-card" onClick={e => e.stopPropagation()}>
-                {/* Close button */}
-                <button className="close-modal-btn" onClick={onClose}>×</button>
+            <div className="profile-preview-card animate-scaleIn" onClick={e => e.stopPropagation()}>
+                <button className="btn btn-ghost close-btn" onClick={onClose}>
+                    <X size={24} />
+                </button>
                 
-                {/* Avatar Section */}
-                <div className="profile-preview-avatar-section">
-                    <div className="profile-preview-avatar-ring">
+                <div className="profile-preview-header">
+                    <div className="avatar avatar-xxl">
                         {user.avatar ? (
-                            <img src={user.avatar} alt="Avatar" className="profile-preview-avatar-img" />
+                            <img src={user.avatar} alt="Avatar" />
                         ) : (
-                            <div className="profile-preview-avatar-placeholder">
-                                {(user.username || user.address || '??').slice(0, 2).toUpperCase()}
+                            <div className="avatar-placeholder">
+                                <User size={40} />
                             </div>
                         )}
-                        {/* Online indicator */}
-                        <span className={`profile-preview-status-dot ${isOnline ? 'online' : 'offline'}`}></span>
+                        <span className={`status-badge ${isOnline ? 'online' : 'offline'}`}></span>
                     </div>
-                </div>
-
-                {/* User Info */}
-                <div className="profile-preview-info">
-                    <h2 className="profile-preview-name">{displayName}</h2>
-                    {user.username && (
-                        <p className="profile-preview-username">@{user.username}</p>
-                    )}
                     
+                    <div className="profile-preview-identity">
+                        <h2>{displayName}</h2>
+                        {user.username && <p className="text-secondary text-sm">@{user.username}</p>}
+                    </div>
 
-
-                    {/* Status tagline */}
                     {user.status && (
-                        <p className="profile-preview-tagline">"{user.status}"</p>
+                        <div className="profile-preview-status">
+                            <p>"{user.status}"</p>
+                        </div>
                     )}
                 </div>
 
-                {/* Stats Row */}
-                <div className="profile-preview-stats">
-                    <div className="stat-item">
-                        <span className="stat-icon">📅</span>
-                        <div className="stat-text">
+                <div className="profile-preview-grid">
+                    <div className="preview-stat-item">
+                        <Calendar size={18} className="text-muted" />
+                        <div className="stat-content">
                             <span className="stat-label">Member Since</span>
                             <span className="stat-value">{formatDate(memberSince)}</span>
                         </div>
                     </div>
-                    <div className="stat-divider"></div>
-                    <div className="stat-item">
-                        <span className="stat-icon">🛡️</span>
-                        <div className="stat-text">
-                            <span className="stat-label">Trust Score</span>
-                            <span className="stat-value trust-score">
-                                <span className="trust-badge">{user.trustScore || 0}</span>
-                            </span>
+                    <div className="preview-stat-item">
+                        <Shield size={18} className="text-trust" />
+                        <div className="stat-content">
+                            <span className="stat-label">Identity Status</span>
+                            <TrustBadge stage={user.trustStage || 1} />
                         </div>
                     </div>
-                    <div className="stat-divider"></div>
-                    <div className="stat-item">
-                        <span className="stat-icon">{isOnline ? '🟢' : '🔴'}</span>
-                        <div className="stat-text">
-                            <span className="stat-label">Status</span>
+                    <div className="preview-stat-item">
+                        <Activity size={18} className={isOnline ? 'text-trust' : 'text-muted'} />
+                        <div className="stat-content">
+                            <span className="stat-label">Presence</span>
                             <span className="stat-value">{isOnline ? 'Online' : 'Offline'}</span>
                         </div>
                     </div>
                 </div>
 
-                {/* Action Buttons */}
                 <div className="profile-preview-actions">
                     <button 
-                        className="btn btn-primary btn-start-chat"
+                        className="btn btn-primary full-width"
                         onClick={() => onStartChat(user)}
                     >
-                        🔐 Start Secure Chat
+                        <Lock size={18} /> Start Secure Chat
                     </button>
                     <button 
-                        className="btn btn-ghost btn-close-preview"
+                        className="btn btn-ghost full-width"
                         onClick={onClose}
                     >
-                        Cancel
+                        Maybe Later
                     </button>
                 </div>
             </div>

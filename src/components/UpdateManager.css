@@ -4,7 +4,7 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background: rgba(0, 0, 0, 0.85);
     display: flex;
     justify-content: center;
     align-items: center;
@@ -16,14 +16,13 @@
 /* Glass Card Styles since Tailwind isn't here */
 .glass-card {
     background: rgba(30, 30, 35, 0.95);
-    backdrop-filter: blur(20px);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 0.75rem;
     padding: 1.5rem;
     width: 20rem;
     max-width: 90vw;
     color: white;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.85);
 }
 
 .update-header {

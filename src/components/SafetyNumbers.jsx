@@ -1,16 +1,22 @@
 import { useState, useEffect } from 'react';
+import { ShieldCheck, X } from 'lucide-react';
 import { getFingerprint } from '../crypto/crypto';
+import { formatAddress } from '../blockchain/web3Provider';
 import './SafetyNumbers.css';
 
-/**
- * SafetyNumbers Modal - Verifies cryptographic integrity of a contact
- * @param {Object} props
- * @param {Object} props.contact - The peer being verified
- * @param {Object} props.myKeys - Current user's keys
- * @param {boolean} props.isVerified - Current verification status
- * @param {Function} props.onVerify - Callback to toggle verification status
- * @param {Function} props.onClose - Callback to close the modal
- */
+const FingerprintGrid = ({ fingerprint }) => {
+    const blocks = (fingerprint || '00000-00000-00000-00000-00000-00000-00000-00000').split('-');
+    return (
+        <div className="safety-grid">
+            {blocks.map((block, i) => (
+                <div key={i} className="safety-block">
+                    <code>{block}</code>
+                </div>
+            ))}
+        </div>
+    );
+};
+
 export default function SafetyNumbers({ contact, myKeys, isVerified, onVerify, onClose }) {
     const [myFingerprint, setMyFingerprint] = useState('Loading...');
     const [peerFingerprint, setPeerFingerprint] = useState('Loading...');
@@ -29,65 +35,59 @@ export default function SafetyNumbers({ contact, myKeys, isVerified, onVerify, o
         loadFingerprints();
     }, [contact, myKeys]);
 
-    const FingerprintBlocks = ({ fingerprint }) => {
-        const blocks = fingerprint.split('-');
-        return (
-            <div className="fingerprint-grid">
-                {blocks.map((block, i) => (
-                    <div key={i} className="fingerprint-block">{block}</div>
-                ))}
-            </div>
-        );
-    };
+    const isMatch = myFingerprint !== 'Loading...' && peerFingerprint !== 'Loading...' && myFingerprint === peerFingerprint;
 
     return (
-        <div className="safety-modal-overlay" onClick={onClose}>
-            <div className="safety-card" onClick={e => e.stopPropagation()}>
-                <div className="safety-header">
-                    <h2 className="safety-title">🛡️ Verify Safety Numbers</h2>
-                    <button className="close-safety-btn" onClick={onClose}>×</button>
-                </div>
-
-                <p className="safety-description">
-                    To verify the security of your end-to-end encryption with <b>{contact.username || contact.address.slice(0, 10)}</b>, 
-                    compare the numbers below with the numbers on their screen.
-                    <br/><br/>
-                    If the numbers match, your conversation is guaranteed to be private and cannot be intercepted by any third party.
-                </p>
-
-                <div className="fingerprint-section">
-                    <div className="user-identity">
-                        {contact.avatar && <img src={contact.avatar} className="user-avatar-small" alt="" />}
-                        <div>
-                            <div className="user-label">{contact.username || 'Peer'}</div>
-                            {isVerified && <div className="verified-badge-large">✅ Verified</div>}
-                        </div>
-                    </div>
-                    <FingerprintBlocks fingerprint={peerFingerprint} />
-                </div>
-
-                <div className="fingerprint-section">
-                    <div className="user-identity">
-                        <div className="user-label">You (My Identity)</div>
-                    </div>
-                    <FingerprintBlocks fingerprint={myFingerprint} />
-                </div>
-
-                <div className="safety-verification-section">
-                    <div className="verify-toggle-row">
-                        <div className="verify-label">
-                            <span>Mark as Verified</span>
-                        </div>
-                        <input 
-                            type="checkbox" 
-                            className="verify-checkbox" 
-                            checked={isVerified} 
-                            onChange={(e) => onVerify(e.target.checked)}
-                        />
-                    </div>
+        <div className="safety-numbers-overlay" onClick={onClose}>
+            <div className="safety-numbers-modal animate-scaleIn" onClick={e => e.stopPropagation()}>
+                <div className="safety-numbers-header">
+                    <button className="btn btn-ghost close-btn" onClick={onClose}>
+                        <X size={24} />
+                    </button>
                     
+                    <div className="safety-header-identity">
+                        <div className="avatar avatar-lg">
+                            {contact?.avatar ? (
+                                <img src={contact.avatar} alt="A" />
+                            ) : contact?.address?.slice(2, 4).toUpperCase()}
+                            {isVerified && <ShieldCheck size={16} className="verified-overlap" />}
+                        </div>
+                        <h3>{contact?.username || formatAddress(contact?.address)}</h3>
+                        <p className="text-muted text-sm">Security Verification</p>
+                    </div>
+                </div>
+
+                <div className="safety-numbers-content">
+                    <div className="safety-alert">
+                        <ShieldCheck size={20} className={isVerified ? 'text-trust' : 'text-primary'} />
+                        <p className="safety-desc">
+                            Compare these numbers with <strong>{contact?.username || 'the recipient'}</strong> to confirm end-to-end encryption.
+                        </p>
+                    </div>
+
+                    <div className="fingerprint-section">
+                        <label className="fingerprint-label">Your Fingerprint</label>
+                        <FingerprintGrid fingerprint={myFingerprint} />
+                    </div>
+
+                    <div className="fingerprint-section">
+                        <label className="fingerprint-label">Peer Fingerprint</label>
+                        <FingerprintGrid fingerprint={peerFingerprint} />
+                    </div>
+
+                    {isMatch && (
+                        <div className="safety-match-badge animate-fadeIn">
+                            <ShieldCheck size={14} /> Identity Match Confirmed
+                        </div>
+                    )}
+
                     <div className="safety-actions">
-                        <button className="safety-primary-btn" onClick={onClose}>Done</button>
+                        <button 
+                            className={`btn ${isVerified ? 'btn-secondary' : 'btn-primary'} full-width`}
+                            onClick={() => onVerify(!isVerified)}
+                        >
+                            {isVerified ? 'Revoke Verification' : 'Verify Connection'}
+                        </button>
                     </div>
                 </div>
             </div>

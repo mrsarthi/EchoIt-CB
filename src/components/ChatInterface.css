@@ -10,8 +10,6 @@
 
 /* Sidebar */
 .sidebar {
-    width: 280px;
-    min-width: 280px;
     display: flex;
     flex-direction: column;
     border-radius: 0;
@@ -23,8 +21,7 @@
 }
 
 /* WhatsApp Mobile Sidebar Overrides */
-.platform-capacitor .sidebar,
-.platform-android .sidebar {
+.platform-capacitor .sidebar{
     width: 100%;
     max-width: none;
     position: absolute;
@@ -35,14 +32,12 @@
     background: var(--bg-primary);
 }
 
-.platform-capacitor .chat-container.has-active-chat .sidebar,
-.platform-android .chat-container.has-active-chat .sidebar {
+.platform-capacitor .chat-container.has-active-chat .sidebar{
     transform: translateX(-100%);
     pointer-events: none;
 }
 
-.platform-capacitor .chat-container:not(.has-active-chat) .sidebar,
-.platform-android .chat-container:not(.has-active-chat) .sidebar {
+.platform-capacitor .chat-container:not(.has-active-chat) .sidebar{
     transform: translateX(0);
 }
 
@@ -51,8 +46,7 @@
     border-bottom: 1px solid var(--border-subtle);
 }
 
-.platform-capacitor .sidebar-header,
-.platform-android .sidebar-header {
+.platform-capacitor .sidebar-header{
     padding-top: calc(var(--space-lg) + env(safe-area-inset-top, 24px));
 }
 
@@ -178,9 +172,46 @@
     min-width: 0;
 }
 
+/* Narrow desktop windows (< 768px): toggle sidebar/chat like mobile */
+@media (max-width: 767px) {
+    .chat-container {
+        position: relative;
+    }
+    .sidebar {
+        position: absolute;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        z-index: 10;
+        background: var(--bg-primary);
+        transition: transform var(--transition-normal);
+    }
+    .chat-container.has-active-chat .sidebar {
+        transform: translateX(-100%);
+        pointer-events: none;
+    }
+    .chat-container:not(.has-active-chat) .sidebar {
+        transform: translateX(0);
+    }
+    .chat-main {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 20;
+        background: var(--bg-primary);
+    }
+    .chat-container.has-active-chat .chat-main {
+        display: flex;
+    }
+    .chat-container:not(.has-active-chat) .chat-main:not(.settings-active) {
+        display: none;
+    }
+}
+
 /* WhatsApp Mobile Main Overrides */
-.platform-capacitor .chat-main,
-.platform-android .chat-main {
+.platform-capacitor .chat-main{
     position: absolute;
     top: 0;
     left: 0;
@@ -192,13 +223,11 @@
 }
 
 /* Show/Hide main area based on active chat */
-.platform-capacitor .chat-container.has-active-chat .chat-main,
-.platform-android .chat-container.has-active-chat .chat-main {
+.platform-capacitor .chat-container.has-active-chat .chat-main{
     display: flex;
 }
 
-.platform-capacitor .chat-container:not(.has-active-chat) .chat-main,
-.platform-android .chat-container:not(.has-active-chat) .chat-main {
+.platform-capacitor .chat-container:not(.has-active-chat) .chat-main:not(.settings-active) {
     display: none;
 }
 
@@ -244,8 +273,9 @@
     position: absolute;
     bottom: 1.875rem;
     right: 1.875rem;
-    background: rgba(10, 10, 15, 0.6);
-    backdrop-filter: blur(10px);
+    background: var(--bg-tertiary);
+    /* backdrop-filter removed for Capacitor WebView performance */
+    box-shadow: var(--shadow-sm);
     border: 1px solid var(--border-subtle);
     color: var(--text-muted);
     padding: 0.625rem 1.25rem;
@@ -273,8 +303,9 @@
     position: absolute;
     bottom: 1.875rem;
     left: 1.875rem;
-    background: rgba(239, 68, 68, 0.1);
-    backdrop-filter: blur(10px);
+    background: var(--bg-tertiary);
+    /* backdrop-filter removed for Capacitor WebView performance */
+    box-shadow: var(--shadow-sm);
     border: 1px solid rgba(239, 68, 68, 0.3);
     color: #ef4444;
     padding: 0.625rem 1.25rem;
@@ -345,13 +376,13 @@
     align-items: center;
     gap: var(--space-md);
     padding: var(--space-md) var(--space-lg);
-    background: var(--bg-glass);
-    backdrop-filter: blur(20px);
+    background: var(--bg-secondary);
+    /* backdrop-filter removed for Capacitor WebView performance */
+    box-shadow: var(--shadow-sm);
     border-bottom: 1px solid var(--border-subtle);
 }
 
-.platform-capacitor .chat-header,
-.platform-android .chat-header {
+.platform-capacitor .chat-header{
     background: #202c33;
     /* WhatsApp Header */
     padding: calc(0.5rem + env(safe-area-inset-top, 24px)) 0.75rem 0.5rem 0.75rem;
@@ -360,8 +391,7 @@
     border-bottom: none;
 }
 
-.platform-capacitor .back-btn,
-.platform-android .back-btn {
+.platform-capacitor .back-btn{
     display: flex;
     margin-right: -0.625rem;
     color: var(--text-primary);
@@ -505,6 +535,7 @@
 }
 
 .message-bubble {
+    position: relative;
     padding: var(--space-sm) var(--space-md);
     border-radius: var(--radius-lg);
     max-width: 100%;
@@ -522,14 +553,12 @@
 }
 
 /* WhatsApp Bubble Overrides */
-.platform-capacitor .message.sent .message-bubble,
-.platform-android .message.sent .message-bubble {
+.platform-capacitor .message.sent .message-bubble{
     background: #005c4b;
     border-radius: 10px 0px 10px 10px;
 }
 
-.platform-capacitor .message.received .message-bubble,
-.platform-android .message.received .message-bubble {
+.platform-capacitor .message.received .message-bubble{
     background: #202c33;
     border-radius: 0px 10px 10px 10px;
 }
@@ -596,6 +625,12 @@
     border: 1px solid var(--accent-primary);
     background: var(--bg-tertiary);
     animation: bounceIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.receipt-avatar.delivered {
+    background: transparent;
+    border: 1px solid var(--text-muted);
+    box-shadow: none;
 }
 
 .receipt-avatar img {
@@ -779,55 +814,47 @@
 }
 
 /* Responsive / Mobile WhatsApp Style */
-.platform-capacitor .contact-item,
-.platform-android .contact-item {
+.platform-capacitor .contact-item{
     padding: 0.75rem 1rem;
     border-radius: 0;
     border-bottom: 1px solid #222d34;
 }
 
-.platform-capacitor .contact-item:hover,
-.platform-android .contact-item:hover {
+.platform-capacitor .contact-item:hover{
     background: #202c33;
 }
 
-.platform-capacitor .contact-item.active,
-.platform-android .contact-item.active {
+.platform-capacitor .contact-item.active{
     background: #2a3942;
     border-left: 4px solid var(--accent-primary);
 }
 
-.platform-capacitor .avatar,
-.platform-android .avatar {
+.platform-capacitor .avatar{
     width: 3rem;
     height: 3rem;
     background: #6a7175;
     font-size: 1.2rem;
 }
 
-.platform-capacitor .message-input-form,
-.platform-android .message-input-form {
+.platform-capacitor .message-input-form{
     background: #202c33;
     padding: 0.625rem 0.625rem calc(0.625rem + env(safe-area-inset-bottom, 0px)) 0.625rem;
     border-top: none;
 }
 
-.platform-capacitor .message-input-row,
-.platform-android .message-input-row {
+.platform-capacitor .message-input-row{
     background: #2a3942;
     border-radius: 1.5rem;
     padding-left: 0.625rem;
 }
 
-.platform-capacitor .message-input,
-.platform-android .message-input {
+.platform-capacitor .message-input{
     background: transparent;
     border: none;
     box-shadow: none !important;
 }
 
-.platform-capacitor .send-btn,
-.platform-android .send-btn {
+.platform-capacitor .send-btn{
     border-radius: 50%;
     width: 2.8rem;
     height: 2.8rem;
@@ -845,7 +872,6 @@
         bottom: 0;
         z-index: 10;
         width: 100%;
-        max-width: 280px;
         transform: translateX(-100%);
         transition: transform var(--transition-normal);
     }
@@ -924,8 +950,8 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0, 0, 0, 0.9);
-    backdrop-filter: blur(10px);
+    background: rgba(0, 0, 0, 0.95);
+    /* backdrop-filter removed for Capacitor WebView performance */
     display: flex;
     align-items: center;
     justify-content: center;
@@ -938,7 +964,7 @@
     position: absolute;
     top: 1.25rem;
     right: 1.25rem;
-    background: rgba(255, 255, 255, 0.1);
+    background: rgba(30, 30, 40, 0.95);
     border: 1px solid rgba(255, 255, 255, 0.2);
     color: white;
     font-size: 1.5rem;
@@ -1171,8 +1197,8 @@
     display: flex;
     gap: 0.125rem;
     padding: 0.375rem 0.5rem;
-    background: rgba(30, 30, 40, 0.95);
-    backdrop-filter: blur(16px);
+    background: var(--bg-elevated);
+    /* backdrop-filter removed for Capacitor WebView performance */
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 2rem;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
@@ -1261,8 +1287,7 @@
     border-color: rgba(99, 102, 241, 0.5);
 }
 
-.platform-capacitor .reaction-pill.mine,
-.platform-android .reaction-pill.mine {
+.platform-capacitor .reaction-pill.mine{
     background: rgba(0, 168, 132, 0.25);
     border-color: rgba(0, 168, 132, 0.45);
 }
@@ -1292,8 +1317,8 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(4px);
+    background: rgba(0, 0, 0, 0.8);
+    /* backdrop-filter removed for Capacitor WebView performance */
     display: flex;
     align-items: flex-end;
     justify-content: center;

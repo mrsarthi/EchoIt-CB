@@ -12,10 +12,37 @@ const path = require('path');
 const admin = require('firebase-admin');
 const sqlite3 = require('sqlite3').verbose();
 
+const { argon2id } = require('hash-wasm');
+
 // ===== Registration Challenge Setup =====
 const pendingChallenges = new Map(); // socket.id -> { challenge, timestamp }
 const CHALLENGE_TIMEOUT = 60000; // 60 seconds
-const GRACE_PERIOD_ENABLED = true; // Set to false to force hard-enforcement
+const GRACE_PERIOD_ENABLED = false; // Hard-enforced Sybil resistance
+
+// ===== JWT Security Config =====
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
+const JWT_EXPIRY = '4h'; // Short-lived VIP pass for session continuity
+
+// ===== CORS Lockdown =====
+const ALLOWED_ORIGINS = [
+    'http://localhost:5173',          // Local dev
+    'http://localhost:3000',          // Electron dev
+    'https://decentrachat.onrender.com', // Production web
+    'capacitor://localhost',           // Capacitor Android
+    'http://localhost'                 // Capacitor iOS
+];
+
+const corsOptions = {
+    origin: (origin, callback) => {
+        if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('CORS blocked: Unauthorized origin'));
+        }
+    },
+    methods: ["GET", "POST"],
+    credentials: true
+};
 
 // ===== SQLite Database Setup =====
 const dbPath = path.join(__dirname, 'users.db');
@@ -27,23 +54,44 @@ db.serialize(() => {
         address TEXT PRIMARY KEY,
         username TEXT,
         public_key TEXT,
+        signing_public_key TEXT,
+        signed_pre_key TEXT,
+        signed_pre_key_signature TEXT,
         avatar TEXT,
         status TEXT,
-        registered_at INTEGER
+        registered_at INTEGER,
+        trust_score INTEGER DEFAULT 100,
+        push_token TEXT,
+        os_platform TEXT
     )`);
+
+    // Ensure columns exist for existing databases
+    db.run(`ALTER TABLE users ADD COLUMN trust_score INTEGER DEFAULT 100`, (err) => {});
+    db.run(`ALTER TABLE users ADD COLUMN push_token TEXT`, (err) => {});
+    db.run(`ALTER TABLE users ADD COLUMN os_platform TEXT`, (err) => {});
+    db.run(`ALTER TABLE users ADD COLUMN signing_public_key TEXT`, (err) => {});
+    db.run(`ALTER TABLE users ADD COLUMN signed_pre_key TEXT`, (err) => {});
+    db.run(`ALTER TABLE users ADD COLUMN signed_pre_key_signature TEXT`, (err) => {});
+
     // Create index for fast, case-insensitive username lookups
     db.run(`CREATE INDEX IF NOT EXISTS idx_username ON users (username)`);
 
-    // NEW: Persistent DM history table
-    db.run(`CREATE TABLE IF NOT EXISTS history (
-        id          TEXT PRIMARY KEY,
-        conv_id     TEXT NOT NULL,
-        from_addr   TEXT NOT NULL,
-        to_addr     TEXT NOT NULL,
-        payload     TEXT NOT NULL,
-        timestamp   INTEGER NOT NULL
+    // NEW: Verifications table for Web of Trust tracking
+    db.run(`CREATE TABLE IF NOT EXISTS verifications (
+        verifier TEXT NOT NULL,
+        verified TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        PRIMARY KEY(verifier, verified)
     )`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_history_conv ON history (conv_id, timestamp)`);
+
+    // NEW: Reports table for spam detection and reputation penalties
+    db.run(`CREATE TABLE IF NOT EXISTS reports (
+        reporter TEXT NOT NULL,
+        reported TEXT NOT NULL,
+        reason TEXT,
+        timestamp INTEGER NOT NULL,
+        PRIMARY KEY(reporter, reported)
+    )`);
 
     // --- TASK 6: Server-Side Group Registry Tables ---
     db.run(`CREATE TABLE IF NOT EXISTS groups (
@@ -64,17 +112,6 @@ db.serialize(() => {
     )`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members (user_address)`);
 
-    // --- TASK 11: Unified Group Sync Protocol ---
-    db.run(`CREATE TABLE IF NOT EXISTS group_history (
-        sequence_no INTEGER PRIMARY KEY AUTOINCREMENT,
-        id          TEXT UNIQUE NOT NULL,
-        group_id    TEXT NOT NULL,
-        from_addr   TEXT NOT NULL,
-        payload     TEXT NOT NULL,
-        timestamp   INTEGER NOT NULL
-    )`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_group_history_id ON group_history (group_id, sequence_no)`);
-
     // --- TASK 12: Double Ratchet Pre-Keys ---
     db.run(`CREATE TABLE IF NOT EXISTS pre_keys (
         address     TEXT NOT NULL,
@@ -91,10 +128,8 @@ let fcmReady = false;
 try {
     let serviceAccount;
     if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-        // Support for Render/Production environments via Environment Variable
         serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
     } else {
-        // Local development fallback
         serviceAccount = require('./serviceAccountKey.json');
     }
 
@@ -116,17 +151,23 @@ try {
 // Helper: Send Push Notification
 async function pushOfflineNotification(toAddress, payload, type) {
     if (!fcmReady) return;
-    const user = users.get(toAddress.toLowerCase());
-    if (user && user.pushToken) {
+    
+    db.get(`SELECT push_token FROM users WHERE address = ?`, [toAddress.toLowerCase()], async (err, user) => {
+        if (err || !user || !user.push_token) return;
+
         try {
             let title = 'DecentraChat';
             let body = 'You have a new notification';
 
-            const senderName = users.get(payload.from)?.username || payload.from.slice(0, 6);
+            const senderAddress = payload.from?.toLowerCase();
+            const senderUser = await new Promise(resolve => {
+                db.get(`SELECT username FROM users WHERE address = ?`, [senderAddress], (err, row) => resolve(row));
+            });
+            const senderName = senderUser?.username || payload.from?.slice(0, 6);
 
             if (type === 'dm') {
                 title = `New message from ${senderName}`;
-                body = 'Sent you a message'; // Keep content private in notifications
+                body = 'Sent you a message'; 
             } else if (type === 'group') {
                 title = `New group message`;
                 body = `${senderName} sent a message`;
@@ -139,25 +180,32 @@ async function pushOfflineNotification(toAddress, payload, type) {
             }
 
             await admin.messaging().send({
-                token: user.pushToken,
+                token: user.push_token,
                 notification: { title, body },
-                android: { priority: 'high' }
+                android: { priority: 'high' },
+                data: {
+                    type,
+                    from: payload.from,
+                    groupId: payload.groupId || ''
+                }
             });
             console.log(`[Firebase] Push sent to ${toAddress.slice(0, 8)}`);
         } catch (err) {
             console.error('[Firebase] Failed to send push:', err.message);
+            if (err.code === 'messaging/registration-token-not-registered') {
+                db.run(`UPDATE users SET push_token = NULL WHERE address = ?`, [toAddress.toLowerCase()]);
+            }
         }
-    }
+    });
 }
 
 const app = express();
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // Serve static Auth Page for Mobile Deep Linking
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Root route for health checks and "waking up" the server
 app.get('/', (req, res) => {
     res.json({ 
         status: 'online', 
@@ -166,87 +214,65 @@ app.get('/', (req, res) => {
     });
 });
 
-// --- TASK 7: WebRTC TURN Infrastructure ---
-app.get('/api/turn', async (req, res) => {
-    // If TURN_API_KEY is missing, we fallback to public STUN only
-    if (!process.env.TURN_API_KEY) {
-        return res.json([
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' }
-        ]);
+// --- Rate Limiting ---
+const ipRateLimits = new Map();
+function rateLimitMiddleware(req, res, next) {
+    const ip = req.ip || req.connection.remoteAddress;
+    const now = Date.now();
+    const limit = ipRateLimits.get(ip) || { count: 0, resetAt: now + 60000 };
+    if (now > limit.resetAt) {
+        limit.count = 1;
+        limit.resetAt = now + 60000;
+    } else {
+        limit.count++;
     }
-
-    try {
-        // Fetch ephemeral credentials from Metered.ca (or your provider of choice)
-        // Note: Using global fetch (Node 18+)
-        const response = await fetch(`https://decentrachat.metered.ca/api/v1/turn/credentials?apiKey=${process.env.TURN_API_KEY}`);
-        const iceServers = await response.json();
-        
-        console.log('[📡] Dispatched ephemeral TURN credentials');
-        res.json(iceServers);
-    } catch (err) {
-        console.error('[📡] Failed to fetch TURN credentials:', err.message);
-        // Fallback to STUN if provider is down
-        res.json([
-            { urls: 'stun:stun.l.google.com:19302' }
-        ]);
-    }
-});
+    ipRateLimits.set(ip, limit);
+    if (limit.count > 10) return res.status(429).json({ error: 'Too many requests' });
+    next();
+}
 
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: {
-        origin: true, // Dynamically allow the origin
-        methods: ["GET", "POST"],
-        credentials: true,
-        allowedHeaders: ["*"]
-    },
-    allowEIO3: true // Support older clients if necessary
+    cors: corsOptions,
+    allowEIO3: true 
 });
 
-// In-memory stores (use Redis/SQLite for production persistence)
-const users = new Map(); // address -> { socketId, publicKey, online, username }
-const fs = require('fs');
-
-const usernames = new Map(); // username -> address (for lookup)
-
-
-
-// ===== User Metadata Persistence (registeredAt) =====
-const USERS_META_PATH = path.join(__dirname, 'users_meta.json');
-let usersMeta = new Map(); // address -> { registeredAt }
-
-try {
-    if (fs.existsSync(USERS_META_PATH)) {
-        const data = fs.readFileSync(USERS_META_PATH, 'utf8');
-        const parsed = JSON.parse(data);
-        for (const address in parsed) {
-            usersMeta.set(address, parsed[address]);
+// --- Socket Authentication Middleware ---
+io.use((socket, next) => {
+    const token = socket.handshake.auth?.token;
+    if (token) {
+        try {
+            const decoded = jwt.verify(token, JWT_SECRET);
+            socket.address = decoded.address.toLowerCase();
+            return next();
+        } catch (err) {
+            // Token expired or invalid
         }
-        console.log(`[🆔] Loaded user metadata for ${Object.keys(parsed).length} users from disk.`);
     }
-} catch (err) {
-    console.error('[🆔] Error loading users_meta.json:', err);
+    next();
+});
+
+const preKeyCounters = new Map();
+
+// Helper: Require authentication for socket events
+function requireAuth(socket, callback) {
+    if (!socket.address) {
+        if (callback) callback({ error: 'Authentication required' });
+        return false;
+    }
+    return true;
 }
 
-let metaSaveTimeout = null;
-function saveUsersMeta() {
-    if (metaSaveTimeout) clearTimeout(metaSaveTimeout);
-    metaSaveTimeout = setTimeout(() => {
-        const obj = {};
-        for (const [address, meta] of usersMeta.entries()) {
-            obj[address] = meta;
-        }
-        fs.writeFile(USERS_META_PATH, JSON.stringify(obj), 'utf8', (err) => {
-            if (err) console.error('[🆔] Error saving users_meta.json:', err);
-        });
-    }, 500);
-}
+app.get('/api/turn', (req, res) => {
+    res.status(401).json({ error: 'Endpoint moved to socket event "fetchTurnCredentials"' });
+});
 
-// Offline Messages setup with File Persistence
+const users = new Map(); 
+const fs = require('fs');
+const usernames = new Map(); 
+
 const OFFLINE_DB_PATH = path.join(__dirname, 'offline_messages.json');
-let offlineMessages = new Map(); // address -> [messages]
+let offlineMessages = new Map(); 
 
 try {
     if (fs.existsSync(OFFLINE_DB_PATH)) {
@@ -274,114 +300,117 @@ function saveOfflineMessagesDb() {
         fs.writeFile(OFFLINE_DB_PATH, JSON.stringify(obj), 'utf8', (err) => {
             if (err) console.error('[📦] Error saving offline_messages.json:', err);
         });
-    }, 500); // Debounce saves by 500ms
+    }, 500); 
 }
-const peerConnections = new Map(); // peerId -> { from, to }
-const authResults = new Map(); // sessionId -> { address, signature, timestamp }
 
-// Cleanup expired auth results periodically (every hour)
+const authResults = new Map(); 
+
 setInterval(() => {
     const now = Date.now();
     for (const [sid, result] of authResults.entries()) {
-        if (now - result.timestamp > 1000 * 60 * 10) { // 10 minute expiry
+        if (now - result.timestamp > 1000 * 60 * 10) { 
             authResults.delete(sid);
         }
     }
 }, 1000 * 60 * 60);
 
-// Helper: Get conversation ID (consistent ordering)
-function getConversationId(addr1, addr2) {
-    const sorted = [addr1.toLowerCase(), addr2.toLowerCase()].sort();
-    return `${sorted[0]}_${sorted[1]}`;
+function getTrustStage(registeredAt, trustScore) {
+    const ageDays = (Date.now() - registeredAt) / (1000 * 60 * 60 * 24);
+    if (ageDays >= 30 && (trustScore || 0) > 150) return 3; 
+    if (ageDays >= 7 && (trustScore || 0) >= 110) return 2;  
+    return 1; 
 }
 
-// Helper: Store message in history (DMs only — group messages are handled separately)
-function storeMessage(msg) {
-    if (msg.groupId) return; // Group messages skip history
-
-    const convId = getConversationId(msg.from, msg.to);
-    const payload = JSON.stringify(msg);
-
-    db.run(
-        `INSERT OR IGNORE INTO history (id, conv_id, from_addr, to_addr, payload, timestamp)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [msg.id, convId, msg.from.toLowerCase(), msg.to.toLowerCase(), payload, msg.timestamp || Date.now()],
-        (err) => { if (err) console.error('[📜] Failed to store history:', err.message); }
-    );
-
-    // Enforce the 100-message cap per conversation by pruning old entries
-    db.run(
-        `DELETE FROM history WHERE conv_id = ? AND id NOT IN (
-            SELECT id FROM history WHERE conv_id = ? ORDER BY timestamp DESC LIMIT 100
-        )`,
-        [convId, convId]
-    );
+function incrementTrustScore(address, points) {
+    db.run(`UPDATE users SET trust_score = COALESCE(trust_score, 0) + ? WHERE address = ?`, [points, address.toLowerCase()]);
 }
 
-// Health check endpoint
-app.get('/', (req, res) => {
-    db.get(`SELECT COUNT(*) as count FROM history`, [], (err, row) => {
-        res.json({
-            status: 'ok',
-            service: 'DecentraChat Signaling Server',
-            users: users.size,
-            conversations: row?.count || 0,
-            pendingMessages: [...offlineMessages.values()].flat().length
-        });
+// --- V3 Staged Privileges & Rate Limiting ---
+const messageCounters = new Map(); // address -> { count, resetAt }
+const groupCreationCounters = new Map(); // address -> { count, resetAt }
+
+async function checkPrivileges(address, action) {
+    const user = await new Promise(resolve => {
+        db.get(`SELECT * FROM users WHERE address = ?`, [address.toLowerCase()], (err, row) => resolve(row));
     });
-});
+    if (!user) return { allowed: false, error: 'User not found' };
 
-// Authentication Callback from Web (used for Mobile Deep-link bypass)
-app.post('/api/auth/callback', (req, res) => {
+    const stage = getTrustStage(user.registered_at, user.trust_score);
+    const now = Date.now();
+
+    if (action === 'sendMessage') {
+        if (stage >= 2) return { allowed: true }; // Stage 2+ unlimited
+        
+        const limit = messageCounters.get(address) || { count: 0, resetAt: now + 60000 };
+        if (now > limit.resetAt) {
+            limit.count = 1;
+            limit.resetAt = now + 60000;
+        } else {
+            limit.count++;
+        }
+        messageCounters.set(address, limit);
+
+        if (limit.count > 10) {
+            return { allowed: false, error: 'Rate limit exceeded for Stage 1. Verify a contact to unlock higher limits.' };
+        }
+    }
+
+    if (action === 'createGroup') {
+        if (stage >= 3) return { allowed: true }; // Stage 3 unlimited
+        
+        const limit = groupCreationCounters.get(address) || { count: 0, resetAt: now + (24 * 60 * 60 * 1000) };
+        if (now > limit.resetAt) {
+            limit.count = 1;
+            limit.resetAt = now + (24 * 60 * 60 * 1000);
+        } else {
+            limit.count++;
+        }
+        groupCreationCounters.set(address, limit);
+
+        const maxGroups = stage === 2 ? 5 : 1;
+        if (limit.count > maxGroups) {
+            return { allowed: false, error: `Daily group limit reached for Stage ${stage}.` };
+        }
+    }
+
+    return { allowed: true };
+}
+
+app.post('/api/auth/callback', rateLimitMiddleware, (req, res) => {
     const { sessionId, address, signature } = req.body;
     if (!sessionId || !address || !signature) {
         return res.status(400).json({ error: 'Missing parameters' });
     }
 
-    // 🛡️ TASK 4: Verify the signature matches the address BEFORE relaying it
     try {
         const expectedMessage = `Authorize DecentraChat Auth: ${sessionId}`;
         const recovered = ethers.verifyMessage(expectedMessage, signature);
         if (recovered.toLowerCase() !== address.toLowerCase()) {
-            console.warn(`[⚠️] Auth Relay REJECTED: Address mismatch for session ${sessionId}`);
             return res.status(403).json({ error: 'Signature does not match address' });
         }
     } catch (err) {
-        console.error(`[❌] Auth Relay ERROR: Invalid signature:`, err.message);
         return res.status(400).json({ error: 'Invalid signature format' });
     }
 
-    console.log(`[🔐] Auth Callback verified for session: ${sessionId}`);
-
-    // Buffer the result so it survives app re-connections
     authResults.set(sessionId, { address, signature, timestamp: Date.now() });
-
-    // Also broadcast to any currently active listeners
     io.to(`auth_${sessionId}`).emit('wallet_auth_result', { address, signature });
-
-    const clients = io.sockets.adapter.rooms.get(`auth_${sessionId}`);
-    console.log(`[📡] Relayed to session ${sessionId}. Clients currently in room: ${clients ? clients.size : 0}`);
-
     res.json({ success: true });
 });
 
 io.on('connection', (socket) => {
-    console.log(`[+] Client connected: ${socket.id}`);
+    // Re-join room if authenticated via token
+    if (socket.address) {
+        socket.join(socket.address);
+    }
 
-    // For off-band wallet auth relay
     socket.on('join_auth_room', ({ sessionId }) => {
         socket.join(`auth_${sessionId}`);
-        console.log(`[+] Socket ${socket.id} joining auth room: ${sessionId}`);
-
-        // If we already have a buffered result, deliver it immediately!
         const bufferedResult = authResults.get(sessionId);
         if (bufferedResult) {
-            console.log(`[✅] Delivering buffered auth result for session: ${sessionId}`);
             socket.emit('wallet_auth_result', {
                 address: bufferedResult.address,
                 signature: bufferedResult.signature
             });
-            // Optional: delete after delivery, but keeping it for 10 mins is safer if multiple retries happen
         }
     });
 
@@ -389,62 +418,77 @@ io.on('connection', (socket) => {
         socket.leave(`auth_${sessionId}`);
     });
 
-    // --- TASK 1: Registration Lock Implementation ---
     socket.on('requestChallenge', (callback) => {
         const challenge = crypto.randomBytes(32).toString('hex');
         pendingChallenges.set(socket.id, { challenge, timestamp: Date.now() });
-
-        // Auto-cleanup after timeout
         setTimeout(() => {
             if (pendingChallenges.has(socket.id)) {
                 pendingChallenges.delete(socket.id);
             }
         }, CHALLENGE_TIMEOUT);
-
         callback(challenge);
-        console.log(`[🔐] Challenge generated for socket: ${socket.id.slice(0, 8)}`);
     });
 
-    socket.on('register', async ({ address, publicKey, username, avatar, status, registeredAt, challenge, signature }) => {
+    socket.on('register', async ({ address, publicKey, signingPublicKey, signedPreKey, signedPreKeySignature, username, avatar, status, registeredAt, challenge, signature, proofOfWork, pushToken, osPlatform }) => {
         const normalizedAddress = address.toLowerCase();
 
-        // 1. Verify Cryptographic Signature (Registration Lock)
-        const pending = pendingChallenges.get(socket.id);
-
-        if (challenge && signature) {
-            // Case A: Client provided challenge + signature (Modern Flow)
-            if (!pending || pending.challenge !== challenge) {
-                console.warn(`[❌] Registration REJECTED for ${normalizedAddress.slice(0, 8)}: Invalid or expired challenge.`);
-                return socket.emit('registrationError', { error: 'Invalid or expired challenge. Please try again.' });
-            }
-
-            try {
-                const expectedMessage = `Authorize DecentraChat Registration: ${challenge}`;
-                const recoveredAddress = ethers.verifyMessage(expectedMessage, signature);
-
-                if (recoveredAddress.toLowerCase() !== normalizedAddress) {
-                    console.error(`[❌] Registration REJECTED: Address mismatch. Claimed: ${normalizedAddress}, Recovered: ${recoveredAddress.toLowerCase()}`);
-                    return socket.emit('registrationError', { error: 'Cryptographic verification failed: Address mismatch.' });
-                }
-
-                console.log(`[🛡️] Cryptographic verification PASSED for ${normalizedAddress.slice(0, 8)}`);
-                pendingChallenges.delete(socket.id); // Success! Consume the challenge.
-            } catch (err) {
-                console.error(`[❌] Registration REJECTED: Recovery error:`, err.message);
-                return socket.emit('registrationError', { error: 'Cryptographic verification failed: Recovery error.' });
-            }
-        } else if (GRACE_PERIOD_ENABLED) {
-            // Case B: Client did NOT provide signature (Legacy Flow - Grace Period)
-            console.warn(`[⚠️] Legacy registration for ${normalizedAddress.slice(0, 8)}: No signature provided. ALLOWED (Grace Period).`);
-        } else {
-            // Case C: Client did NOT provide signature (Hard Enforcement)
-            console.error(`[❌] Registration REJECTED: Missing signature (Hard Enforcement).`);
-            return socket.emit('registrationError', { error: 'Signature required for registration.' });
+        if (!challenge || !signature || !proofOfWork) {
+            return socket.emit('registrationError', { error: 'Missing challenge, signature, or security proof.' });
         }
 
-        // --- Proceed with standard registration logic ---
+        // 1. Verify PoW (Sybil Resistance)
+        try {
+            const salt = normalizedAddress.slice(0, 16);
+            const computedHashHex = await argon2id({
+                password: challenge,
+                salt: salt,
+                iterations: 2,
+                memory: 16384,
+                parallelism: 1,
+                hashLength: 32,
+                outputType: 'hex',
+            });
+            
+            const proofOfWorkBuffer = Buffer.from(proofOfWork, 'base64');
+            const proofOfWorkHex = proofOfWorkBuffer.toString('hex');
 
-        // 2. Get existing info (prefer existing DB data)
+            if (computedHashHex !== proofOfWorkHex) {
+                console.warn(`🛡️ Sybil Alert: Invalid PoW from ${normalizedAddress.slice(0, 10)}`);
+                return socket.emit('registrationError', { error: 'Invalid security proof. Bot detected.' });
+            }
+        } catch (err) {
+            console.error('PoW Validation Error:', err.message);
+            if (!GRACE_PERIOD_ENABLED) {
+                return socket.emit('registrationError', { error: 'Security verification failed.' });
+            }
+        }
+
+        if (!pendingChallenges.has(socket.id) || pendingChallenges.get(socket.id).challenge !== challenge) {
+            return socket.emit('registrationError', { error: 'Invalid or expired challenge. Please try again.' });
+        }
+        pendingChallenges.delete(socket.id); 
+
+        try {
+            const expectedMessage = `Authorize DecentraChat Registration: ${challenge}`;
+            const recoveredAddress = ethers.verifyMessage(expectedMessage, signature);
+            if (recoveredAddress.toLowerCase() !== normalizedAddress) {
+                return socket.emit('registrationError', { error: 'Signature mismatch' });
+            }
+        } catch (err) {
+            return socket.emit('registrationError', { error: 'Invalid signature format' });
+        }
+
+        if (username) {
+            const normalizedUsername = username.toLowerCase().trim().replace('@', '');
+            const existingOwner = await new Promise(resolve => {
+                db.get(`SELECT address FROM users WHERE LOWER(username) = ?`, [normalizedUsername], (err, row) => resolve(row?.address));
+            });
+
+            if (existingOwner && existingOwner.toLowerCase() !== normalizedAddress) {
+                return socket.emit('registrationError', { error: 'Username already taken by another address.' });
+            }
+        }
+
         const dbUser = await new Promise(resolve => {
             db.get(`SELECT * FROM users WHERE address = ?`, [normalizedAddress], (err, row) => resolve(row));
         });
@@ -453,25 +497,32 @@ io.on('connection', (socket) => {
         const finalAvatar = avatar !== undefined ? avatar : dbUser?.avatar;
         const finalStatus = status !== undefined ? status : dbUser?.status;
         const finalRegisteredAt = dbUser?.registered_at || (registeredAt || Date.now());
+        const finalPushToken = pushToken || dbUser?.push_token;
+        const finalOsPlatform = osPlatform || dbUser?.os_platform;
+        const trustScore = dbUser?.trust_score !== undefined ? dbUser.trust_score : 100;
 
-        // 2. Persist to SQLite
-        db.run(`INSERT OR REPLACE INTO users (address, username, public_key, avatar, status, registered_at) 
-                VALUES (?, ?, ?, ?, ?, ?)`, 
-                [normalizedAddress, finalUsername, publicKey, finalAvatar, finalStatus, finalRegisteredAt]);
-
-        // Store user info in memory for presence
+        db.run(`INSERT OR REPLACE INTO users (address, username, public_key, signing_public_key, signed_pre_key, signed_pre_key_signature, avatar, status, registered_at, trust_score, push_token, os_platform)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [normalizedAddress, finalUsername, publicKey, signingPublicKey, signedPreKey, signedPreKeySignature, finalAvatar, finalStatus, finalRegisteredAt, trustScore, finalPushToken, finalOsPlatform]);
+        
+        // Generate JWT session token
+        const token = jwt.sign({ address: normalizedAddress }, JWT_SECRET, { expiresIn: JWT_EXPIRY });
+        
         users.set(normalizedAddress, {
             socketId: socket.id,
             publicKey,
+            signingPublicKey,
             online: true,
             lastSeen: Date.now(),
             username: finalUsername,
             avatar: finalAvatar,
             status: finalStatus,
-            registeredAt: finalRegisteredAt
+            registeredAt: finalRegisteredAt,
+            trustScore: trustScore,
+            pushToken: finalPushToken,
+            osPlatform: finalOsPlatform
         });
 
-        // Also add to usernames lookup map if username exists
         if (finalUsername) {
             usernames.set(finalUsername.toLowerCase(), normalizedAddress);
         }
@@ -479,79 +530,62 @@ io.on('connection', (socket) => {
         socket.address = normalizedAddress;
         socket.join(normalizedAddress);
 
-        console.log(`[✓] Registered: ${normalizedAddress.slice(0, 10)}...${finalUsername ? ` (@${finalUsername})` : ''}`);
-
-        // Notify sender about successful registration FIRST
         socket.emit('registered', {
             address: normalizedAddress,
             publicKey,
+            signingPublicKey,
             username: finalUsername,
-            registeredAt: finalRegisteredAt
+            registeredAt: finalRegisteredAt,
+            trustScore: trustScore,
+            trustStage: getTrustStage(finalRegisteredAt, trustScore),
+            token // Send token to client for subsequent authentication
         });
 
-        // Broadcast online status to everyone else
         socket.broadcast.emit('userStatus', {
             address: normalizedAddress,
             online: true,
             lastSeen: Date.now(),
             avatar: finalAvatar,
-            status: finalStatus
+            status: finalStatus,
+            registeredAt: finalRegisteredAt,
+            trustScore: trustScore,
+            trustStage: getTrustStage(finalRegisteredAt, trustScore),
+            signingPublicKey
         });
     });
 
     socket.on('fetchOfflineMessages', () => {
-        if (!socket.address) return;
+        if (!requireAuth(socket)) return;
         const pending = offlineMessages.get(socket.address) || [];
         if (pending.length > 0) {
-            console.log(`[→] Delivering ${pending.length} offline messages to ${socket.address.slice(0, 10)}...`);
             pending.forEach(msg => {
-                if (msg._isReaction) {
-                    socket.emit('messageReaction', msg);
-                } else if (msg._isGroupCreated) {
-                    socket.emit('groupCreated', msg);
-                } else if (msg._isGroupDeleted) {
-                    socket.emit('groupDeleted', msg);
-                } else if (msg._isGroupAvatarUpdate) {
-                    socket.emit('groupAvatarUpdated', msg);
-                } else if (msg._isGroupMessage) {
-                    socket.emit('groupMessage', msg);
-                } else {
-                    socket.emit('message', msg);
-                }
+                if (msg._isReaction) socket.emit('messageReaction', msg);
+                else if (msg._isGroupCreated) socket.emit('groupCreated', msg);
+                else if (msg._isGroupDeleted) socket.emit('groupDeleted', msg);
+                else if (msg._isGroupAvatarUpdate) socket.emit('groupAvatarUpdated', msg);
+                else if (msg._isGroupMessage) socket.emit('groupMessage', msg);
+                else socket.emit('message', msg);
             });
-            // DO NOT DELETE here. Wait for ACK from client.
         }
     });
 
     socket.on('ackOfflineMessages', ({ messageIds }) => {
-        if (!socket.address || !Array.isArray(messageIds) || messageIds.length === 0) return;
-
+        if (!requireAuth(socket) || !Array.isArray(messageIds) || messageIds.length === 0) return;
         const pending = offlineMessages.get(socket.address) || [];
-        const originalLength = pending.length;
-
-        // Filter out the messages that the client successfully acknowledged
         const remaining = pending.filter(msg => !messageIds.includes(msg.id || msg.messageId));
-
-        if (remaining.length === 0) {
-            offlineMessages.delete(socket.address);
-        } else {
-            offlineMessages.set(socket.address, remaining);
-        }
-
+        if (remaining.length === 0) offlineMessages.delete(socket.address);
+        else offlineMessages.set(socket.address, remaining);
         saveOfflineMessagesDb();
-        console.log(`[✔️] Client ${socket.address.slice(0, 6)} ACKed ${originalLength - remaining.length} messages. ${remaining.length} remaining.`);
     });
 
     socket.on('updateProfile', ({ avatar, status }) => {
-        if (!socket.address) return;
+        if (!requireAuth(socket)) return;
         const address = socket.address;
         const user = users.get(address);
         if (user) {
             if (avatar !== undefined) user.avatar = avatar;
             if (status !== undefined) user.status = status;
             users.set(address, user);
-
-            // Broadcast the profile update to everyone
             socket.broadcast.emit('userStatus', {
                 address: address,
                 online: true,
@@ -563,25 +597,86 @@ io.on('connection', (socket) => {
     });
 
     socket.on('updatePushToken', ({ token }) => {
-        if (!socket.address) return;
+        if (!requireAuth(socket)) return;
         const user = users.get(socket.address);
         if (user) {
             user.pushToken = token;
             users.set(socket.address, user);
-            console.log(`📱 Push token updated for ${socket.address.slice(0, 8)}: ${token.slice(0, 10)}...`);
         }
     });
 
-    // Set username for a user
-    socket.on('setUsername', async ({ username }, callback) => {
-        if (!socket.address) {
-            callback({ success: false, error: 'Not registered' });
+    socket.on('verifyContact', async ({ address }, callback) => {
+        if (!requireAuth(socket, callback)) return;
+        const verifier = socket.address.toLowerCase();
+        const verified = address.toLowerCase();
+
+        const verifierUser = await new Promise(resolve => {
+            db.get(`SELECT * FROM users WHERE address = ?`, [verifier], (err, row) => resolve(row));
+        });
+        const verifierStage = verifierUser ? getTrustStage(verifierUser.registered_at, verifierUser.trust_score) : 1;
+
+        if (verifierStage === 1) {
+            if (callback) callback({ success: false, error: 'Stage 1 users cannot grant verification points.' });
             return;
         }
 
-        const normalizedUsername = username.toLowerCase().trim();
+        const alreadyVerified = await new Promise(resolve => {
+            db.get(`SELECT * FROM verifications WHERE verifier = ? AND verified = ?`, [verifier, verified], (err, row) => resolve(row));
+        });
 
-        // Validate username
+        if (alreadyVerified) {
+            if (callback) callback({ success: false, error: 'Already verified this contact.' });
+            return;
+        }
+
+        const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+        const recentCount = await new Promise(resolve => {
+            db.get(`SELECT COUNT(*) as count FROM verifications WHERE verifier = ? AND timestamp > ?`, [verifier, oneDayAgo], (err, row) => resolve(row ? row.count : 0));
+        });
+
+        if (recentCount >= 1) {
+            if (callback) callback({ success: false, error: 'You can only verify one new contact per day.' });
+            return;
+        }
+
+        const points = 10;
+        db.run(`INSERT INTO verifications (verifier, verified, timestamp) VALUES (?, ?, ?)`, [verifier, verified, Date.now()]);
+        incrementTrustScore(verified, points);
+        if (callback) callback({ success: true, pointsAwarded: points });
+    });
+
+    socket.on('reportSpam', async ({ address, reason }, callback) => {
+        if (!requireAuth(socket, callback)) return;
+        const reporter = socket.address.toLowerCase();
+        const reported = address.toLowerCase();
+
+        if (reporter === reported) {
+            if (callback) callback({ success: false, error: 'You cannot report yourself.' });
+            return;
+        }
+
+        const alreadyReported = await new Promise(resolve => {
+            db.get(`SELECT * FROM reports WHERE reporter = ? AND reported = ?`, [reporter, reported], (err, row) => resolve(row));
+        });
+
+        if (alreadyReported) {
+            if (callback) callback({ success: false, error: 'You have already reported this user.' });
+            return;
+        }
+
+        const penalty = -50;
+        db.run(`INSERT INTO reports (reporter, reported, reason, timestamp) VALUES (?, ?, ?, ?)`, [reporter, reported, reason || 'spam', Date.now()]);
+        incrementTrustScore(reported, penalty);
+        
+        console.log(`🛡️ Spam Report: ${reporter.slice(0, 10)} reported ${reported.slice(0, 10)}. Penalty applied: ${penalty}`);
+        
+        if (callback) callback({ success: true, penaltyApplied: penalty });
+    });
+
+    socket.on('setUsername', async ({ username }, callback) => {
+        if (!requireAuth(socket, callback)) return;
+
+        const normalizedUsername = username.toLowerCase().trim();
         if (normalizedUsername.length < 3 || normalizedUsername.length > 20) {
             callback({ success: false, error: 'Username must be 3-20 characters' });
             return;
@@ -592,7 +687,6 @@ io.on('connection', (socket) => {
         }
 
         try {
-            // 1. Verify database-level uniqueness (critical for accuracy across server reboots)
             const existingOwner = await new Promise((resolve, reject) => {
                 db.get(`SELECT address FROM users WHERE LOWER(username) = ?`, [normalizedUsername], (err, row) => {
                     if (err) return reject(err);
@@ -605,7 +699,6 @@ io.on('connection', (socket) => {
                 return;
             }
 
-            // 2. Persist new username setting directly to SQLite source-of-truth
             await new Promise((resolve, reject) => {
                 db.run(`UPDATE users SET username = ? WHERE address = ?`, [username, socket.address], (err) => {
                     if (err) return reject(err);
@@ -613,86 +706,62 @@ io.on('connection', (socket) => {
                 });
             });
 
-            // 3. Remove old mappings in-memory if necessary
             const user = users.get(socket.address);
-            if (user?.username) {
-                usernames.delete(user.username.toLowerCase());
-            }
-
-            // 4. Commit to memory stores for quick presence lookups
+            if (user?.username) usernames.delete(user.username.toLowerCase());
             usernames.set(normalizedUsername, socket.address);
             if (user) {
                 user.username = username;
                 users.set(socket.address, user);
             }
-
-            console.log(`[@] Username persisted & set: ${socket.address.slice(0, 10)}... -> @${username}`);
             callback({ success: true, username });
-
         } catch (err) {
-            console.error('[@] Failed to save username to DB:', err.message);
             callback({ success: false, error: 'Internal server error' });
         }
     });
 
-    // Lookup user by username
     socket.on('lookupByUsername', ({ username }, callback) => {
         const normalizedUsername = username.toLowerCase().trim().replace('@', '');
         
-        // 1. Quick Check: check memory first (online users)
-        const address = usernames.get(normalizedUsername);
-        if (address) {
-            const user = users.get(address);
-            callback({
-                address,
-                username: user?.username,
-                publicKey: user?.publicKey,
-                online: user?.online || false
-            });
-            return;
-        }
-
-        // 2. Database Fallback: Check SQLite (for offline user discovery)
-        db.get(`SELECT * FROM users WHERE LOWER(username) = ?`, [normalizedUsername], (err, row) => {
+        db.get(`SELECT * FROM users WHERE LOWER(username) LIKE ?`, [`%${normalizedUsername}%`], (err, row) => {
             if (err || !row) {
                 callback(null);
                 return;
             }
+            const onlineUser = users.get(row.address.toLowerCase());
             callback({
                 address: row.address,
                 username: row.username,
                 publicKey: row.public_key,
-                online: false // Offline if not in-memory Map
+                signingPublicKey: row.signing_public_key,
+                signedPreKey: row.signed_pre_key,
+                signedPreKeySignature: row.signed_pre_key_signature,
+                avatar: row.avatar,
+                status: row.status,
+                online: onlineUser?.online || false,
+                registeredAt: row.registered_at,
+                trustScore: row.trust_score,
+                trustStage: getTrustStage(row.registered_at, row.trust_score)
             });
         });
     });
 
-    // Get user's public key
     socket.on('getPublicKey', ({ address }, callback) => {
-        const user = users.get(address.toLowerCase());
-        callback(user ? { publicKey: user.publicKey, online: user.online } : null);
+        const normalizedAddress = address.toLowerCase();
+        db.get(`SELECT public_key, signing_public_key, signed_pre_key, signed_pre_key_signature FROM users WHERE address = ?`, [normalizedAddress], (err, row) => {
+            if (err || !row) return callback(null);
+            const onlineUser = users.get(normalizedAddress);
+            callback({ 
+                publicKey: row.public_key, 
+                signingPublicKey: row.signing_public_key,
+                signedPreKey: row.signed_pre_key,
+                signedPreKeySignature: row.signed_pre_key_signature,
+                online: onlineUser?.online || false 
+            });
+        });
     });
 
-    // --- TASK 9: Media Relay Authorization ---
-    socket.on('getUploadToken', (callback) => {
-        if (!socket.address) return callback({ error: 'Not registered' });
-
-        const secret = process.env.MEDIA_RELAY_SECRET || 'decentrachat-media-relay-secret-default-change-me';
-        const token = jwt.sign({
-            address: socket.address,
-            exp: Math.floor(Date.now() / 1000) + (60 * 5) // 5 minute expiry
-        }, secret);
-
-        console.log(`[🖼️] Upload token generated for ${socket.address.slice(0, 8)}`);
-        callback({ token });
-    });
-
-
-
-    // --- TASK 12: Double Ratchet Pre-Keys ---
     socket.on('uploadPreKeys', ({ preKeys }) => {
-        if (!socket.address || !Array.isArray(preKeys)) return;
-
+        if (!requireAuth(socket) || !Array.isArray(preKeys)) return;
         db.serialize(() => {
             preKeys.forEach(pk => {
                 db.run(
@@ -701,27 +770,29 @@ io.on('connection', (socket) => {
                 );
             });
         });
-        console.log(`[🔐] ${preKeys.length} pre-keys uploaded for ${socket.address.slice(0, 8)}`);
     });
 
     socket.on('fetchPreKey', ({ address }, callback) => {
+        if (!requireAuth(socket, callback)) return;
         if (!address) return callback(null);
-        const targetAddr = address.toLowerCase();
+        
+        const now = Date.now();
+        const limit = preKeyCounters.get(socket.address) || { count: 0, resetAt: now + 60000 };
+        if (now > limit.resetAt) { limit.count = 1; limit.resetAt = now + 60000; }
+        else { limit.count++; }
+        preKeyCounters.set(socket.address, limit);
+        
+        if (limit.count > 30) {
+            return callback({ error: 'Rate limit exceeded' });
+        }
 
-        // Get one random pre-key and DELETE it (consume)
+        const targetAddr = address.toLowerCase();
         db.get(
             `SELECT key_id, public_key, signature FROM pre_keys WHERE address = ? ORDER BY RANDOM() LIMIT 1`,
             [targetAddr],
             (err, row) => {
-                if (err || !row) {
-                    console.log(`[🔐] No pre-keys available for ${targetAddr.slice(0, 8)}`);
-                    return callback(null);
-                }
-
-                // Delete the key so it's one-time use
+                if (err || !row) return callback(null);
                 db.run(`DELETE FROM pre_keys WHERE address = ? AND key_id = ?`, [targetAddr, row.key_id]);
-                
-                console.log(`[🔐] Pre-key fetched and consumed for ${targetAddr.slice(0, 8)}`);
                 callback({
                     keyId: row.key_id,
                     publicKey: row.public_key,
@@ -731,11 +802,10 @@ io.on('connection', (socket) => {
         );
     });
 
-    // WebRTC Signaling: Offer
     socket.on('signal', ({ to, signal }) => {
+        if (!requireAuth(socket)) return;
         const toAddress = to.toLowerCase();
         const recipient = users.get(toAddress);
-
         if (recipient && recipient.online) {
             io.to(recipient.socketId).emit('signal', {
                 from: socket.address,
@@ -744,52 +814,25 @@ io.on('connection', (socket) => {
         }
     });
 
-    // --- TASK 11: Unified Group Sync Protocol ---
-    socket.on('getGroupHistory', ({ groupId, lastSequenceNo }, callback) => {
-        if (!socket.address || !groupId) return callback([]);
-
-        // Verify membership before returning history (Task 6 Registry check)
-        db.get(
-            `SELECT 1 FROM group_members WHERE group_id = ? AND user_address = ?`,
-            [groupId, socket.address.toLowerCase()],
-            (err, row) => {
-                if (!row) {
-                    console.warn(`[🛡️] History REJECTED for ${socket.address.slice(0, 8)}: Not a member of ${groupId.slice(0, 8)}`);
-                    return callback([]);
-                }
-
-                db.all(
-                    `SELECT payload, sequence_no FROM group_history 
-                     WHERE group_id = ? AND sequence_no > ? 
-                     ORDER BY sequence_no ASC LIMIT 50`,
-                    [groupId, lastSequenceNo || 0],
-                    (err, rows) => {
-                        if (err) {
-                            console.error('[📜] Failed to retrieve group history:', err.message);
-                            return callback([]);
-                        }
-                        
-                        const messages = rows.map(r => {
-                            try { 
-                                const msg = JSON.parse(r.payload);
-                                msg.sequence_no = r.sequence_no; // Attach seq for client tracking
-                                return msg;
-                            } catch { return null; }
-                        }).filter(Boolean);
-
-                        console.log(`[📜] Synced ${messages.length} group messages for ${groupId.slice(0, 8)}`);
-                        callback(messages);
-                    }
-                );
-            }
-        );
+    socket.on('getHistory', ({ peerAddress }, callback) => {
+        if (!requireAuth(socket, callback) || typeof callback !== 'function') return;
+        callback([]); 
     });
 
-    // Send encrypted message
-    socket.on('sendMessage', (messageData) => {
+    socket.on('getGroupHistory', ({ groupId, lastSequenceNo }, callback) => {
+        if (!requireAuth(socket, callback) || typeof callback !== 'function') return;
+        callback([]);
+    });
+
+    socket.on('sendMessage', async (messageData) => {
         const { to, ...rest } = messageData;
         const toAddress = to.toLowerCase();
-        const recipient = users.get(toAddress);
+        if (!requireAuth(socket)) return;
+
+        const { allowed, error } = await checkPrivileges(socket.address, 'sendMessage');
+        if (!allowed) {
+            return socket.emit('error', { message: error });
+        }
 
         const fullMessage = {
             ...rest,
@@ -799,33 +842,24 @@ io.on('connection', (socket) => {
             id: rest.id || `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
         };
 
-        // Store in history (always, for both parties to fetch later)
-        storeMessage(fullMessage);
-
+        const recipient = users.get(toAddress);
         if (recipient && recipient.online) {
-            // Deliver immediately
             io.to(recipient.socketId).emit('message', fullMessage);
             socket.emit('messageStatus', { id: fullMessage.id, status: 'delivered' });
-            console.log(`[→] Message delivered: ${socket.address?.slice(0, 6)} → ${toAddress.slice(0, 6)}`);
         } else {
-            // Store for offline delivery
             const pending = offlineMessages.get(toAddress) || [];
             pending.push(fullMessage);
             offlineMessages.set(toAddress, pending);
             saveOfflineMessagesDb();
             socket.emit('messageStatus', { id: fullMessage.id, status: 'stored' });
-            console.log(`[📦] Message stored for offline: ${toAddress.slice(0, 6)}`);
             pushOfflineNotification(toAddress, fullMessage, 'dm');
         }
-
-        // Send back to sender for confirmation
         socket.emit('messageSent', fullMessage);
     });
 
-    // Send group message — fan out to all members, queue for offline ones
     socket.on('sendGroupMessage', (messageData) => {
+        if (!requireAuth(socket)) return;
         const { groupId, members, ...rest } = messageData;
-
         if (!Array.isArray(members) || members.length === 0) return;
 
         const fullMessage = {
@@ -836,165 +870,125 @@ io.on('connection', (socket) => {
             id: rest.id || `gmsg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
         };
 
-        let deliveredCount = 0;
-        let queuedCount = 0;
-
         members.forEach(memberAddr => {
             const toAddress = memberAddr.toLowerCase();
-
-            // Don't echo back to sender
             if (toAddress === socket.address) return;
-
             const recipient = users.get(toAddress);
-
             if (recipient && recipient.online) {
                 io.to(recipient.socketId).emit('groupMessage', fullMessage);
-                deliveredCount++;
             } else {
-                // Queue for offline delivery — same mechanism as DMs
                 const pending = offlineMessages.get(toAddress) || [];
-                // Tag so the client knows it's a group message on reconnect
                 pending.push({ ...fullMessage, _isGroupMessage: true });
                 offlineMessages.set(toAddress, pending);
                 saveOfflineMessagesDb();
-                queuedCount++;
                 pushOfflineNotification(toAddress, fullMessage, 'group');
             }
         });
-
-        // 🛡️ Task 11: Persist to Group History (for catch-up sync)
-        db.run(
-            `INSERT OR IGNORE INTO group_history (id, group_id, from_addr, payload, timestamp) VALUES (?, ?, ?, ?, ?)`,
-            [fullMessage.id, groupId, socket.address.toLowerCase(), JSON.stringify(fullMessage), fullMessage.timestamp]
-        );
-
-        // Acknowledge back to sender
         socket.emit('messageSent', fullMessage);
-        console.log(`[👥] Group msg ${groupId?.slice(0, 8)}: ${deliveredCount} delivered, ${queuedCount} queued, persisted to history.`);
     });
 
-    // Check if user is online
     socket.on('checkOnline', ({ address }, callback) => {
         const user = users.get(address.toLowerCase());
         callback(user ? user.online : false);
     });
 
-    // Get status for multiple users
     socket.on('getUsersStatus', ({ addresses }, callback) => {
         const statuses = {};
-        if (Array.isArray(addresses)) {
-            addresses.forEach(addr => {
-                const normalized = addr.toLowerCase();
+        if (!Array.isArray(addresses) || addresses.length === 0) return callback(statuses);
+
+        const lowerAddresses = addresses.map(addr => addr.toLowerCase());
+        const placeholders = lowerAddresses.map(() => '?').join(',');
+
+        db.all(`SELECT * FROM users WHERE address IN (${placeholders})`, lowerAddresses, (err, rows) => {
+            if (err) return callback(statuses);
+
+            rows.forEach(row => {
+                const normalized = row.address;
                 const user = users.get(normalized);
-                if (user) {
-                    statuses[normalized] = {
-                        online: user.online,
-                        lastSeen: user.lastSeen,
-                        avatar: user.avatar,
-                        status: user.status
-                    };
-                } else {
-                    statuses[normalized] = {
-                        online: false,
-                        lastSeen: null,
-                        avatar: null,
-                        status: null
-                    };
+                statuses[normalized] = {
+                    online: user ? user.online : false,
+                    lastSeen: user ? user.lastSeen : null,
+                    avatar: row.avatar,
+                    status: row.status,
+                    trustScore: row.trust_score,
+                    trustStage: getTrustStage(row.registered_at, row.trust_score),
+                    registeredAt: row.registered_at,
+                    signingPublicKey: row.signing_public_key
+                };
+            });
+
+            // For any requested address not in DB, return defaults
+            lowerAddresses.forEach(addr => {
+                if (!statuses[addr]) {
+                    statuses[addr] = { online: false, lastSeen: null, avatar: null, status: null };
                 }
             });
-        }
-        callback(statuses);
+
+            callback(statuses);
+        });
     });
 
-    // Get user info
     socket.on('getUser', ({ address }, callback) => {
-        const user = users.get(address.toLowerCase());
-        const meta = usersMeta.get(address.toLowerCase());
-        if (user) {
+        const normalizedAddress = address.toLowerCase();
+        db.get(`SELECT * FROM users WHERE address = ?`, [normalizedAddress], (err, row) => {
+            if (err || !row) return callback(null);
+            const onlineUser = users.get(normalizedAddress);
             callback({
-                address: address.toLowerCase(),
-                publicKey: user.publicKey,
-                online: user.online,
-                lastSeen: user.lastSeen,
-                avatar: user.avatar,
-                status: user.status,
-                registeredAt: meta?.registeredAt
+                address: normalizedAddress,
+                username: row.username,
+                publicKey: row.public_key,
+                signingPublicKey: row.signing_public_key,
+                avatar: row.avatar,
+                status: row.status,
+                online: onlineUser?.online || false,
+                lastSeen: onlineUser?.lastSeen || null,
+                registeredAt: row.registered_at,
+                trustScore: row.trust_score,
+                trustStage: getTrustStage(row.registered_at, row.trust_score)
+            });
+        });
+    });
+
+    socket.on('syncYjsState', ({ toAddress, chatId, epochIndex, updateBase64 }) => {
+        if (!requireAuth(socket) || !toAddress) return;
+        const recipient = users.get(toAddress.toLowerCase());
+        if (recipient && recipient.online) {
+            io.to(recipient.socketId).emit('syncYjsState', {
+                fromAddress: socket.address,
+                chatId,
+                epochIndex,
+                updateBase64
+            });
+        }
+    });
+
+    socket.on('messageReceipt', ({ messageId, to, type, chatId }) => {
+        if (!requireAuth(socket)) return;
+        const toAddress = to.toLowerCase();
+        const fromAddress = socket.address.toLowerCase();
+        if (chatId && chatId.startsWith('group_')) {
+            db.all(`SELECT user_address FROM group_members WHERE group_id = ?`, [chatId], (err, rows) => {
+                if (err || !rows) return;
+                rows.forEach(row => {
+                    const memberAddr = row.user_address.toLowerCase();
+                    if (memberAddr === fromAddress) return;
+                    const member = users.get(memberAddr);
+                    if (member && member.online) {
+                        io.to(member.socketId).emit('messageReceipt', { messageId, type, from: socket.address, chatId });
+                    }
+                });
             });
         } else {
-            callback(null);
+            const recipient = users.get(toAddress);
+            if (recipient && recipient.online) {
+                io.to(recipient.socketId).emit('messageReceipt', { messageId, type, from: socket.address, chatId });
+            }
         }
     });
 
-    // Get conversation history
-    socket.on('getHistory', ({ peerAddress }, callback) => {
-        if (!socket.address) return callback([]);
-
-        const convId = getConversationId(socket.address, peerAddress.toLowerCase());
-
-        db.all(
-            `SELECT payload FROM history WHERE conv_id = ? ORDER BY timestamp ASC LIMIT 100`,
-            [convId],
-            (err, rows) => {
-                if (err) {
-                    console.error('[📜] Failed to retrieve history:', err.message);
-                    return callback([]);
-                }
-                const messages = rows.map(r => {
-                    try { 
-                        const msg = JSON.parse(r.payload);
-                        // Enrich with username if possible
-                        if (!msg.senderUsername && msg.from) {
-                            const sender = users.get(msg.from.toLowerCase());
-                            if (sender?.username) msg.senderUsername = sender.username;
-                        }
-                        return msg;
-                    } catch { return null; }
-                }).filter(Boolean);
-
-                console.log(`[📜] Returning ${messages.length} messages for ${convId.slice(0, 16)}`);
-                callback(messages);
-            }
-        );
-    });
-
-    // Handle message receipts (delivered/read)
-    socket.on('messageReceipt', ({ messageId, to, type, chatId }) => {
-        const toAddress = to.toLowerCase();
-        const recipient = users.get(toAddress);
-
-        // Update message in SQLite history
-        db.get(`SELECT payload, conv_id FROM history WHERE id = ?`, [messageId], (err, row) => {
-            if (row) {
-                try {
-                    const msg = JSON.parse(row.payload);
-                    msg.status = type;
-                    db.run(`UPDATE history SET payload = ? WHERE id = ?`, [JSON.stringify(msg), messageId]);
-                } catch (e) {
-                    console.error('[📜] Failed to update receipt in DB:', e.message);
-                }
-            }
-        });
-
-        // Relay receipt to sender
-        if (recipient && recipient.online) {
-            io.to(recipient.socketId).emit('messageReceipt', {
-                messageId,
-                type,
-                from: socket.address,
-                chatId // Propagate conversation scope back to the sender
-            });
-            console.log(`[✓] ${type} receipt: ${messageId.slice(0, 15)}... for chat ${chatId?.slice(0, 6)}`);
-        }
-    });
-
-    // ====== GROUP LIFECYCLE EVENTS ======
-
-    // Get all groups for the requesting user (Task 6 Registry)
     socket.on('getMyGroups', (callback) => {
-        if (!socket.address) return callback([]);
-        
+        if (!requireAuth(socket, callback)) return;
         const address = socket.address.toLowerCase();
-        
         db.all(
             `SELECT g.*, GROUP_CONCAT(m.user_address) as member_list 
              FROM groups g 
@@ -1003,11 +997,7 @@ io.on('connection', (socket) => {
              GROUP BY g.id`,
             [address],
             (err, rows) => {
-                if (err) {
-                    console.error('[👥] Failed to fetch user groups:', err.message);
-                    return callback([]);
-                }
-                
+                if (err) return callback([]);
                 const groups = rows.map(row => ({
                     address: row.id,
                     username: row.name,
@@ -1016,197 +1006,125 @@ io.on('connection', (socket) => {
                     members: row.member_list.split(','),
                     isGroup: true
                 }));
-                
                 callback(groups);
             }
         );
     });
 
-    // Create group — fan out to all members AND persist to Registry
-    socket.on('createGroup', ({ groupId, groupName, members, avatar }) => {
-        if (!groupId || !Array.isArray(members) || members.length === 0) return;
+    socket.on('createGroup', async ({ groupId, groupName, members, avatar }) => {
+        if (!requireAuth(socket)) return;
+        
+        const { allowed, error } = await checkPrivileges(socket.address, 'createGroup');
+        if (!allowed) {
+            return socket.emit('error', { message: error });
+        }
 
+        if (!groupId || !Array.isArray(members) || members.length === 0) return;
         const creator = socket.address;
         const timestamp = Date.now();
-
-        // 🛡️ Task 6: Persist Group Registry to SQLite
         db.serialize(() => {
-            db.run(
-                `INSERT OR IGNORE INTO groups (id, name, avatar, created_by, created_at) VALUES (?, ?, ?, ?, ?)`,
-                [groupId, groupName, avatar || null, creator, timestamp]
-            );
-
+            db.run(`INSERT OR IGNORE INTO groups (id, name, avatar, created_by, created_at) VALUES (?, ?, ?, ?, ?)`, [groupId, groupName, avatar || null, creator, timestamp]);
             members.forEach(memberAddr => {
                 const isAdmin = memberAddr.toLowerCase() === creator.toLowerCase() ? 1 : 0;
-                db.run(
-                    `INSERT OR IGNORE INTO group_members (group_id, user_address, is_admin, joined_at) VALUES (?, ?, ?, ?)`,
-                    [groupId, memberAddr.toLowerCase(), isAdmin, timestamp]
-                );
+                db.run(`INSERT OR IGNORE INTO group_members (group_id, user_address, is_admin, joined_at) VALUES (?, ?, ?, ?)`, [groupId, memberAddr.toLowerCase(), isAdmin, timestamp]);
             });
         });
-
-        const payload = {
-            id: `gc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-            groupId,
-            groupName,
-            members,
-            avatar,
-            admins: [creator],
-            createdBy: creator,
-            timestamp
-        };
-
-        let deliveredCount = 0;
-        let queuedCount = 0;
-
+        const payload = { id: `gc_${Date.now()}`, groupId, groupName, members, avatar, admins: [creator], createdBy: creator, timestamp };
         members.forEach(memberAddr => {
             const toAddress = memberAddr.toLowerCase();
             if (toAddress === creator) return;
-
             const recipient = users.get(toAddress);
-            if (recipient && recipient.online) {
-                io.to(recipient.socketId).emit('groupCreated', payload);
-                deliveredCount++;
-            } else {
+            if (recipient && recipient.online) io.to(recipient.socketId).emit('groupCreated', payload);
+            else {
                 const pending = offlineMessages.get(toAddress) || [];
                 pending.push({ ...payload, _isGroupCreated: true });
                 offlineMessages.set(toAddress, pending);
                 saveOfflineMessagesDb();
-                queuedCount++;
                 pushOfflineNotification(toAddress, payload, 'groupCreated');
             }
         });
-
-        console.log(`[👥+] Group created & registered: ${groupId?.slice(0, 8)}`);
     });
 
-    // Delete group — fan out AND remove from Registry
     socket.on('deleteGroup', ({ groupId, members }) => {
-        if (!groupId) return;
-
-        // 🛡️ Task 6: Remove from Registry
-        db.run(`DELETE FROM groups WHERE id = ?`, [groupId]);
-        db.run(`DELETE FROM group_members WHERE group_id = ?`, [groupId]);
-
-        const payload = {
-            id: `gd_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-            groupId,
-            deletedBy: socket.address,
-            timestamp: Date.now()
-        };
-
-        members?.forEach(memberAddr => {
-            const toAddress = memberAddr.toLowerCase();
-            if (toAddress === socket.address) return;
-
-            const recipient = users.get(toAddress);
-            if (recipient && recipient.online) {
-                io.to(recipient.socketId).emit('groupDeleted', payload);
-            } else {
-                const pending = offlineMessages.get(toAddress) || [];
-                pending.push({ ...payload, _isGroupDeleted: true });
-                offlineMessages.set(toAddress, pending);
-                saveOfflineMessagesDb();
-            }
+        if (!requireAuth(socket) || !groupId) return;
+        db.get(`SELECT is_admin FROM group_members WHERE group_id = ? AND user_address = ?`, [groupId, socket.address.toLowerCase()], (err, row) => {
+            if (err || !row || row.is_admin !== 1) return; // Not an admin
+            db.run(`DELETE FROM groups WHERE id = ?`, [groupId]);
+            db.run(`DELETE FROM group_members WHERE group_id = ?`, [groupId]);
+            const payload = { id: `gd_${Date.now()}`, groupId, deletedBy: socket.address, timestamp: Date.now() };
+            members?.forEach(memberAddr => {
+                const toAddress = memberAddr.toLowerCase();
+                if (toAddress === socket.address) return;
+                const recipient = users.get(toAddress);
+                if (recipient && recipient.online) io.to(recipient.socketId).emit('groupDeleted', payload);
+                else {
+                    const pending = offlineMessages.get(toAddress) || [];
+                    pending.push({ ...payload, _isGroupDeleted: true });
+                    offlineMessages.set(toAddress, pending);
+                    saveOfflineMessagesDb();
+                }
+            });
         });
-
-        console.log(`[👥-] Group deleted & unregistered: ${groupId?.slice(0, 8)}`);
     });
-    // Remove group member — fan out AND update Registry
+
     socket.on('removeGroupMember', ({ groupId, memberAddress, members }) => {
-        if (!groupId || !memberAddress) return;
-
-        // 🛡️ Task 6: Remove from Registry
-        db.run(`DELETE FROM group_members WHERE group_id = ? AND user_address = ?`, [groupId, memberAddress.toLowerCase()]);
-
-        const payload = {
-            id: `gm_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-            groupId,
-            memberAddress,
-            removedBy: socket.address,
-            timestamp: Date.now()
-        };
-
-        // Notify remaining members and the removed member
-        const allTargets = members ? [...members, memberAddress] : [memberAddress];
-        const uniqueTargets = [...new Set(allTargets)];
-
-        uniqueTargets.forEach(addr => {
-            const toAddress = addr.toLowerCase();
-            if (toAddress === socket.address) return;
-
-            const recipient = users.get(toAddress);
-            if (recipient && recipient.online) {
-                io.to(recipient.socketId).emit('groupMemberRemoved', payload);
-            } else {
-                const pending = offlineMessages.get(toAddress) || [];
-                pending.push({ ...payload, _isGroupMemberRemoved: true });
-                offlineMessages.set(toAddress, pending);
-                saveOfflineMessagesDb();
+        if (!requireAuth(socket) || !groupId || !memberAddress) return;
+        db.get(`SELECT is_admin FROM group_members WHERE group_id = ? AND user_address = ?`, [groupId, socket.address.toLowerCase()], (err, row) => {
+            if (err || !row || row.is_admin !== 1) {
+                // Allow users to remove themselves (leave group)
+                if (memberAddress.toLowerCase() !== socket.address.toLowerCase()) return;
             }
+            db.run(`DELETE FROM group_members WHERE group_id = ? AND user_address = ?`, [groupId, memberAddress.toLowerCase()]);
+            const payload = { id: `gm_${Date.now()}`, groupId, memberAddress, removedBy: socket.address, timestamp: Date.now() };
+            const allTargets = members ? [...members, memberAddress] : [memberAddress];
+            [...new Set(allTargets)].forEach(addr => {
+                const toAddress = addr.toLowerCase();
+                if (toAddress === socket.address) return;
+                const recipient = users.get(toAddress);
+                if (recipient && recipient.online) io.to(recipient.socketId).emit('groupMemberRemoved', payload);
+                else {
+                    const pending = offlineMessages.get(toAddress) || [];
+                    pending.push({ ...payload, _isGroupMemberRemoved: true });
+                    offlineMessages.set(toAddress, pending);
+                    saveOfflineMessagesDb();
+                }
+            });
         });
-        
-        console.log(`[👤-] Member ${memberAddress.slice(0, 8)} removed from group ${groupId?.slice(0, 8)}`);
     });
 
-    // Update group avatar — fan out AND update Registry
     socket.on('updateGroupAvatar', ({ groupId, avatar, members }) => {
-        if (!groupId) return;
-
-        // 🛡️ Task 6: Update Registry
-        db.run(`UPDATE groups SET avatar = ? WHERE id = ?`, [avatar, groupId]);
-
-        const payload = {
-            id: `ga_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-            groupId,
-            avatar,
-            updatedBy: socket.address,
-            timestamp: Date.now()
-        };
-
-        members?.forEach(memberAddr => {
-            const toAddress = memberAddr.toLowerCase();
-            if (toAddress === socket.address) return;
-
-            const recipient = users.get(toAddress);
-            if (recipient && recipient.online) {
-                io.to(recipient.socketId).emit('groupAvatarUpdated', payload);
-            } else {
-                const pending = offlineMessages.get(toAddress) || [];
-                pending.push({ ...payload, _isGroupAvatarUpdate: true });
-                offlineMessages.set(toAddress, pending);
-                saveOfflineMessagesDb();
-            }
+        if (!requireAuth(socket) || !groupId) return;
+        db.get(`SELECT is_admin FROM group_members WHERE group_id = ? AND user_address = ?`, [groupId, socket.address.toLowerCase()], (err, row) => {
+            if (err || !row || row.is_admin !== 1) return;
+            db.run(`UPDATE groups SET avatar = ? WHERE id = ?`, [avatar, groupId]);
+            const payload = { id: `ga_${Date.now()}`, groupId, avatar, updatedBy: socket.address, timestamp: Date.now() };
+            members?.forEach(memberAddr => {
+                const toAddress = memberAddr.toLowerCase();
+                if (toAddress === socket.address) return;
+                const recipient = users.get(toAddress);
+                if (recipient && recipient.online) io.to(recipient.socketId).emit('groupAvatarUpdated', payload);
+                else {
+                    const pending = offlineMessages.get(toAddress) || [];
+                    pending.push({ ...payload, _isGroupAvatarUpdate: true });
+                    offlineMessages.set(toAddress, pending);
+                    saveOfflineMessagesDb();
+                }
+            });
         });
     });
 
-    // React to a message — relay to recipient(s)
     socket.on('messageReaction', (data) => {
+        if (!requireAuth(socket)) return;
         const { messageId, emoji, action, to, groupId, members } = data;
         if (!messageId || !emoji) return;
-
-        const payload = {
-            id: `rx_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-            messageId,
-            emoji,
-            action: action || 'add',
-            from: socket.address,
-            groupId: groupId || null,
-            timestamp: Date.now()
-        };
-
-        // Determine targets: group → all members, DM → single recipient
+        const payload = { id: `rx_${Date.now()}`, messageId, emoji, action: action || 'add', from: socket.address, groupId: groupId || null, timestamp: Date.now() };
         const targets = groupId && Array.isArray(members) ? members : (to ? [to] : []);
-
         targets.forEach(addr => {
             const toAddress = addr.toLowerCase();
-            if (toAddress === socket.address) return; // Skip self
-
+            if (toAddress === socket.address) return;
             const recipient = users.get(toAddress);
-
-            if (recipient && recipient.online) {
-                io.to(recipient.socketId).emit('messageReaction', payload);
-            } else {
+            if (recipient && recipient.online) io.to(recipient.socketId).emit('messageReaction', payload);
+            else {
                 const pending = offlineMessages.get(toAddress) || [];
                 pending.push({ ...payload, _isReaction: true });
                 offlineMessages.set(toAddress, pending);
@@ -1216,50 +1134,40 @@ io.on('connection', (socket) => {
         });
     });
 
-    // Disconnect handling
-    socket.on('disconnect', () => {
-        // Clean up any pending challenge for this socket (mid-handshake disconnect)
-        if (pendingChallenges.has(socket.id)) {
-            pendingChallenges.delete(socket.id);
-            console.log(`[🔐] Cleaned up pending challenge for disconnected socket: ${socket.id.slice(0, 8)}`);
+    socket.on('fetchTurnCredentials', async (callback) => {
+        if (!requireAuth(socket, callback)) return;
+        if (!process.env.TURN_API_KEY) {
+            return callback([
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' }
+            ]);
         }
+        try {
+            const response = await fetch(`https://decentrachat.metered.ca/api/v1/turn/credentials?apiKey=${process.env.TURN_API_KEY}`);
+            const iceServers = await response.json();
+            callback(iceServers);
+        } catch (err) {
+            callback([{ urls: 'stun:stun.l.google.com:19302' }]);
+        }
+    });
 
+    socket.on('disconnect', () => {
+        if (pendingChallenges.has(socket.id)) pendingChallenges.delete(socket.id);
         const address = socket.address;
-
         if (address) {
             const user = users.get(address);
             if (user && user.socketId === socket.id) {
-                // Only mark offline if this was the active socket
                 user.online = false;
                 user.lastSeen = Date.now();
-                users.set(address, user);
-
-                // Broadcast offline status
-                socket.broadcast.emit('userStatus', {
-                    address: address,
-                    online: false,
-                    lastSeen: user.lastSeen
-                });
-                console.log(`[-] Disconnected (User Offline): ${address.slice(0, 10)}...`);
-            } else {
-                console.log(`[-] Disconnected (Stale Socket or Replaced): ${address.slice(0, 10)}...`);
+                users.delete(address); // Delete from memory map to prevent leaks
+                socket.broadcast.emit('userStatus', { address: address, online: false, lastSeen: user.lastSeen });
             }
-        } else {
-            console.log(`[-] Disconnected (Unregistered Socket): ${socket.id}`);
         }
     });
 });
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-    console.log(`
-╔═══════════════════════════════════════════════════════════╗
-║                                                           ║
-║   🚀 DecentraChat Signaling Server                        ║
-║                                                           ║
-║   Local:  http://localhost:${PORT}                         ║
-║   Status: Ready for connections                           ║
-║                                                           ║
-╚═══════════════════════════════════════════════════════════╝
-    `);
+    console.log(`🚀 DecentraChat Signaling Server running on port ${PORT}`);
 });

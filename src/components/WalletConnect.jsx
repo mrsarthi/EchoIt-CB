@@ -1,9 +1,9 @@
-// WalletConnect Component - Premium wallet connection UI
 import { useState } from 'react';
+import { Wallet, Lock, Shield, Zap, ExternalLink, Copy, Check } from 'lucide-react';
 import { useWallet } from '../context/WalletContext';
 import './WalletConnect.css';
 
-export function WalletConnect({ username }) {
+export function WalletConnect() {
     const {
         address,
         formattedAddress,
@@ -12,6 +12,7 @@ export function WalletConnect({ username }) {
         error,
         isWeb3Detected,
         isElectron,
+        isSolvingPoW,
         connect,
         disconnect,
     } = useWallet();
@@ -30,110 +31,107 @@ export function WalletConnect({ username }) {
 
     if (!isWeb3Detected) {
         return (
-            <div className="wallet-connect-container">
-                <div className="wallet-card glass-card animate-fadeIn">
-                    <div className="wallet-icon">🦊</div>
+            <main className="wallet-connect-container">
+                <div className="wallet-card animate-fadeIn">
+                    <div className="wallet-icon-wrapper">
+                        <Wallet size={48} className="text-primary" />
+                    </div>
                     <h2>Wallet Required</h2>
                     <p className="text-secondary">
-                        Please install MetaMask to use DecentraChat
+                        Install MetaMask or a compatible Web3 wallet to access DecentraChat.
                     </p>
                     <a
                         href="https://metamask.io/download/"
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="btn btn-primary"
+                        className="btn btn-primary full-width"
                     >
-                        Install MetaMask
+                        Get MetaMask <ExternalLink size={16} />
                     </a>
                 </div>
-            </div>
+            </main>
         );
     }
 
     if (!isConnected) {
         return (
-            <div className="wallet-connect-container">
-                <div className="wallet-card glass-card animate-fadeIn">
+            <main className="wallet-connect-container">
+                <div className="wallet-card animate-fadeIn">
                     <div className="logo-section">
-                        <div className="logo-icon">
-                            <span className="logo-emoji">🔐</span>
+                        <div className="logo-icon-wrapper">
+                            <Lock size={32} className="text-trust" />
                         </div>
-                        <h1 className="gradient-text">DecentraChat</h1>
-                        <p className="tagline">Decentralized • Encrypted • Private</p>
+                        <h1 className="logo-text">DecentraChat</h1>
+                        <p className="tagline">Secure • Private • Decentralized</p>
                     </div>
 
                     <div className="features-list">
                         <div className="feature-item">
-                            <span className="feature-icon">⛓️</span>
+                            <Shield size={20} className="text-primary" />
                             <span>Blockchain Identity</span>
                         </div>
                         <div className="feature-item">
-                            <span className="feature-icon">🔒</span>
+                            <Lock size={20} className="text-trust" />
                             <span>End-to-End Encrypted</span>
                         </div>
                         <div className="feature-item">
-                            <span className="feature-icon">🌐</span>
+                            <Zap size={20} className="text-warning" />
                             <span>No Central Server</span>
                         </div>
                     </div>
 
                     <button
-                        className="btn btn-primary connect-btn"
+                        className="btn btn-primary connect-btn full-width"
                         onClick={connect}
-                        disabled={isConnecting}
+                        disabled={isConnecting || isSolvingPoW}
                     >
-                        {isConnecting ? (
+                        {isSolvingPoW ? (
                             <>
-                                <span className="spinner"></span>
-                                {isElectron ? 'Waiting for MetaMask...' : 'Connecting...'}
+                                <div className="spinner-small"></div>
+                                Securing Identity...
+                            </>
+                        ) : isConnecting ? (
+                            <>
+                                <div className="spinner-small"></div>
+                                {isElectron ? 'Check MetaMask...' : 'Connecting...'}
                             </>
                         ) : (
                             <>
-                                <span>🦊</span>
-                                {isElectron ? 'Open MetaMask to Connect' : 'Connect with MetaMask'}
+                                <Wallet size={18} />
+                                {isElectron ? 'Connect MetaMask' : 'Connect Wallet'}
                             </>
                         )}
                     </button>
 
                     {error && (
-                        <div className="error-message animate-fadeIn">
+                        <div className="error-message">
                             {error}
                         </div>
                     )}
                 </div>
-            </div>
+            </main>
         );
     }
 
-    // Connected state - compact header
+    // Connected state - simple status bar
     return (
-        <div className="wallet-connected animate-slideIn">
+        <header className="wallet-connected-bar animate-fadeIn">
             <div className="wallet-info">
-                <div className="avatar">
+                <div className="avatar avatar-sm">
                     {address.slice(2, 4).toUpperCase()}
                 </div>
                 <div className="wallet-details">
-                    <div className="wallet-address-row">
+                    <div className="flex items-center gap-sm">
                         <span className="wallet-address">{formattedAddress}</span>
-                        <button
-                            className="copy-btn"
-                            onClick={handleCopy}
-                            title="Copy full address"
-                        >
-                            {copied ? '✓' : '📋'}
+                        <button className="icon-btn-sm" onClick={handleCopy} aria-label="Copy Address">
+                            {copied ? <Check size={12} className="text-trust" /> : <Copy size={12} />}
                         </button>
                     </div>
-                    {username && (
-                        <span className="wallet-username">@{username}</span>
-                    )}
-                    <span className="encrypted-badge">
-                        🔒 E2E Encrypted
-                    </span>
                 </div>
             </div>
-            <button className="btn btn-ghost" onClick={disconnect}>
+            <button className="btn btn-ghost btn-sm" onClick={disconnect}>
                 Disconnect
             </button>
-        </div>
+        </header>
     );
 }

@@ -19,4 +19,5 @@ With DecentraChat:
 4. **Group Chats:** Create secure groups, invite your friends, and chat together, all completely encrypted.
 5. **Media Sharing:** You can share images with your friends (more media support coming soon), all completely encrypted as well.
 
-
+## Future Roadmap
+- **Embedded Federated MQTT Broker**: Allow desktop users to host their own routing nodes using Aedes, completely eliminating reliance on centralized relays for users who prefer to route their own traffic.
