@@ -1,8 +1,13 @@
-const { app, BrowserWindow, shell, ipcMain, Menu, Tray, nativeImage } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, Menu, Tray, nativeImage, protocol } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const http = require('http');
 const fs = require('fs');
+
+// Register custom protocol before app is ready
+protocol.registerSchemesAsPrivileged([
+    { scheme: 'decentrachat', privileges: { standard: true, secure: true, supportFetchAPI: true } }
+]);
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling
 try {
@@ -145,7 +150,7 @@ function createWindow() {
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
-            webSecurity: false, // Disabled to allow loading local resources from file://
+            webSecurity: true, // Re-enabled for SOP protection
             preload: path.join(__dirname, 'preload.js'),
         },
     });
@@ -164,9 +169,8 @@ function createWindow() {
     if (isDev) {
         mainWindow.loadURL('http://localhost:5173');
     } else {
-        const indexPath = path.join(__dirname, '../dist/index.html');
-        console.log('Loading production index from:', indexPath);
-        mainWindow.loadFile(indexPath).catch(e => console.error('Failed to load file:', e));
+        // Use custom protocol in production
+        mainWindow.loadURL('decentrachat://app/index.html').catch(e => console.error('Failed to load app:', e));
     }
 
     // Show window when ready
@@ -259,6 +263,39 @@ app.commandLine.appendSwitch('enable-zero-copy');
 
 // Create window when ready
 app.whenReady().then(() => {
+    // Handle custom protocol
+    protocol.handle('decentrachat', (request) => {
+        const url = new URL(request.url);
+        const filePath = path.join(__dirname, '../dist', url.pathname);
+        
+        // Security check: Ensure we're only serving from dist
+        const normalizedDist = path.normalize(path.join(__dirname, '../dist'));
+        const normalizedFile = path.normalize(filePath);
+        
+        if (!normalizedFile.startsWith(normalizedDist)) {
+            return new Response('Access Denied', { status: 403 });
+        }
+
+        try {
+            const data = fs.readFileSync(filePath);
+            const ext = path.extname(filePath).toLowerCase();
+            const mimeTypes = {
+                '.html': 'text/html',
+                '.js': 'text/javascript',
+                '.css': 'text/css',
+                '.png': 'image/png',
+                '.svg': 'image/svg+xml',
+                '.json': 'application/json',
+                '.wasm': 'application/wasm'
+            };
+            return new Response(data, {
+                headers: { 'content-type': mimeTypes[ext] || 'application/octet-stream' }
+            });
+        } catch (e) {
+            return new Response('Not Found', { status: 404 });
+        }
+    });
+
     // Single Instance Lock
     const gotTheLock = app.requestSingleInstanceLock();
 

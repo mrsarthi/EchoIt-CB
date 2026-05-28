@@ -65,17 +65,7 @@ export function initSocket() {
                 currentUser.getPoW,
                 currentUser.pushToken
             ).catch(err => {
-                // Fallback: emit directly if full registration flow fails (e.g., wallet locked)
-                console.warn('⚠️ Challenge-response re-registration failed, using legacy path:', err.message);
-                socket.emit('register', {
-                    address: currentUser.address,
-                    publicKey: currentUser.publicKey,
-                    signingPublicKey: currentUser.signingPublicKey,
-                    username: currentUser.username,
-                    avatar: currentUser.avatar,
-                    status: currentUser.status,
-                    pushToken: currentUser.pushToken
-                });
+                console.error('⚠️ Challenge-response re-registration failed:', err.message);
             });
         }
 
@@ -287,13 +277,13 @@ export function fetchPreKey(address) {
  * @param {string} [pushToken] Optional FCM/APNs token for background push
  * @returns {Promise<{address: string, username?: string}>}
  */
-export async function register(address, publicKey, signingPublicKey, username, avatar, status, signMessage, getPoW, pushToken) {
+export async function register(address, publicKey, signingPublicKey, signedPreKey, signedPreKeySignature, username, avatar, status, signMessage, getPoW, pushToken) {
     if (registrationPromise) return registrationPromise;
 
     if (!socket) initSocket();
 
     // Store credentials so they persist across socket disconnects/reconnects
-    currentUser = { address, publicKey, signingPublicKey, username, avatar, status, signMessage, getPoW, pushToken };
+    currentUser = { address, publicKey, signingPublicKey, signedPreKey, signedPreKeySignature, username, avatar, status, signMessage, getPoW, pushToken };
 
     registrationPromise = (async () => {
         try {
@@ -317,7 +307,7 @@ export async function register(address, publicKey, signingPublicKey, username, a
                     console.log('🛡️ Signing registration challenge...');
                     signature = await signMessage(message);
                 } catch (err) {
-                    console.warn('⚠️ Challenge-response failed, falling back to legacy registration:', err.message);
+                    console.warn('⚠️ Challenge-response failed:', err.message);
                 }
             }
 
@@ -331,15 +321,24 @@ export async function register(address, publicKey, signingPublicKey, username, a
                     }
                 }, 15000);
 
-                socket.emit('register', { address, publicKey, signingPublicKey: currentUser.signingPublicKey, username, avatar, status, challenge, signature, proofOfWork, pushToken });
+                socket.emit('register', { address, publicKey, signingPublicKey: currentUser.signingPublicKey, signedPreKey: currentUser.signedPreKey, signedPreKeySignature: currentUser.signedPreKeySignature, username, avatar, status, challenge, signature, proofOfWork, pushToken });
                 socket.once('registered', (data) => {
                     isResolved = true;
                     isRegistered = true;
                     clearTimeout(timeout);
                     console.log('✓ Registered with server:', data.address?.slice(0, 10), data.username ? `(@${data.username})` : '');
+                    
+                    if (data.token) {
+                        localStorage.setItem('decentrachat_session_token', data.token);
+                        if (socket) socket.auth = { token: data.token };
+                    }
+                    
                     resolve(data);
                 });
             });
+        } catch (err) {
+            console.error('Registration failed:', err);
+            throw err;
         } finally {
             registrationPromise = null;
         }

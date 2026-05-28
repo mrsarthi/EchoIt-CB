@@ -1,14 +1,20 @@
 import * as Y from 'yjs';
-import { IndexeddbPersistence } from 'y-indexeddb';
 import localforage from 'localforage';
-import { decryptContent } from './storageService';
+import { decryptContent } from './storageEncryption';
+import nacl from 'tweetnacl';
 
 const EPOCH_SIZE = 500;
 const activeDocs = new Map(); 
 
+// Unified database for all metadata and Yjs updates
 const epochMetaStore = localforage.createInstance({
     name: 'decentrachat',
     storeName: 'epoch_metadata',
+});
+
+const yjsUpdateStore = localforage.createInstance({
+    name: 'decentrachat',
+    storeName: 'yjs_updates',
 });
 
 // Legacy stores for migration
@@ -30,6 +36,67 @@ export async function setLatestEpochIndex(chatId, index) {
 }
 
 /**
+ * Custom Persistence Provider for Yjs using a unified localforage store.
+ * This prevents creating thousands of IndexedDB databases (one per chat) which
+ * crashes Android WebViews.
+ */
+class UnifiedPersistence {
+    constructor(name, doc) {
+        this.name = name;
+        this.doc = doc;
+        this.synced = false;
+        this.saveQueue = Promise.resolve();
+        this.initPromise = this._init();
+    }
+
+    async _init() {
+        try {
+            // Load existing updates from unified store
+            const rawUpdates = await yjsUpdateStore.getItem(this.name);
+            if (rawUpdates) {
+                // Ensure it's a Uint8Array
+                const updates = new Uint8Array(rawUpdates);
+                Y.applyUpdate(this.doc, updates);
+            }
+            
+            // Listen for changes and queue saves to prevent race conditions
+            this.doc.on('update', (update) => {
+                this.saveQueue = this.saveQueue.then(async () => {
+                    try {
+                        const currentRaw = await yjsUpdateStore.getItem(this.name);
+                        let merged;
+                        if (currentRaw) {
+                            const current = new Uint8Array(currentRaw);
+                            merged = Y.mergeUpdates([current, update]);
+                        } else {
+                            merged = update;
+                        }
+                        await yjsUpdateStore.setItem(this.name, merged);
+                    } catch (err) {
+                        console.error(`UnifiedPersistence save error for ${this.name}:`, err);
+                    }
+                });
+            });
+
+            this.synced = true;
+        } catch (err) {
+            console.error(`❌ UnifiedPersistence init failed for ${this.name}:`, err);
+            // Don't hang the app if load fails
+            this.synced = true;
+        }
+    }
+
+    async whenSynced() {
+        return this.initPromise;
+    }
+
+    destroy() {
+        // Nothing explicitly needed for offing an anonymous lambda,
+        // but normally we'd keep a reference if we wanted to removeListener.
+    }
+}
+
+/**
  * Get or load a Y.Doc for a specific chat and epoch
  */
 export async function getEpochDoc(chatId, epochIndex) {
@@ -37,39 +104,9 @@ export async function getEpochDoc(chatId, epochIndex) {
     if (activeDocs.has(key)) return activeDocs.get(key);
 
     const doc = new Y.Doc();
-    let provider;
-    try {
-        provider = new IndexeddbPersistence(key, doc);
-    } catch (err) {
-        console.error(`⚠️ Failed to initialize IndexeddbPersistence for ${key}:`, err);
-        // Fallback: Mock provider to prevent app crash
-        provider = {
-            synced: true,
-            once: (event, cb) => { if (event === 'synced') cb(); },
-            destroy: () => {}
-        };
-    }
+    const provider = new UnifiedPersistence(key, doc);
     
-    await new Promise((resolve) => {
-        if (provider.synced) {
-            resolve();
-        } else {
-            const timeout = setTimeout(() => {
-                console.warn(`⚠️ IndexedDB sync timeout for ${key}, proceeding anyway`);
-                resolve();
-            }, 3000);
-            try {
-                provider.once('synced', () => {
-                    clearTimeout(timeout);
-                    resolve();
-                });
-            } catch (err) {
-                console.error(`Failed to bind synced event:`, err);
-                clearTimeout(timeout);
-                resolve();
-            }
-        }
-    });
+    await provider.whenSynced();
 
     const ymap = doc.getMap('messages');
     
@@ -123,8 +160,19 @@ export async function hashMessage(message) {
         groupId: message.groupId
     };
     const dataToHash = new TextEncoder().encode(JSON.stringify(core));
-    const hashBuffer = await window.crypto.subtle.digest('SHA-256', dataToHash);
-    return btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
+    
+    if (typeof window !== 'undefined' && window.crypto && window.crypto.subtle) {
+        try {
+            const hashBuffer = await window.crypto.subtle.digest('SHA-256', dataToHash);
+            return btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
+        } catch (e) {
+            // Fallback if subtle crypto throws
+        }
+    }
+    
+    // Fallback to TweetNaCl SHA-512 (truncated to 32 bytes to match SHA-256 size expectations)
+    const hashBuffer = nacl.hash(dataToHash).slice(0, 32);
+    return btoa(String.fromCharCode(...hashBuffer));
 }
 
 /**

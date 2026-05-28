@@ -83,61 +83,63 @@ export function ProfileModal({
                 </div>
                 
                 <form onSubmit={handleSubmit} className="profile-form">
-                    <div className="profile-avatar-section">
-                        <div className="profile-avatar-wrapper" onClick={() => fileInputRef.current?.click()}>
-                            {avatar ? (
-                                <img src={avatar} alt="Avatar" className="profile-avatar-img" />
-                            ) : (
-                                <div className="profile-avatar-placeholder">
-                                    <User size={40} />
+                    <div className="profile-form-body">
+                        <div className="profile-avatar-section">
+                            <div className="profile-avatar-wrapper" onClick={() => fileInputRef.current?.click()}>
+                                {avatar ? (
+                                    <img src={avatar} alt="Avatar" className="profile-avatar-img" />
+                                ) : (
+                                    <div className="profile-avatar-placeholder">
+                                        <User size={40} />
+                                    </div>
+                                )}
+                                <div className="avatar-edit-overlay">
+                                    <Camera size={20} />
                                 </div>
-                            )}
-                            <div className="avatar-edit-overlay">
-                                <Camera size={20} />
                             </div>
+                            <input 
+                                type="file" 
+                                accept="image/*" 
+                                ref={fileInputRef} 
+                                onChange={handleFileChange} 
+                                style={{ display: 'none' }} 
+                            />
+                            {avatar && (
+                                <button type="button" className="btn btn-ghost btn-sm text-error" onClick={() => setAvatar(null)}>
+                                    <Trash2 size={14} /> Remove Photo
+                                </button>
+                            )}
                         </div>
-                        <input 
-                            type="file" 
-                            accept="image/*" 
-                            ref={fileInputRef} 
-                            onChange={handleFileChange} 
-                            style={{ display: 'none' }} 
-                        />
-                        {avatar && (
-                            <button type="button" className="btn btn-ghost btn-sm text-error" onClick={() => setAvatar(null)}>
-                                <Trash2 size={14} /> Remove Photo
-                            </button>
-                        )}
-                    </div>
 
-                    <div className="settings-group">
-                        <label className="settings-group-title">Display Name</label>
-                        <input 
-                            type="text" 
-                            className="input" 
-                            value={username || 'Anonymous'} 
-                            disabled 
-                        />
-                        <p className="input-hint">Your blockchain handle is permanent</p>
-                    </div>
+                        <div className="settings-group">
+                            <label className="settings-group-title">Display Name</label>
+                            <input 
+                                type="text" 
+                                className="input" 
+                                value={username || 'Anonymous'} 
+                                disabled 
+                            />
+                            <p className="input-hint">Your blockchain handle is permanent</p>
+                        </div>
 
-                    <div className="settings-group">
-                        <label className="settings-group-title">Status Message</label>
-                        <input 
-                            type="text" 
-                            className="input" 
-                            placeholder="How are you feeling?" 
-                            value={status}
-                            onChange={(e) => setStatus(e.target.value)}
-                            maxLength={50}
-                        />
-                    </div>
+                        <div className="settings-group">
+                            <label className="settings-group-title">Status Message</label>
+                            <input 
+                                type="text" 
+                                className="input" 
+                                placeholder="How are you feeling?" 
+                                value={status}
+                                onChange={(e) => setStatus(e.target.value)}
+                                maxLength={50}
+                            />
+                        </div>
 
-                    <div className="settings-group">
-                        <label className="settings-group-title">Blockchain Identity</label>
-                        <div className="wallet-pill full-width" onClick={handleCopyId}>
-                            <code>{walletAddress?.slice(0, 16)}...{walletAddress?.slice(-14)}</code>
-                            {copied ? <Check size={14} className="text-trust" /> : <Copy size={14} />}
+                        <div className="settings-group">
+                            <label className="settings-group-title">Blockchain Identity</label>
+                            <div className="wallet-pill full-width" onClick={handleCopyId}>
+                                <code>{walletAddress?.slice(0, 16)}...{walletAddress?.slice(-14)}</code>
+                                {copied ? <Check size={14} className="text-trust" /> : <Copy size={14} />}
+                            </div>
                         </div>
                     </div>
 

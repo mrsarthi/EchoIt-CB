@@ -2,6 +2,8 @@
     background: var(--bg-secondary);
     width: 100%;
     max-width: 360px;
+    max-height: 90vh;
+    overflow-y: auto;
     border-radius: var(--radius-xl);
     padding: var(--space-xl);
     position: relative;

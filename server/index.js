@@ -17,7 +17,32 @@ const { argon2id } = require('hash-wasm');
 // ===== Registration Challenge Setup =====
 const pendingChallenges = new Map(); // socket.id -> { challenge, timestamp }
 const CHALLENGE_TIMEOUT = 60000; // 60 seconds
-const GRACE_PERIOD_ENABLED = true; // Set to false to force hard-enforcement
+const GRACE_PERIOD_ENABLED = false; // Hard-enforced Sybil resistance
+
+// ===== JWT Security Config =====
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
+const JWT_EXPIRY = '4h'; // Short-lived VIP pass for session continuity
+
+// ===== CORS Lockdown =====
+const ALLOWED_ORIGINS = [
+    'http://localhost:5173',          // Local dev
+    'http://localhost:3000',          // Electron dev
+    'https://decentrachat.onrender.com', // Production web
+    'capacitor://localhost',           // Capacitor Android
+    'http://localhost'                 // Capacitor iOS
+];
+
+const corsOptions = {
+    origin: (origin, callback) => {
+        if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('CORS blocked: Unauthorized origin'));
+        }
+    },
+    methods: ["GET", "POST"],
+    credentials: true
+};
 
 // ===== SQLite Database Setup =====
 const dbPath = path.join(__dirname, 'users.db');
@@ -30,6 +55,8 @@ db.serialize(() => {
         username TEXT,
         public_key TEXT,
         signing_public_key TEXT,
+        signed_pre_key TEXT,
+        signed_pre_key_signature TEXT,
         avatar TEXT,
         status TEXT,
         registered_at INTEGER,
@@ -38,11 +65,13 @@ db.serialize(() => {
         os_platform TEXT
     )`);
 
-    // Ensure trust_score column exists for existing databases
+    // Ensure columns exist for existing databases
     db.run(`ALTER TABLE users ADD COLUMN trust_score INTEGER DEFAULT 100`, (err) => {});
     db.run(`ALTER TABLE users ADD COLUMN push_token TEXT`, (err) => {});
     db.run(`ALTER TABLE users ADD COLUMN os_platform TEXT`, (err) => {});
     db.run(`ALTER TABLE users ADD COLUMN signing_public_key TEXT`, (err) => {});
+    db.run(`ALTER TABLE users ADD COLUMN signed_pre_key TEXT`, (err) => {});
+    db.run(`ALTER TABLE users ADD COLUMN signed_pre_key_signature TEXT`, (err) => {});
 
     // Create index for fast, case-insensitive username lookups
     db.run(`CREATE INDEX IF NOT EXISTS idx_username ON users (username)`);
@@ -171,7 +200,7 @@ async function pushOfflineNotification(toAddress, payload, type) {
 }
 
 const app = express();
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // Serve static Auth Page for Mobile Deep Linking
@@ -202,35 +231,40 @@ function rateLimitMiddleware(req, res, next) {
     next();
 }
 
-app.get('/api/turn', rateLimitMiddleware, async (req, res) => {
-    if (!process.env.TURN_API_KEY) {
-        return res.json([
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' }
-        ]);
-    }
-
-    try {
-        const response = await fetch(`https://decentrachat.metered.ca/api/v1/turn/credentials?apiKey=${process.env.TURN_API_KEY}`);
-        const iceServers = await response.json();
-        res.json(iceServers);
-    } catch (err) {
-        res.json([
-            { urls: 'stun:stun.l.google.com:19302' }
-        ]);
-    }
-});
-
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: {
-        origin: true, 
-        methods: ["GET", "POST"],
-        credentials: true,
-        allowedHeaders: ["*"]
-    },
+    cors: corsOptions,
     allowEIO3: true 
+});
+
+// --- Socket Authentication Middleware ---
+io.use((socket, next) => {
+    const token = socket.handshake.auth?.token;
+    if (token) {
+        try {
+            const decoded = jwt.verify(token, JWT_SECRET);
+            socket.address = decoded.address.toLowerCase();
+            return next();
+        } catch (err) {
+            // Token expired or invalid
+        }
+    }
+    next();
+});
+
+const preKeyCounters = new Map();
+
+// Helper: Require authentication for socket events
+function requireAuth(socket, callback) {
+    if (!socket.address) {
+        if (callback) callback({ error: 'Authentication required' });
+        return false;
+    }
+    return true;
+}
+
+app.get('/api/turn', (req, res) => {
+    res.status(401).json({ error: 'Endpoint moved to socket event "fetchTurnCredentials"' });
 });
 
 const users = new Map(); 
@@ -364,6 +398,11 @@ app.post('/api/auth/callback', rateLimitMiddleware, (req, res) => {
 });
 
 io.on('connection', (socket) => {
+    // Re-join room if authenticated via token
+    if (socket.address) {
+        socket.join(socket.address);
+    }
+
     socket.on('join_auth_room', ({ sessionId }) => {
         socket.join(`auth_${sessionId}`);
         const bufferedResult = authResults.get(sessionId);
@@ -390,7 +429,7 @@ io.on('connection', (socket) => {
         callback(challenge);
     });
 
-    socket.on('register', async ({ address, publicKey, signingPublicKey, username, avatar, status, registeredAt, challenge, signature, proofOfWork, pushToken, osPlatform }) => {
+    socket.on('register', async ({ address, publicKey, signingPublicKey, signedPreKey, signedPreKeySignature, username, avatar, status, registeredAt, challenge, signature, proofOfWork, pushToken, osPlatform }) => {
         const normalizedAddress = address.toLowerCase();
 
         if (!challenge || !signature || !proofOfWork) {
@@ -462,9 +501,13 @@ io.on('connection', (socket) => {
         const finalOsPlatform = osPlatform || dbUser?.os_platform;
         const trustScore = dbUser?.trust_score !== undefined ? dbUser.trust_score : 100;
 
-        db.run(`INSERT OR REPLACE INTO users (address, username, public_key, signing_public_key, avatar, status, registered_at, trust_score, push_token, os_platform)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [normalizedAddress, finalUsername, publicKey, signingPublicKey, finalAvatar, finalStatus, finalRegisteredAt, trustScore, finalPushToken, finalOsPlatform]);
+        db.run(`INSERT OR REPLACE INTO users (address, username, public_key, signing_public_key, signed_pre_key, signed_pre_key_signature, avatar, status, registered_at, trust_score, push_token, os_platform)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [normalizedAddress, finalUsername, publicKey, signingPublicKey, signedPreKey, signedPreKeySignature, finalAvatar, finalStatus, finalRegisteredAt, trustScore, finalPushToken, finalOsPlatform]);
+        
+        // Generate JWT session token
+        const token = jwt.sign({ address: normalizedAddress }, JWT_SECRET, { expiresIn: JWT_EXPIRY });
+        
         users.set(normalizedAddress, {
             socketId: socket.id,
             publicKey,
@@ -494,7 +537,8 @@ io.on('connection', (socket) => {
             username: finalUsername,
             registeredAt: finalRegisteredAt,
             trustScore: trustScore,
-            trustStage: getTrustStage(finalRegisteredAt, trustScore)
+            trustStage: getTrustStage(finalRegisteredAt, trustScore),
+            token // Send token to client for subsequent authentication
         });
 
         socket.broadcast.emit('userStatus', {
@@ -511,7 +555,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('fetchOfflineMessages', () => {
-        if (!socket.address) return;
+        if (!requireAuth(socket)) return;
         const pending = offlineMessages.get(socket.address) || [];
         if (pending.length > 0) {
             pending.forEach(msg => {
@@ -526,7 +570,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('ackOfflineMessages', ({ messageIds }) => {
-        if (!socket.address || !Array.isArray(messageIds) || messageIds.length === 0) return;
+        if (!requireAuth(socket) || !Array.isArray(messageIds) || messageIds.length === 0) return;
         const pending = offlineMessages.get(socket.address) || [];
         const remaining = pending.filter(msg => !messageIds.includes(msg.id || msg.messageId));
         if (remaining.length === 0) offlineMessages.delete(socket.address);
@@ -535,7 +579,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('updateProfile', ({ avatar, status }) => {
-        if (!socket.address) return;
+        if (!requireAuth(socket)) return;
         const address = socket.address;
         const user = users.get(address);
         if (user) {
@@ -553,7 +597,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('updatePushToken', ({ token }) => {
-        if (!socket.address) return;
+        if (!requireAuth(socket)) return;
         const user = users.get(socket.address);
         if (user) {
             user.pushToken = token;
@@ -562,7 +606,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('verifyContact', async ({ address }, callback) => {
-        if (!socket.address) return;
+        if (!requireAuth(socket, callback)) return;
         const verifier = socket.address.toLowerCase();
         const verified = address.toLowerCase();
 
@@ -602,7 +646,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('reportSpam', async ({ address, reason }, callback) => {
-        if (!socket.address) return;
+        if (!requireAuth(socket, callback)) return;
         const reporter = socket.address.toLowerCase();
         const reported = address.toLowerCase();
 
@@ -630,10 +674,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('setUsername', async ({ username }, callback) => {
-        if (!socket.address) {
-            callback({ success: false, error: 'Not registered' });
-            return;
-        }
+        if (!requireAuth(socket, callback)) return;
 
         const normalizedUsername = username.toLowerCase().trim();
         if (normalizedUsername.length < 3 || normalizedUsername.length > 20) {
@@ -692,6 +733,8 @@ io.on('connection', (socket) => {
                 username: row.username,
                 publicKey: row.public_key,
                 signingPublicKey: row.signing_public_key,
+                signedPreKey: row.signed_pre_key,
+                signedPreKeySignature: row.signed_pre_key_signature,
                 avatar: row.avatar,
                 status: row.status,
                 online: onlineUser?.online || false,
@@ -704,19 +747,21 @@ io.on('connection', (socket) => {
 
     socket.on('getPublicKey', ({ address }, callback) => {
         const normalizedAddress = address.toLowerCase();
-        db.get(`SELECT public_key, signing_public_key FROM users WHERE address = ?`, [normalizedAddress], (err, row) => {
+        db.get(`SELECT public_key, signing_public_key, signed_pre_key, signed_pre_key_signature FROM users WHERE address = ?`, [normalizedAddress], (err, row) => {
             if (err || !row) return callback(null);
             const onlineUser = users.get(normalizedAddress);
             callback({ 
                 publicKey: row.public_key, 
                 signingPublicKey: row.signing_public_key,
+                signedPreKey: row.signed_pre_key,
+                signedPreKeySignature: row.signed_pre_key_signature,
                 online: onlineUser?.online || false 
             });
         });
     });
 
     socket.on('uploadPreKeys', ({ preKeys }) => {
-        if (!socket.address || !Array.isArray(preKeys)) return;
+        if (!requireAuth(socket) || !Array.isArray(preKeys)) return;
         db.serialize(() => {
             preKeys.forEach(pk => {
                 db.run(
@@ -728,8 +773,19 @@ io.on('connection', (socket) => {
     });
 
     socket.on('fetchPreKey', ({ address }, callback) => {
-        if (!socket.address) return callback ? callback({error: 'Not authenticated'}) : null;
+        if (!requireAuth(socket, callback)) return;
         if (!address) return callback(null);
+        
+        const now = Date.now();
+        const limit = preKeyCounters.get(socket.address) || { count: 0, resetAt: now + 60000 };
+        if (now > limit.resetAt) { limit.count = 1; limit.resetAt = now + 60000; }
+        else { limit.count++; }
+        preKeyCounters.set(socket.address, limit);
+        
+        if (limit.count > 30) {
+            return callback({ error: 'Rate limit exceeded' });
+        }
+
         const targetAddr = address.toLowerCase();
         db.get(
             `SELECT key_id, public_key, signature FROM pre_keys WHERE address = ? ORDER BY RANDOM() LIMIT 1`,
@@ -747,7 +803,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('signal', ({ to, signal }) => {
-        if (!socket.address) return;
+        if (!requireAuth(socket)) return;
         const toAddress = to.toLowerCase();
         const recipient = users.get(toAddress);
         if (recipient && recipient.online) {
@@ -759,21 +815,19 @@ io.on('connection', (socket) => {
     });
 
     socket.on('getHistory', ({ peerAddress }, callback) => {
-        if (!socket.address || typeof callback !== 'function') return;
-        // DecentraChat doesn't store historical delivered messages on the server for privacy
-        // Historical messages are synced via SwarmSync (CRDTs) directly between peers
+        if (!requireAuth(socket, callback) || typeof callback !== 'function') return;
         callback([]); 
     });
 
     socket.on('getGroupHistory', ({ groupId, lastSequenceNo }, callback) => {
-        if (!socket.address || typeof callback !== 'function') return;
+        if (!requireAuth(socket, callback) || typeof callback !== 'function') return;
         callback([]);
     });
 
     socket.on('sendMessage', async (messageData) => {
         const { to, ...rest } = messageData;
         const toAddress = to.toLowerCase();
-        if (!socket.address) return;
+        if (!requireAuth(socket)) return;
 
         const { allowed, error } = await checkPrivileges(socket.address, 'sendMessage');
         if (!allowed) {
@@ -804,7 +858,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('sendGroupMessage', (messageData) => {
-        if (!socket.address) return;
+        if (!requireAuth(socket)) return;
         const { groupId, members, ...rest } = messageData;
         if (!Array.isArray(members) || members.length === 0) return;
 
@@ -896,7 +950,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('syncYjsState', ({ toAddress, chatId, epochIndex, updateBase64 }) => {
-        if (!socket.address || !toAddress) return;
+        if (!requireAuth(socket) || !toAddress) return;
         const recipient = users.get(toAddress.toLowerCase());
         if (recipient && recipient.online) {
             io.to(recipient.socketId).emit('syncYjsState', {
@@ -909,7 +963,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('messageReceipt', ({ messageId, to, type, chatId }) => {
-        if (!socket.address) return;
+        if (!requireAuth(socket)) return;
         const toAddress = to.toLowerCase();
         const fromAddress = socket.address.toLowerCase();
         if (chatId && chatId.startsWith('group_')) {
@@ -933,7 +987,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('getMyGroups', (callback) => {
-        if (!socket.address) return callback([]);
+        if (!requireAuth(socket, callback)) return;
         const address = socket.address.toLowerCase();
         db.all(
             `SELECT g.*, GROUP_CONCAT(m.user_address) as member_list 
@@ -958,7 +1012,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('createGroup', async ({ groupId, groupName, members, avatar }) => {
-        if (!socket.address) return;
+        if (!requireAuth(socket)) return;
         
         const { allowed, error } = await checkPrivileges(socket.address, 'createGroup');
         if (!allowed) {
@@ -992,7 +1046,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('deleteGroup', ({ groupId, members }) => {
-        if (!socket.address || !groupId) return;
+        if (!requireAuth(socket) || !groupId) return;
         db.get(`SELECT is_admin FROM group_members WHERE group_id = ? AND user_address = ?`, [groupId, socket.address.toLowerCase()], (err, row) => {
             if (err || !row || row.is_admin !== 1) return; // Not an admin
             db.run(`DELETE FROM groups WHERE id = ?`, [groupId]);
@@ -1014,7 +1068,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('removeGroupMember', ({ groupId, memberAddress, members }) => {
-        if (!socket.address || !groupId || !memberAddress) return;
+        if (!requireAuth(socket) || !groupId || !memberAddress) return;
         db.get(`SELECT is_admin FROM group_members WHERE group_id = ? AND user_address = ?`, [groupId, socket.address.toLowerCase()], (err, row) => {
             if (err || !row || row.is_admin !== 1) {
                 // Allow users to remove themselves (leave group)
@@ -1039,7 +1093,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('updateGroupAvatar', ({ groupId, avatar, members }) => {
-        if (!socket.address || !groupId) return;
+        if (!requireAuth(socket) || !groupId) return;
         db.get(`SELECT is_admin FROM group_members WHERE group_id = ? AND user_address = ?`, [groupId, socket.address.toLowerCase()], (err, row) => {
             if (err || !row || row.is_admin !== 1) return;
             db.run(`UPDATE groups SET avatar = ? WHERE id = ?`, [avatar, groupId]);
@@ -1058,8 +1112,9 @@ io.on('connection', (socket) => {
             });
         });
     });
+
     socket.on('messageReaction', (data) => {
-        if (!socket.address) return;
+        if (!requireAuth(socket)) return;
         const { messageId, emoji, action, to, groupId, members } = data;
         if (!messageId || !emoji) return;
         const payload = { id: `rx_${Date.now()}`, messageId, emoji, action: action || 'add', from: socket.address, groupId: groupId || null, timestamp: Date.now() };
@@ -1077,6 +1132,24 @@ io.on('connection', (socket) => {
                 pushOfflineNotification(toAddress, payload, 'reaction');
             }
         });
+    });
+
+    socket.on('fetchTurnCredentials', async (callback) => {
+        if (!requireAuth(socket, callback)) return;
+        if (!process.env.TURN_API_KEY) {
+            return callback([
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' }
+            ]);
+        }
+        try {
+            const response = await fetch(`https://decentrachat.metered.ca/api/v1/turn/credentials?apiKey=${process.env.TURN_API_KEY}`);
+            const iceServers = await response.json();
+            callback(iceServers);
+        } catch (err) {
+            callback([{ urls: 'stun:stun.l.google.com:19302' }]);
+        }
     });
 
     socket.on('disconnect', () => {

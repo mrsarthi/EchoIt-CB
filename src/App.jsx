@@ -1,5 +1,5 @@
 // App.jsx - Main Application Component
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { WalletProvider, useWallet } from './context/WalletContext';
 import { WalletConnect } from './components/WalletConnect';
 import { ChatInterface } from './components/ChatInterface';
@@ -63,7 +63,7 @@ function AppContent() {
   const [connectionError, setConnectionError] = useState(null);
   const [isSolvingPoW, setIsSolvingPoW] = useState(false);
 
-  const solveProofOfWork = async (challenge, addr) => {
+  const solveProofOfWork = useCallback(async (challenge, addr) => {
     setIsSolvingPoW(true);
     try {
       const hash = await hashArgon2(challenge, (addr || address).slice(0, 16));
@@ -71,7 +71,7 @@ function AppContent() {
     } finally {
       setIsSolvingPoW(false);
     }
-  };
+  }, [address]);
 
   useEffect(() => {
     // Inform Capacitor Updater that the JS bundle successfully booted!
@@ -105,6 +105,8 @@ function AppContent() {
           address, 
           keys.publicKey, 
           keys.signingPublicKey, 
+          keys.signedPreKey,
+          keys.signedPreKeySignature,
           storedUsername, 
           storedAvatar, 
           storedStatus,

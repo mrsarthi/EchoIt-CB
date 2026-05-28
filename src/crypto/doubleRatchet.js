@@ -32,7 +32,7 @@ export function setCryptoSessionKey(key) {
 /**
  * Internal helper to encrypt sensitive state before saving
  */
-async function encryptSensitive(data) {
+export async function encryptSensitive(data) {
     if (!storageSessionKey) return data;
     const str = JSON.stringify(data);
     const { ciphertext, nonce } = await cryptoWorker.encryptSymmetric(str, storageSessionKey);
@@ -42,7 +42,7 @@ async function encryptSensitive(data) {
 /**
  * Internal helper to decrypt sensitive state after loading
  */
-async function decryptSensitive(data) {
+export async function decryptSensitive(data) {
     if (!storageSessionKey || !data._isEncrypted) return data;
     try {
         const decrypted = await cryptoWorker.decryptSymmetric(data.encrypted, data.nonce, storageSessionKey);
@@ -294,26 +294,48 @@ async function dhRatchetStep(session, newPeerRatchetKey) {
 }
 
 export async function decryptRatchet(peerAddress, { ciphertext, nonce, header }) {
-    let session = await loadSession(peerAddress);
-    if (!session) return null;
-    const skippedResult = await trySkippedMessageKeys(session, header, ciphertext, nonce);
-    if (skippedResult) { await saveSession(peerAddress, session); return skippedResult; }
-    if (header.ratchetKey !== session.recvRatchetPublicKey) {
-        if (session.recvChainKey) await skipMessageKeys(session, header.previousCounter);
-        await dhRatchetStep(session, header.ratchetKey);
-    }
-    if (session.recvChainKey) await skipMessageKeys(session, header.index);
-    if (!session.recvChainKey) return null;
-    const { messageKey, nextChainKey } = await kdfChainKey(session.recvChainKey);
-    session.recvChainKey = nextChainKey;
-    session.recvIndex = header.index + 1;
     try {
+        let session = await loadSession(peerAddress);
+        if (!session) {
+            console.warn(`⚠️ No DR session found for ${peerAddress.slice(0, 10)}`);
+            return null;
+        }
+
+        const skippedResult = await trySkippedMessageKeys(session, header, ciphertext, nonce);
+        if (skippedResult) { 
+            await saveSession(peerAddress, session); 
+            return skippedResult; 
+        }
+
+        if (header.ratchetKey !== session.recvRatchetPublicKey) {
+            if (session.recvChainKey) await skipMessageKeys(session, header.previousCounter);
+            await dhRatchetStep(session, header.ratchetKey);
+        }
+
+        if (session.recvChainKey) await skipMessageKeys(session, header.index);
+        
+        if (!session.recvChainKey) {
+            console.error(`❌ DR Chain Key missing for ${peerAddress.slice(0, 10)}`);
+            return null;
+        }
+
+        const { messageKey, nextChainKey } = await kdfChainKey(session.recvChainKey);
+        session.recvChainKey = nextChainKey;
+        session.recvIndex = header.index + 1;
+
         const decrypted = await cryptoWorker.decryptSymmetric(ciphertext, nonce, encodeBase64(messageKey));
-        if (!decrypted) return null;
+        if (!decrypted) {
+            console.error(`❌ DR Symmetric decryption failed for ${peerAddress.slice(0, 10)}`);
+            return null;
+        }
+
         session.acknowledged = true;
         await saveSession(peerAddress, session);
         return decrypted;
-    } catch { return null; }
+    } catch (err) {
+        console.error(`❌ Critical DR decryption error for ${peerAddress.slice(0, 10)}:`, err.message);
+        return null;
+    }
 }
 
 export async function hasSession(peerAddress) {

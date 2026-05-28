@@ -7,6 +7,7 @@
 import { encodeBase64, decodeBase64, decodeUTF8, encodeUTF8 } from 'tweetnacl-util';
 import localforage from 'localforage';
 import { cryptoWorker } from './cryptoWorkerClient';
+import { encryptSensitive, decryptSensitive } from './doubleRatchet';
 
 // Mutex for sequential ratchet operations per peer
 const peerLocks = new Map();
@@ -37,6 +38,30 @@ const epochSessionStore = localforage.createInstance({
     name: 'decentrachat',
     storeName: 'epoch_sessions',
 });
+
+/**
+ * Helper to save a session with at-rest encryption.
+ */
+async function saveEpochSession(id, session) {
+    const encrypted = await encryptSensitive(session);
+    if (!encrypted) {
+        // Fallback to plain only if session key isn't set (graceful fail for dev)
+        return await epochSessionStore.setItem(id, session);
+    }
+    return await epochSessionStore.setItem(id, { _encrypted: encrypted });
+}
+
+/**
+ * Helper to load a session with at-rest decryption.
+ */
+async function getEpochSession(id) {
+    const data = await epochSessionStore.getItem(id);
+    if (!data) return null;
+    if (data._encrypted) {
+        return await decryptSensitive(data._encrypted);
+    }
+    return data; // Legacy or dev fallback
+}
 
 /**
  * Derive a 32-byte Epoch Key from a Root Key and Epoch Index.
@@ -75,7 +100,7 @@ export async function initEpochSession(peerAddress, rootKey) {
         messageIndex: 0,
         skippedKeys: {} // { "epoch:index": base64Key }
     };
-    await epochSessionStore.setItem(peerAddress.toLowerCase(), session);
+    await saveEpochSession(peerAddress.toLowerCase(), session);
     return session;
 }
 
@@ -84,7 +109,7 @@ export async function initEpochSession(peerAddress, rootKey) {
  */
 export async function encryptEpoch(peerAddress, plaintext) {
     return await withLock(peerAddress, async () => {
-        let session = await epochSessionStore.getItem(peerAddress.toLowerCase());
+        let session = await getEpochSession(peerAddress.toLowerCase());
         if (!session) return null;
 
         // Check if we need to roll over to a new epoch
@@ -102,7 +127,7 @@ export async function encryptEpoch(peerAddress, plaintext) {
         // Perform encryption via worker
         const { ciphertext, nonce } = await cryptoWorker.encryptSymmetric(plaintext, encodeBase64(messageKey));
 
-        await epochSessionStore.setItem(peerAddress.toLowerCase(), session);
+        await saveEpochSession(peerAddress.toLowerCase(), session);
 
         return {
             ciphertext,
@@ -120,7 +145,7 @@ export async function encryptEpoch(peerAddress, plaintext) {
  */
 export async function decryptEpoch(peerAddress, { ciphertext, nonce, header }) {
     return await withLock(peerAddress, async () => {
-        let originalSession = await epochSessionStore.getItem(peerAddress.toLowerCase());
+        let originalSession = await getEpochSession(peerAddress.toLowerCase());
         if (!originalSession) return null;
 
         // Deep clone to prevent mutation on failed decryption
@@ -145,7 +170,7 @@ export async function decryptEpoch(peerAddress, { ciphertext, nonce, header }) {
                     const decrypted = await cryptoWorker.decryptSymmetric(ciphertext, nonce, key);
                     if (decrypted) {
                         delete session.skippedKeys[keyMapId];
-                        await epochSessionStore.setItem(peerAddress.toLowerCase(), session);
+                        await saveEpochSession(peerAddress.toLowerCase(), session);
                         return decrypted;
                     }
                 } catch (err) {
@@ -171,7 +196,7 @@ export async function decryptEpoch(peerAddress, { ciphertext, nonce, header }) {
         try {
             const decrypted = await cryptoWorker.decryptSymmetric(ciphertext, nonce, encodeBase64(messageKey));
             if (decrypted) {
-                await epochSessionStore.setItem(peerAddress.toLowerCase(), session);
+                await saveEpochSession(peerAddress.toLowerCase(), session);
                 return decrypted;
             } else {
                 return null;

@@ -5,7 +5,7 @@ import { TrustBadge } from './TrustBadge';
 export function SelfTrustDetailsModal({ trustStage, trustScore, onClose }) {
     return (
         <div className="modal-overlay animate-fadeIn" onClick={onClose}>
-            <div className="modal-content animate-scaleIn" style={{ maxWidth: '320px', padding: 'var(--space-lg)' }} onClick={e => e.stopPropagation()}>
+            <div className="modal-content animate-scaleIn" style={{ maxWidth: '320px', maxHeight: '90vh', overflowY: 'auto', padding: 'var(--space-lg)' }} onClick={e => e.stopPropagation()}>
                 <div className="modal-header" style={{ border: 'none', padding: 0, marginBottom: 'var(--space-lg)' }}>
                     <h2 style={{ fontSize: '1.25rem' }}>Your Trust Status</h2>
                     <button className="btn btn-ghost" onClick={onClose}><X size={20} /></button>

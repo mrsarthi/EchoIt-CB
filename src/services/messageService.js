@@ -16,7 +16,8 @@ import {
     encryptRatchet, 
     decryptRatchet,
     storePreKeySecrets,
-    consumePreKeySecret
+    consumePreKeySecret,
+    deleteSession
 } from '../crypto/doubleRatchet';
 import {
     initEpochSession,
@@ -113,30 +114,47 @@ export async function sendEncryptedMessage(senderAddress, recipientAddress, plai
     if (!epochData && !ratchetData) {
         console.log(`🤝 Initiating X3DH handshake with ${recipientAddress.slice(0, 10)}...`);
         try {
-            const preKey = await socketService.fetchPreKey(recipientAddress);
+            const preKey = await socketService.fetchPreKey(recipientAddress); // This is the OPK
             const peerInfo = await socketService.getUser(recipientAddress);
             const peerIK = peerInfo?.publicKey;
             const peerSigningKey = peerInfo?.signingPublicKey;
             
             if (peerIK && peerSigningKey) {
-                // Verify pre-key signature if available (MITM protection)
+                // --- V3 Hardening: Distinct SPK ---
+                const peerSPK = peerInfo?.signedPreKey;
+                const peerSPKSignature = peerInfo?.signedPreKeySignature;
+
+                if (!peerSPK) {
+                    console.error('🛡️ Security Error: Peer does not have a distinct Signed Pre-Key (SPK).');
+                    throw new Error('Peer requires a security update to receive messages.');
+                }
+
+                // Verify SPK signature (MITM protection)
+                if (peerSPKSignature) {
+                    const isValid = verifyPreKeySignature(peerSPK, peerSPKSignature, peerSigningKey);
+                    if (!isValid) {
+                        console.error('🛡️ MITM ALERT: SPK signature verification FAILED!');
+                        throw new Error('Security Error: Potential identity hijacking detected.');
+                    }
+                }
+
+                // If we also fetched an OPK, verify its signature too
                 if (preKey?.signature) {
                     const isValid = verifyPreKeySignature(preKey.publicKey, preKey.signature, peerSigningKey);
                     if (!isValid) {
-                        console.error('🛡️ MITM ALERT: Pre-key signature verification FAILED!');
+                        console.error('🛡️ MITM ALERT: OPK signature verification FAILED!');
                         throw new Error('Security Error: Potential identity hijacking detected.');
                     }
                 }
 
                 const ephemeralKey = generateKeyPair();
-                // Derive X3DH shared secret WITHOUT OPK to avoid key-sync failures.
-                // The IK+EK combination provides strong forward secrecy.
-                const sharedSecret = deriveX3DHSecret(
+                
+                const sharedSecret = await deriveX3DHSecret(
                     myKeys,         // my IK
                     ephemeralKey,   // my EK
                     peerIK,         // peer IK
-                    peerIK,         // peer SPK (using IK as fallback)
-                    null            // NO OPK — eliminates key-sync mismatches
+                    peerSPK,        // peer SPK (distinct from IK)
+                    preKey?.publicKey || null // peer OPK (optional)
                 );
                 console.log(`🔑 X3DH Initiator: sharedSecret[0:4] = ${encodeBase64(sharedSecret.slice(0, 4))}`);
 
@@ -432,10 +450,9 @@ export async function decryptReceivedMessage(encryptedMessage, cachedKeys = null
             const { ephemeralKey, preKeyId } = encryptedMessage.x3dh;
             console.log(`🤝 Responding to X3DH handshake from ${encryptedMessage.from.slice(0, 10)}...`);
             
-            // Retrieve the OPK secret that the server consumed
-            let opkSecret = null;
+            // Retrieve the OPK secret that the server consumed (consumed to ensure it's one-time use)
             if (preKeyId !== undefined && preKeyId !== null) {
-                opkSecret = await consumePreKeySecret(preKeyId);
+                await consumePreKeySecret(preKeyId);
             }
 
             const peerIK = encryptedMessage.senderPublicKey || await socketService.getPublicKey(encryptedMessage.from);
@@ -443,7 +460,7 @@ export async function decryptReceivedMessage(encryptedMessage, cachedKeys = null
             // As responder, derive the same X3DH secret WITHOUT OPK
             const sharedSecret = deriveX3DHResponderSecret(
                 myKeys,                      // my IK
-                { secretKey: myKeys.secretKey }, // my SPK (using IK as fallback)
+                { secretKey: myKeys.signedPreKeySecret || myKeys.secretKey }, // my SPK
                 null,                         // NO OPK — must match sender
                 peerIK,                       // peer IK
                 ephemeralKey                  // peer EK (from payload)
@@ -456,7 +473,7 @@ export async function decryptReceivedMessage(encryptedMessage, cachedKeys = null
                     encryptedMessage.from,
                     sharedSecret,
                     encryptedMessage.ratchet.header.ratchetKey,
-                    myKeys.secretKey // Pass Bob's IK (used as SPK fallback)
+                    myKeys.signedPreKeySecret || myKeys.secretKey // Pass Bob's SPK
                 );
             }
 
@@ -485,6 +502,8 @@ export async function decryptReceivedMessage(encryptedMessage, cachedKeys = null
             if (decrypted) {
                 return { ...encryptedMessage, content: decrypted, decryptionFailed: false };
             }
+            // --- V3 Hardening: Auto-heal on Epoch Failure ---
+            console.warn(`🛠️ Epoch decryption failed for ${encryptedMessage.from.slice(0, 10)}. Marking for heal.`);
         } catch (err) {
             console.error('Epoch Ratchet decryption failed:', err);
         }
@@ -497,9 +516,18 @@ export async function decryptReceivedMessage(encryptedMessage, cachedKeys = null
             if (decrypted) {
                 return { ...encryptedMessage, content: decrypted, decryptionFailed: false };
             }
+            // --- V3 Hardening: Auto-heal on DR Failure ---
+            console.warn(`🛠️ Ratchet decryption failed for ${encryptedMessage.from.slice(0, 10)}. Marking for heal.`);
         } catch (err) {
             console.error('Ratchet decryption failed:', err);
         }
+    }
+
+    // If we reach here and it was a ratchet/epoch message, it failed.
+    if (encryptedMessage.epochRatchet || encryptedMessage.ratchet) {
+        // Auto-heal: Delete local session so the next send triggers X3DH
+        await deleteSession(encryptedMessage.from);
+        return { ...encryptedMessage, content: '[Decryption Failed - Connection Resetting...]', decryptionFailed: true };
     }
 
     // --- Legacy Decryption Fallback ---

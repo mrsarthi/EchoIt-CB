@@ -22,7 +22,7 @@ import {
 import { register as registerUser } from '../services/socketService';
 import { platform, openAuthBrowser, onWalletAuth } from '../services/platformService';
 import { initPushNotifications } from '../services/pushService';
-import { setStorageSessionKey } from '../services/storageService';
+import { setStorageSessionKey } from '../services/storageEncryption';
 import { setCryptoSessionKey } from '../crypto/doubleRatchet';
 import PINModal from '../components/PINModal';
 import { hashArgon2 } from '../crypto/argon2Client';
@@ -111,12 +111,9 @@ export function WalletProvider({ children }) {
             // 🛡️ Step 4: Derive and set storage session key (Argon2)
             await setStorageSessionKey(pin, saltAddress);
             
-            // Derive a fast SHA-256 hash for the volatile crypto session key
-            // This key is used for encrypting DR sessions and Pre-Key secrets
-            const encoder = new TextEncoder();
-            const pinData = encoder.encode(pin);
-            const hash = await window.crypto.subtle.digest('SHA-256', pinData);
-            const b64Key = btoa(String.fromCharCode(...new Uint8Array(hash)));
+            // 🛡️ Step 5: Derive a robust Argon2 hash for the volatile crypto session key
+            // This key is used for encrypting DR sessions and Pre-Key secrets in IndexedDB
+            const b64Key = await hashArgon2(pin, saltAddress.slice(0, 16));
             setCryptoSessionKey(b64Key);
 
             if (isPINSetup) {

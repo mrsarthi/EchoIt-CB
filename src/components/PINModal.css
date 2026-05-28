@@ -18,6 +18,8 @@
     background: var(--bg-secondary);
     width: 100%;
     max-width: 22rem;
+    max-height: 90vh;
+    overflow-y: auto;
     padding: var(--space-2xl);
     border-radius: var(--radius-xl);
     border: 1px solid var(--border-subtle);

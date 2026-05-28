@@ -58,24 +58,38 @@ export async function sliceAndTransmitMedia(base64Data, mimeType, onProgress, re
         }
     }
 
-    // --- Layer 6 Fallback 2: IPFS (Pinata) ---
-    console.log('[MediaTransport] Uploading to IPFS...');
+    // --- Layer 6 Fallback 2: Multi-Homing Render Relays ---
+    console.log('[MediaTransport] Uploading to Multi-Homing Relays...');
     if (onProgress) onProgress(10); 
 
-    const pinataJwt = localStorage.getItem(PINATA_JWT_KEY);
-    if (!pinataJwt) {
-        throw new Error("Pinata JWT not found in Settings. Please configure it to send media when peers are offline.");
-    }
-
     try {
-        const cid = await uploadToIPFS(encrypted, pinataJwt);
-        manifest.cid = cid;
-        manifest.isIPFS = true;
+        const { wakeUpRelays, uploadChunkWithRetry } = await import('./customRelayService');
+        wakeUpRelays(); // Fire and forget
+        
+        const CHUNK_SIZE = 1024 * 1024 * 2; // 2MB chunks for HTTP Relay
+        const totalSize = encrypted.length;
+        const totalChunks = Math.ceil(totalSize / CHUNK_SIZE);
+        
+        manifest.relayChunks = totalChunks;
+        
+        for (let i = 0; i < totalChunks; i++) {
+            const start = i * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, totalSize);
+            const chunkData = encrypted.slice(start, end);
+            const chunkId = `${manifest.mediaId}_${i}`;
+            
+            const success = await uploadChunkWithRetry(chunkId, chunkData, null, 3);
+            if (!success) throw new Error(`Relay upload failed at chunk ${i}`);
+            
+            if (onProgress) onProgress(10 + Math.round(((i + 1) / totalChunks) * 90));
+        }
+        
+        manifest.isRelay = true;
         
         if (onProgress) onProgress(100);
         return manifest;
     } catch (err) {
-        console.error('[MediaTransport] IPFS Upload failed:', err);
+        console.error('[MediaTransport] Relay Upload failed:', err);
         throw err;
     }
 }
@@ -135,7 +149,30 @@ export async function fetchAndReconstructMedia(manifest, onProgress) {
         }
     }
 
-    // 2. Check IPFS Fallback
+    // 2. Check Relay Fallback
+    if (manifest.isRelay) {
+        console.log('[MediaTransport] Fetching from Multi-Homing Relays...');
+        if (onProgress) onProgress(20);
+        
+        const { fetchChunkWithTimeout } = await import('./customRelayService');
+        let fullData = '';
+        
+        for (let i = 0; i < manifest.relayChunks; i++) {
+            const chunkId = `${manifest.mediaId}_${i}`;
+            const chunkData = await fetchChunkWithTimeout(chunkId);
+            if (!chunkData) throw new Error(`Relay download failed at chunk ${i}`);
+            
+            fullData += chunkData;
+            
+            if (onProgress) onProgress(20 + Math.round(((i + 1) / manifest.relayChunks) * 80));
+        }
+        
+        const decrypted = decryptSymmetric(fullData, manifest.nonce, manifest.ephemeralKey);
+        if (onProgress) onProgress(100);
+        return decrypted;
+    }
+
+    // 3. Check Legacy IPFS Fallback
     if (manifest.isIPFS && manifest.cid) {
         console.log('[MediaTransport] Fetching from IPFS CID:', manifest.cid);
         if (onProgress) onProgress(20);

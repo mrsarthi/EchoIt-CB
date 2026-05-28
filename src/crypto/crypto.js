@@ -30,11 +30,19 @@ export function deriveKeysFromSignature(signature) {
   const signingSeed = sigBytes.length >= 64 ? sigBytes.slice(32, 64) : nacl.hash(encryptionSeed).slice(0, 32);
   const signingKeyPair = nacl.sign.keyPair.fromSeed(signingSeed);
   
+  // Deterministic SPK for X3DH Forward Secrecy
+  const spkSeed = nacl.hash(signingSeed).slice(0, 32);
+  const spkKeyPair = nacl.box.keyPair.fromSecretKey(spkSeed);
+  const spkSignature = nacl.sign.detached(spkKeyPair.publicKey, signingKeyPair.secretKey);
+  
   return {
     publicKey: encodeBase64(encryptionKeyPair.publicKey),
     secretKey: encodeBase64(encryptionKeyPair.secretKey),
     signingPublicKey: encodeBase64(signingKeyPair.publicKey),
     signingSecretKey: encodeBase64(signingKeyPair.secretKey),
+    signedPreKey: encodeBase64(spkKeyPair.publicKey),
+    signedPreKeySecret: encodeBase64(spkKeyPair.secretKey),
+    signedPreKeySignature: encodeBase64(spkSignature),
   };
 }
 
@@ -191,9 +199,43 @@ export function verifyPreKeySignature(publicKeyBase64, signatureBase64, identity
 }
 
 /**
+ * Securely derive a high-entropy key from an input secret using HKDF-SHA256.
+ * This ensures the resulting key is cryptographically independent and uniform.
+ */
+export async function hkdfSha256(inputSecret, salt = null, info = '', length = 32) {
+    const encoder = new TextEncoder();
+    const infoBuffer = encoder.encode(info);
+    const saltBuffer = salt || new Uint8Array(32).fill(0);
+
+    const importKey = await window.crypto.subtle.importKey(
+        'raw',
+        inputSecret,
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['deriveKey']
+    );
+
+    const derivedKey = await window.crypto.subtle.deriveKey(
+        {
+            name: 'HKDF',
+            hash: 'SHA-256',
+            salt: saltBuffer,
+            info: infoBuffer
+        },
+        importKey,
+        { name: 'AES-GCM', length: length * 8 },
+        true,
+        ['encrypt']
+    );
+
+    const rawKey = await window.crypto.subtle.exportKey('raw', derivedKey);
+    return new Uint8Array(rawKey);
+}
+
+/**
  * X3DH Initial Shared Secret Derivation
  */
-export function deriveX3DHSecret(myIK, myEK, peerIK, peerSPK, peerOPK = null) {
+export async function deriveX3DHSecret(myIK, myEK, peerIK, peerSPK, peerOPK = null) {
     const dh1 = nacl.box.before(decodeBase64(peerSPK), decodeBase64(myIK.secretKey));
     const dh2 = nacl.box.before(decodeBase64(peerIK), decodeBase64(myEK.secretKey));
     const dh3 = nacl.box.before(decodeBase64(peerSPK), decodeBase64(myEK.secretKey));
@@ -205,13 +247,14 @@ export function deriveX3DHSecret(myIK, myEK, peerIK, peerSPK, peerOPK = null) {
         combined = new Uint8Array([...combined, ...dh4]);
     }
 
-    return combined; 
+    // Apply HKDF-SHA256 over the concatenated DH outputs (Signal V3 standard)
+    return await hkdfSha256(combined, null, 'DecentraChat-X3DH-V3');
 }
 
 /**
  * X3DH Shared Secret Derivation for the Responder
  */
-export function deriveX3DHResponderSecret(myIK, mySPK, myOPKSecret, peerIK, peerEK) {
+export async function deriveX3DHResponderSecret(myIK, mySPK, myOPKSecret, peerIK, peerEK) {
     const dh1 = nacl.box.before(decodeBase64(peerIK), decodeBase64(mySPK.secretKey));
     const dh2 = nacl.box.before(decodeBase64(peerEK), decodeBase64(myIK.secretKey));
     const dh3 = nacl.box.before(decodeBase64(peerEK), decodeBase64(mySPK.secretKey));
@@ -224,7 +267,8 @@ export function deriveX3DHResponderSecret(myIK, mySPK, myOPKSecret, peerIK, peer
         combined = new Uint8Array([...combined, ...dh4]);
     }
 
-    return combined;
+    // Apply HKDF-SHA256 over the concatenated DH outputs (Signal V3 standard)
+    return await hkdfSha256(combined, null, 'DecentraChat-X3DH-V3');
 }
 
 /**

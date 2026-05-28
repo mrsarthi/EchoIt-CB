@@ -88,6 +88,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
     const [profilePreview, setProfilePreview] = useState(null); // User object for preview modal
     const [isUploadingMedia, setIsUploadingMedia] = useState(false);
     const [uploadProgress, setUploadProgress] = useState(0);
+    const [lightboxProgress, setLightboxProgress] = useState(null);
     const [activeTab, setActiveTab] = useState('chats'); // 'chats', 'contacts', 'settings'
     const [showSelfTrustDetails, setShowSelfTrustDetails] = useState(false);
     const [showContactProfile, setShowContactProfile] = useState(false);
@@ -111,7 +112,31 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
     const chatScrollPositionsRef = useRef({}); // { [chatAddress]: scrollTop }
     const prevMessagesLenRef = useRef(0);
 
-    // Helper to scroll the messages container to the exact bottom
+    // Media Lightbox Lazy Loading
+    useEffect(() => {
+        if (lightboxMedia?.manifest && !lightboxMedia.loadedSrc) {
+            setLightboxProgress(0);
+            let active = true;
+            
+            import('../services/mediaTransport').then(({ fetchAndReconstructMedia }) => {
+                fetchAndReconstructMedia(lightboxMedia.manifest, (progress) => {
+                    if (active) setLightboxProgress(progress);
+                }).then((base64Data) => {
+                    if (active) {
+                        setLightboxMedia(prev => ({ ...prev, loadedSrc: base64Data }));
+                        setLightboxProgress(null);
+                    }
+                }).catch(err => {
+                    if (active) {
+                        console.error("Failed to load high-res media", err);
+                        setLightboxProgress(null);
+                    }
+                });
+            });
+            return () => { active = false; };
+        }
+    }, [lightboxMedia]);
+
     const forceScrollToBottom = (smooth = false) => {
         const container = messagesContainerRef.current;
         if (!container) return;
@@ -153,7 +178,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
     // Effect 2: Dynamic Height Monitoring (ResizeObserver)
     useEffect(() => {
         const container = messagesContainerRef.current;
-        if (!container || !activeChat?.address) return;
+        if (!container || !activeChat?.address || typeof ResizeObserver === 'undefined') return;
 
         let isUserAtBottom = true;
 
@@ -675,7 +700,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                             {activeChat.isGroup && msg.from?.toLowerCase() !== walletAddress?.toLowerCase() && <div className="text-xs font-bold mb-1" style={{ color: 'var(--primary)' }}>{msg.senderUsername || formatAddress(msg.from)}</div>}
                                             {msg.replyTo && <div className="message-reply-context" onClick={() => scrollToMessage(msg.replyTo.id)}><div className="reply-bar-line" /><div className="reply-content"><span className="reply-sender">{msg.replyTo.senderUsername}</span><span className="reply-text">{msg.replyTo.content}</span></div></div>}
                                             {msg.decryptionFailed ? <div className="decryption-failed-content"><Lock size={14} className="text-error" /><p className="message-content text-muted italic">Decryption failed</p></div> : (msg.type === 'image' || msg.type === 'video') ? (
-                                                <div className="message-image-wrapper" onClick={() => setLightboxMedia({ src: msg.content, type: msg.type })}><img src={msg.content} alt="Media" className="message-image" /></div>
+                                                <div className="message-image-wrapper" onClick={() => setLightboxMedia({ src: msg.content, type: msg.type, manifest: msg.manifest, mediaId: msg.mediaId })}><img src={msg.content} alt="Media" className="message-image" /></div>
                                             ) : <p className="message-content">{msg.content}</p>}
                                             <div className="message-meta"><span>{formatTime(msg.timestamp)}</span>{msg.from?.toLowerCase() === walletAddress?.toLowerCase() && <Lock size={10} />}</div>
                                         </div>
@@ -786,10 +811,23 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
             {lightboxMedia && (
                 <div className="lightbox-overlay" onClick={() => setLightboxMedia(null)}>
                     <button className="lightbox-close" onClick={(e) => { e.stopPropagation(); setLightboxMedia(null); }}>×</button>
+                    {lightboxProgress !== null && (
+                        <div className="lightbox-progress-overlay" style={{ position: 'absolute', top: '20px', left: '50%', transform: 'translateX(-50%)', background: 'var(--bg-glass)', padding: '8px 16px', borderRadius: '20px', zIndex: 100, color: 'white' }}>
+                            Downloading High-Res... {lightboxProgress}%
+                        </div>
+                    )}
                     <div className="lightbox-zoom-container" onClick={(e) => e.stopPropagation()}>
-                        {lightboxMedia.type === 'video' ? <video src={lightboxMedia.src} controls autoPlay className="lightbox-video" style={{ maxWidth: '90vw', maxHeight: '90vh', outline: 'none' }} /> : (
+                        {lightboxMedia.type === 'video' ? (
+                            lightboxMedia.loadedSrc ? (
+                                <video src={lightboxMedia.loadedSrc} controls autoPlay className="lightbox-video" style={{ maxWidth: '90vw', maxHeight: '90vh', outline: 'none' }} />
+                            ) : (
+                                <div style={{ position: 'relative', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+                                    <img src={lightboxMedia.src} alt="Video Preview" style={{ maxWidth: '90vw', maxHeight: '90vh', opacity: 0.5, filter: 'blur(10px)' }} />
+                                </div>
+                            )
+                        ) : (
                             <QuickPinchZoom onUpdate={({ x, y, scale }) => { const imgEntry = document.getElementById('lightbox-zoomed-img'); if (imgEntry) imgEntry.style.setProperty('transform', make3dTransformValue({ x, y, scale })); }} maxZoom={5} wheelScaleFactor={500}>
-                                <img id="lightbox-zoomed-img" src={lightboxMedia.src} alt="Full size" className="lightbox-image" />
+                                <img id="lightbox-zoomed-img" src={lightboxMedia.loadedSrc || lightboxMedia.src} alt="Full size" className="lightbox-image" style={{ transition: 'filter 0.3s', filter: lightboxMedia.loadedSrc ? 'none' : 'blur(5px)' }} />
                             </QuickPinchZoom>
                         )}
                     </div>
