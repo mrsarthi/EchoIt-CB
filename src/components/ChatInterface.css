@@ -170,6 +170,7 @@
     flex-direction: column;
     position: relative;
     min-width: 0;
+    overflow: hidden;
 }
 
 /* Narrow desktop windows (< 768px): toggle sidebar/chat like mobile */
@@ -382,13 +383,62 @@
     border-bottom: 1px solid var(--border-subtle);
 }
 
-.platform-capacitor .chat-header{
-    background: #202c33;
+.platform-capacitor .chat-header-container {
+    background: #202c33 !important;
     /* WhatsApp Header */
-    padding: calc(0.5rem + env(safe-area-inset-top, 24px)) 0.75rem 0.5rem 0.75rem;
-    height: auto;
-    min-height: calc(3.75rem + env(safe-area-inset-top, 24px));
-    border-bottom: none;
+    padding-top: calc(0.5rem + env(safe-area-inset-top, 24px)) !important;
+    padding-bottom: 0.5rem !important;
+    height: auto !important;
+    min-height: calc(3.75rem + env(safe-area-inset-top, 24px)) !important;
+    border-bottom: none !important;
+}
+
+/* WhatsApp Mobile Input Overrides */
+.platform-capacitor .chat-input-container {
+    background: transparent !important;
+    padding-bottom: calc(0.5rem + env(safe-area-inset-bottom, 16px)) !important;
+    padding-left: 0.5rem !important;
+    padding-right: 0.5rem !important;
+}
+
+.platform-capacitor .chat-input-pill {
+    background: transparent !important;
+    box-shadow: none !important;
+    border: none !important;
+    padding: 0 !important;
+}
+
+/* Make attach button + input look like a single pill */
+.platform-capacitor .chat-input-form {
+    gap: 0 !important; 
+}
+
+.platform-capacitor .chat-input-form > button[aria-label="Attach File"] {
+    background: #202c33 !important;
+    border-radius: 24px 0 0 24px !important;
+    height: 48px !important;
+    width: 48px !important;
+    margin: 0 !important;
+}
+
+.platform-capacitor .chat-input-form > div.flex-1 {
+    background: #202c33 !important;
+    border-radius: 0 24px 24px 0 !important;
+    height: 48px !important;
+    margin: 0 !important;
+    display: flex;
+    align-items: center;
+}
+
+/* Make Send Button a separate green circle */
+.platform-capacitor .chat-input-form > button[aria-label="Send Message"] {
+    background: #00a884 !important;
+    color: white !important;
+    border-radius: 50% !important;
+    width: 48px !important;
+    height: 48px !important;
+    margin-left: 0.5rem !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3) !important;
 }
 
 .platform-capacitor .back-btn{
@@ -629,7 +679,7 @@
 
 .receipt-avatar.delivered {
     background: transparent;
-    border: 1px solid var(--text-muted);
+    border: 1.5px solid rgba(255, 255, 255, 0.4);
     box-shadow: none;
 }
 
@@ -905,9 +955,62 @@
     transition: transform 0.2s ease, filter 0.2s ease;
 }
 
+.message-image.blurry {
+    filter: blur(8px);
+    opacity: 0.7;
+}
+
 .message-image:hover {
     transform: scale(1.02);
     filter: brightness(1.1);
+}
+
+.media-download-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.25);
+    z-index: 10;
+    gap: 8px;
+    border-radius: 0.5rem;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.media-download-overlay:hover {
+    background: rgba(0, 0, 0, 0.4);
+}
+
+.download-btn-circle {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.media-download-overlay:hover .download-btn-circle {
+    transform: scale(1.15);
+    background: var(--accent-primary);
+    border-color: transparent;
+}
+
+.download-progress-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
 }
 
 /* Image Preview Bar */

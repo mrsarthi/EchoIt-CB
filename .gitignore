@@ -107,3 +107,12 @@ vite.config.ts.timestamp-*
 coverage/
 .nyc_output/
 
+# Playwright Test Output
+playwright-report/
+test-results/
+blob-report/
+
+# Local Test Scripts
+test_*.js
+*_test.js
+test-*.js

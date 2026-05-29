@@ -29,6 +29,51 @@ const settingsStore = localforage.createInstance({
     storeName: 'settings',
 });
 
+const chatIndexStore = localforage.createInstance({
+    name: 'decentrachat',
+    storeName: 'chat_indices',
+});
+
+/**
+ * Internal helper to update the message index for a chat.
+ * This avoids expensive .keys() scans for pagination.
+ */
+async function addToChatIndex(chatId, messageKey, timestamp) {
+    const lowerChatId = chatId.toLowerCase();
+    const mutex = getMutex(`index_${lowerChatId}`);
+    return mutex.lock(async () => {
+        const index = (await chatIndexStore.getItem(lowerChatId)) || [];
+        // Prevent duplicates
+        if (index.some(entry => entry.key === messageKey)) return;
+        
+        index.push({ key: messageKey, ts: timestamp });
+        // Keep index sorted by timestamp
+        index.sort((a, b) => a.ts - b.ts);
+        
+        // Optional: limit index size to MAX_HISTORY_PER_CHAT if needed
+        await chatIndexStore.setItem(lowerChatId, index);
+    });
+}
+
+/**
+ * Rebuild the index for a chat if it's missing.
+ */
+async function rebuildChatIndex(chatId) {
+    const lowerChatId = chatId.toLowerCase();
+    const allKeys = await individualMessageStore.keys();
+    const prefix = `msg_${lowerChatId}_`;
+    const chatKeys = allKeys.filter(k => k.startsWith(prefix));
+    
+    const index = chatKeys.map(key => {
+        const suffix = key.substring(prefix.length);
+        const ts = parseInt(suffix.split('_')[0]);
+        return { key, ts };
+    }).sort((a, b) => a.ts - b.ts);
+    
+    await chatIndexStore.setItem(lowerChatId, index);
+    return index;
+}
+
 class Mutex {
     constructor() {
         this.queue = Promise.resolve();
@@ -71,6 +116,7 @@ export async function saveMessage(chatId, message) {
             const v2Key = `msg_${chatId.toLowerCase()}_${timestamp}_${id}`;
             const messageWithId = { ...encryptedMessage, id, timestamp, chatId: chatId.toLowerCase() };
             await individualMessageStore.setItem(v2Key, messageWithId);
+            await addToChatIndex(chatId, v2Key, timestamp);
 
             await insertMessage(chatId, { ...message, id, timestamp, chatId: chatId.toLowerCase() });
 
@@ -97,24 +143,26 @@ export async function saveMessage(chatId, message) {
 
 export async function getMessagesPaginated(chatId, limit = 50, beforeTimestamp = null) {
     const lowerChatId = chatId.toLowerCase();
-    const allKeys = await individualMessageStore.keys();
-
-    let chatKeys = allKeys.filter(k => k.startsWith(`msg_${lowerChatId}_`));
-
-    if (beforeTimestamp) {
-        const prefix = `msg_${lowerChatId}_`;
-        chatKeys = chatKeys.filter(k => {
-            const suffix = k.substring(prefix.length);
-            const ts = parseInt(suffix.split('_')[0]);
-            return ts < beforeTimestamp;
-        });
+    
+    // Attempt to use the fast index first
+    let index = await chatIndexStore.getItem(lowerChatId);
+    if (!index) {
+        console.debug(`🔍 Index missing for ${lowerChatId}, rebuilding...`);
+        index = await rebuildChatIndex(chatId);
     }
 
-    chatKeys.sort().reverse();
-    const pageKeys = chatKeys.slice(0, limit);
+    let chatEntries = index;
 
-    const messages = await Promise.all(pageKeys.map(async (k) => {
-        const msg = await individualMessageStore.getItem(k);
+    if (beforeTimestamp) {
+        chatEntries = chatEntries.filter(entry => entry.ts < beforeTimestamp);
+    }
+
+    // Sort descending by timestamp for pagination
+    chatEntries.sort((a, b) => b.ts - a.ts);
+    const pageEntries = chatEntries.slice(0, limit);
+
+    const messages = await Promise.all(pageEntries.map(async (entry) => {
+        const msg = await individualMessageStore.getItem(entry.key);
         return msg ? decryptContent(msg) : null;
     }));
 
@@ -127,6 +175,12 @@ export async function saveMedia(messageId, base64Data) {
 
 export async function getMedia(messageId) {
     return await mediaStore.getItem(messageId);
+}
+
+export async function hasMedia(messageId) {
+    if (!messageId) return false;
+    const item = await mediaStore.getItem(messageId);
+    return !!item;
 }
 
 export async function getLocalHistory(chatId) {
@@ -162,6 +216,7 @@ export async function saveMessagesBulk(chatId, messages) {
                 
                 await insertMessage(chatId, { ...msg, id, timestamp, chatId: chatId.toLowerCase() });
                 
+                await addToChatIndex(chatId, v2Key, timestamp);
                 return individualMessageStore.setItem(v2Key, messageWithId);
             });
             await Promise.all(v2Promises);
@@ -192,16 +247,14 @@ export async function updateMessageStatus(chatId, messageIds, status) {
     return getMutex(legacyKey).lock(async () => {
         try {
             const lowerChatId = chatId.toLowerCase();
-            const allKeys = await individualMessageStore.keys();
-            const chatKeys = allKeys.filter(k => k.startsWith(`msg_${lowerChatId}_`));
             
-            const prefix = `msg_${lowerChatId}_`;
-            const keysToUpdate = chatKeys.filter(k => {
-                const suffix = k.substring(prefix.length); 
-                const firstUnderscore = suffix.indexOf('_');
-                const id = suffix.substring(firstUnderscore + 1); 
+            let index = await chatIndexStore.getItem(lowerChatId);
+            if (!index) index = await rebuildChatIndex(chatId);
+            
+            const keysToUpdate = index.filter(entry => {
+                const id = entry.key.split('_').pop();
                 return messageIds.includes(id);
-            });
+            }).map(entry => entry.key);
 
             await Promise.all(keysToUpdate.map(async (key) => {
                 const value = await individualMessageStore.getItem(key);
@@ -256,16 +309,22 @@ export async function updateMessageReceipt(chatId, messageIds, fromAddress, type
                 }
             }
 
-            const allKeys = await individualMessageStore.keys();
-            const chatPrefix = lowerChatId ? `msg_${lowerChatId}_` : 'msg_';
-            const targetKeys = allKeys.filter(key => key.startsWith(chatPrefix));
-            
-            const keysToUpdate = targetKeys.filter(key => {
-                const suffix = key.substring(chatPrefix.length);
-                const firstUnderscore = suffix.indexOf('_');
-                const id = suffix.substring(firstUnderscore + 1);
-                return messageIds.includes(id);
-            });
+            let keysToUpdate = [];
+            if (lowerChatId) {
+                let index = await chatIndexStore.getItem(lowerChatId);
+                if (!index) index = await rebuildChatIndex(lowerChatId);
+                keysToUpdate = index.filter(entry => {
+                    const id = entry.key.split('_').pop();
+                    return messageIds.includes(id);
+                }).map(entry => entry.key);
+            } else {
+                // Fallback for when chatId isn't known (rare)
+                const allKeys = await individualMessageStore.keys();
+                keysToUpdate = allKeys.filter(key => {
+                    const id = key.split('_').pop();
+                    return messageIds.includes(id);
+                });
+            }
 
             for (const key of keysToUpdate) {
                 const msg = await individualMessageStore.getItem(key);
@@ -389,7 +448,7 @@ export async function clearAllData() {
     await messageStore.clear();
     await individualMessageStore.clear();
     await mediaStore.clear();
-    storageSessionKey = null;
+    await setStorageSessionKey(null);
     console.log('🗑️ All local chat data cleared');
 }
 
@@ -439,4 +498,28 @@ export async function removePendingMessage(messageId) {
 export async function getPendingMessagesForRecipient(address) {
     const outbox = await getPendingMessages();
     return outbox.filter(m => m.to?.toLowerCase() === address.toLowerCase());
+}
+
+// ====== MEDIA WATCH LIST ======
+
+const WATCH_LIST_KEY = 'media_watch_list';
+
+export async function addMediaToWatchList(chatId, mediaId) {
+    const list = await settingsStore.getItem(WATCH_LIST_KEY) || [];
+    if (!list.find(item => item.mediaId === mediaId)) {
+        list.push({ chatId, mediaId, timestamp: Date.now() });
+        await settingsStore.setItem(WATCH_LIST_KEY, list);
+    }
+}
+
+export async function removeMediaFromWatchList(mediaId) {
+    const list = await settingsStore.getItem(WATCH_LIST_KEY) || [];
+    const filtered = list.filter(item => item.mediaId !== mediaId);
+    if (filtered.length !== list.length) {
+        await settingsStore.setItem(WATCH_LIST_KEY, filtered);
+    }
+}
+
+export async function getMediaWatchList() {
+    return await settingsStore.getItem(WATCH_LIST_KEY) || [];
 }
