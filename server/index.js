@@ -21,7 +21,7 @@ const GRACE_PERIOD_ENABLED = false; // Hard-enforced Sybil resistance
 
 // ===== JWT Security Config =====
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
-const JWT_EXPIRY = '4h'; // Short-lived VIP pass for session continuity
+const JWT_EXPIRY = '30d'; // Stable token session for mobile & desktop continuity
 
 // ===== CORS Lockdown =====
 const ALLOWED_ORIGINS = [
@@ -445,53 +445,92 @@ io.on('connection', (socket) => {
         callback(challenge);
     });
 
-    socket.on('register', async ({ address, publicKey, signingPublicKey, signedPreKey, signedPreKeySignature, username, avatar, status, registeredAt, challenge, signature, proofOfWork, pushToken, osPlatform }) => {
+    socket.on('register', async ({ address, publicKey, signingPublicKey, signedPreKey, signedPreKeySignature, username, avatar, status, registeredAt, challenge, signature, signatureMethod, proofOfWork, pushToken, osPlatform }) => {
         const normalizedAddress = address.toLowerCase();
 
-        if (!challenge || !signature || !proofOfWork) {
-            return socket.emit('registrationError', { error: 'Missing challenge, signature, or security proof.' });
-        }
+        // If the socket is already authenticated via a valid JWT token for this address, bypass the checks
+        const isAuthTokenValid = socket.address && socket.address === normalizedAddress;
 
-        // 1. Verify PoW (Sybil Resistance)
-        try {
-            const salt = normalizedAddress.slice(0, 16);
-            const computedHashHex = await argon2id({
-                password: challenge,
-                salt: salt,
-                iterations: 2,
-                memorySize: 65536,
-                parallelism: 1,
-                hashLength: 32,
-                outputType: 'hex',
-            });
-            
-            const proofOfWorkBuffer = Buffer.from(proofOfWork, 'base64');
-            const proofOfWorkHex = proofOfWorkBuffer.toString('hex');
-
-            if (computedHashHex !== proofOfWorkHex) {
-                console.warn(`🛡️ Sybil Alert: Invalid PoW from ${normalizedAddress.slice(0, 10)}`);
-                return socket.emit('registrationError', { error: 'Invalid security proof. Bot detected.' });
+        if (!isAuthTokenValid) {
+            if (!challenge || !signature || !proofOfWork) {
+                return socket.emit('registrationError', { error: 'Missing challenge, signature, or security proof.' });
             }
-        } catch (err) {
-            console.error('PoW Validation Error:', err.message);
-            if (!GRACE_PERIOD_ENABLED) {
-                return socket.emit('registrationError', { error: 'Security verification failed.' });
-            }
-        }
 
-        if (!pendingChallenges.has(socket.id) || pendingChallenges.get(socket.id).challenge !== challenge) {
-            return socket.emit('registrationError', { error: 'Invalid or expired challenge. Please try again.' });
-        }
-        pendingChallenges.delete(socket.id); 
+            // 1. Verify PoW (Sybil Resistance)
+            try {
+                const salt = normalizedAddress.slice(0, 16);
+                const computedHashHex = await argon2id({
+                    password: challenge,
+                    salt: salt,
+                    iterations: 2,
+                    memorySize: 65536,
+                    parallelism: 1,
+                    hashLength: 32,
+                    outputType: 'hex',
+                });
+                
+                const proofOfWorkBuffer = Buffer.from(proofOfWork, 'base64');
+                const proofOfWorkHex = proofOfWorkBuffer.toString('hex');
 
-        try {
-            const expectedMessage = `Authorize DecentraChat Registration: ${challenge}`;
-            const recoveredAddress = ethers.verifyMessage(expectedMessage, signature);
-            if (recoveredAddress.toLowerCase() !== normalizedAddress) {
-                return socket.emit('registrationError', { error: 'Signature mismatch' });
+                if (computedHashHex !== proofOfWorkHex) {
+                    console.warn(`🛡️ Sybil Alert: Invalid PoW from ${normalizedAddress.slice(0, 10)}`);
+                    return socket.emit('registrationError', { error: 'Invalid security proof. Bot detected.' });
+                }
+            } catch (err) {
+                console.error('PoW Validation Error:', err.message);
+                if (!GRACE_PERIOD_ENABLED) {
+                    return socket.emit('registrationError', { error: 'Security verification failed.' });
+                }
             }
-        } catch (err) {
-            return socket.emit('registrationError', { error: 'Invalid signature format' });
+
+            if (!pendingChallenges.has(socket.id) || pendingChallenges.get(socket.id).challenge !== challenge) {
+                return socket.emit('registrationError', { error: 'Invalid or expired challenge. Please try again.' });
+            }
+            pendingChallenges.delete(socket.id); 
+
+            // 2. Verify Signature
+            try {
+                const expectedMessage = `Authorize DecentraChat Registration: ${challenge}`;
+                
+                if (signatureMethod === 'identity') {
+                    // Recover from identity signing public key stored in the database
+                    const dbUser = await new Promise(resolve => {
+                        db.get(`SELECT signing_public_key FROM users WHERE address = ?`, [normalizedAddress], (err, row) => resolve(row));
+                    });
+
+                    if (!dbUser || !dbUser.signing_public_key) {
+                        return socket.emit('registrationError', { error: 'Identity public key not found. Please sign with your Web3 wallet.' });
+                    }
+
+                    // Verify Ed25519 detached signature
+                    const nacl = require('tweetnacl');
+                    const { decodeBase64 } = require('tweetnacl-util');
+                    const msgBytes = Buffer.from(expectedMessage, 'utf8');
+                    const sigBytes = decodeBase64(signature);
+                    const pubKeyBytes = decodeBase64(dbUser.signing_public_key);
+
+                    const verified = nacl.sign.detached.verify(msgBytes, sigBytes, pubKeyBytes);
+                    if (!verified) {
+                        return socket.emit('registrationError', { error: 'Identity signature verification failed.' });
+                    }
+                } else if (signatureMethod === 'pairing') {
+                    // Mobile pairing flow signature
+                    const pairingMessage = `Authorize DecentraChat Auth: ${challenge}`;
+                    const recoveredAddress = ethers.verifyMessage(pairingMessage, signature);
+                    if (recoveredAddress.toLowerCase() !== normalizedAddress) {
+                        return socket.emit('registrationError', { error: 'Pairing signature mismatch.' });
+                    }
+                } else {
+                    // Standard wallet signature
+                    const recoveredAddress = ethers.verifyMessage(expectedMessage, signature);
+                    if (recoveredAddress.toLowerCase() !== normalizedAddress) {
+                        return socket.emit('registrationError', { error: 'Signature mismatch' });
+                    }
+                }
+            } catch (err) {
+                console.error('Signature Verification Error:', err.message);
+                return socket.emit('registrationError', { error: 'Invalid signature format or verification failure.' });
+            }
         }
 
         if (username) {
