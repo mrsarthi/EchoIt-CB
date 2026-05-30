@@ -66,7 +66,7 @@ function AppContent() {
   const solveProofOfWork = useCallback(async (challenge, addr) => {
     setIsSolvingPoW(true);
     try {
-      const hash = await hashArgon2(challenge, (addr || address).slice(0, 16));
+      const hash = await hashArgon2(challenge, (addr || address).toLowerCase().slice(0, 16));
       return hash;
     } finally {
       setIsSolvingPoW(false);
