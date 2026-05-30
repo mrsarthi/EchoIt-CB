@@ -409,10 +409,15 @@ app.post('/api/auth/callback', rateLimitMiddleware, (req, res) => {
         return res.status(400).json({ error: 'Invalid signature format' });
     }
 
-    const token = jwt.sign({ address: address.toLowerCase() }, JWT_SECRET, { expiresIn: JWT_EXPIRY });
-    authResults.set(sessionId, { address, signature, timestamp: Date.now() });
-    io.to(`auth_${sessionId}`).emit('wallet_auth_result', { address, signature, token });
-    res.json({ success: true });
+    try {
+        const token = jwt.sign({ address: address.toLowerCase() }, JWT_SECRET, { expiresIn: JWT_EXPIRY });
+        authResults.set(sessionId, { address, signature, timestamp: Date.now() });
+        io.to(`auth_${sessionId}`).emit('wallet_auth_result', { address, signature, token });
+        res.json({ success: true });
+    } catch (err) {
+        console.error("Auth Callback 500 Error:", err);
+        return res.status(500).json({ error: `Internal Server Error: ${err.message}` });
+    }
 });
 
 io.on('connection', (socket) => {
