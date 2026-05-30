@@ -459,7 +459,7 @@ io.on('connection', (socket) => {
                 password: challenge,
                 salt: salt,
                 iterations: 2,
-                memory: 65536,
+                memorySize: 65536,
                 parallelism: 1,
                 hashLength: 32,
                 outputType: 'hex',

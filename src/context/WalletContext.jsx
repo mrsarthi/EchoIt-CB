@@ -50,7 +50,7 @@ export function WalletProvider({ children }) {
     const activeAuthSessionIdRef = useRef(null);
 
     const solveProofOfWork = async (challenge, addr) => {
-        const saltAddr = addr || address || 'default_salt';
+        const saltAddr = (addr || address || 'default_salt').toLowerCase();
         setIsSolvingPoW(true);
         try {
             const hash = await hashArgon2(challenge, saltAddr.slice(0, 16));
