@@ -433,8 +433,10 @@ io.on('connection', (socket) => {
         if (bufferedResult) {
             socket.emit('wallet_auth_result', {
                 address: bufferedResult.address,
-                signature: bufferedResult.signature
+                signature: bufferedResult.signature,
+                token: bufferedResult.token
             });
+            authResults.delete(sessionId);
         }
     });
 
