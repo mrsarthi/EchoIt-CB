@@ -28,6 +28,7 @@ const ALLOWED_ORIGINS = [
     'http://localhost:5173',          // Local dev
     'http://localhost:3000',          // Electron dev
     'https://decentrachat.onrender.com', // Production web
+    'https://decentrachat-singnalling.onrender.com', // Signaling server (for auth.html relay)
     'capacitor://localhost',           // Capacitor Android
     'http://localhost'                 // Capacitor iOS
 ];
