@@ -25,6 +25,12 @@ self.onmessage = async (e) => {
             case 'ratchetEpochKey':
                 result = ratchetEpochKey(payload.currentKeyBase64);
                 break;
+            case 'deriveEpochKey':
+                result = await deriveEpochKey(payload.rootKey, payload.epochIndex);
+                break;
+            case 'ratchetMessageKey':
+                result = await ratchetMessageKey(payload.chainKeyBase64);
+                break;
             case 'encryptGroupMessage':
                 result = encryptGroupMessage(payload.epochKeyBase64, payload.plaintext, payload.myEd25519SecretBase64, payload.messageId, payload.timestamp);
                 break;
@@ -139,5 +145,28 @@ function generateKeyPair() {
     return {
         publicKey: encodeBase64(kp.publicKey),
         secretKey: encodeBase64(kp.secretKey)
+    };
+}
+
+/**
+ * Derive a 32-byte Epoch Key from a Root Key and Epoch Index.
+ */
+async function deriveEpochKey(rootKey, epochIndex) {
+    const label = `epoch_derivation_${epochIndex}`;
+    const key = typeof rootKey === 'string' ? rootKey : encodeBase64(rootKey);
+    const signature = await hmacSha256(key, label);
+    return signature; // Returning base64 string
+}
+
+/**
+ * Derive the next message key within the current epoch.
+ */
+async function ratchetMessageKey(chainKeyBase64) {
+    const messageKeyBase64 = await hmacSha256(chainKeyBase64, 'message_key');
+    const nextChainKeyBase64 = await hmacSha256(chainKeyBase64, 'next_chain_key');
+    
+    return {
+        messageKey: messageKeyBase64,
+        nextChainKey: nextChainKeyBase64
     };
 }

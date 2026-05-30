@@ -821,7 +821,9 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                         <div className="flex-1 overflow-y-auto chat-scroll px-container-padding-mobile md:px-container-padding-desktop pt-6 pb-32 max-w-3xl mx-auto w-full flex flex-col gap-6" ref={messagesContainerRef} onClick={() => { if (reactionPickerMsgId) setReactionPickerMsgId(null); }}>
                             {isLoadingMore && <div className="flex justify-center py-4"><div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin"></div></div>}
                             {messages.length === 0 ? <div className="text-center py-10"><p className="text-on-surface-variant font-body-md">No messages yet</p></div> : (
-                                messages.map((msg, index) => (
+                                (() => {
+                                    const latestMyMsgId = messages.slice().reverse().find(m => m.from?.toLowerCase() === walletAddress?.toLowerCase())?.id;
+                                    return messages.map((msg, index) => (
                                     <div key={msg.id || index} id={msg.id ? `msg-${msg.id}` : undefined} className={`relative animate-fadeIn flex flex-col gap-1 max-w-[85%] ${msg.from?.toLowerCase() === walletAddress?.toLowerCase() ? 'items-end self-end' : 'items-start self-start'}`}>
                                         <div className={`p-4 rounded-2xl shadow-sm relative font-body-md ${msg.from?.toLowerCase() === walletAddress?.toLowerCase() ? 'bg-primary-container text-on-primary-container rounded-br-none' : 'bg-surface-container text-on-surface rounded-bl-none'}`} onDoubleClick={() => !msg.decryptionFailed && handleReply(msg)} onContextMenu={(e) => { if (msg.decryptionFailed) return; e.preventDefault(); setReactionPickerMsgId(msg.id); }}>
                                             {reactionPickerMsgId === msg.id && (
@@ -867,7 +869,9 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                             ) : <p className="whitespace-pre-wrap break-words">{msg.content}</p>}
                                             <div className="flex items-center gap-1 mt-1 justify-end opacity-80">
                                                 <span className="font-label-sm text-[10px]">{formatTime(msg.timestamp)}</span>
-                                                {msg.from?.toLowerCase() === walletAddress?.toLowerCase() && (msg.queued ? <span className="material-symbols-outlined text-[12px] text-error" title="Queued">schedule</span> : <span className="material-symbols-outlined text-[12px]">lock</span>)}
+                                                {msg.from?.toLowerCase() === walletAddress?.toLowerCase() && msg.queued && (
+                                                    <span className="material-symbols-outlined text-[12px] text-error" title="Queued">schedule</span>
+                                                )}
                                             </div>
                                         </div>
                                         {msg.reactions && Object.keys(msg.reactions).length > 0 && (
@@ -875,7 +879,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                         )}
                                         {msg.from?.toLowerCase() === walletAddress?.toLowerCase() && (
                                             <div className="receipt-anchors">
-                                                {/* 1. Seen Receipts (Avatars) */}
+                                                {/* 1. Seen Receipts (Avatars in color) */}
                                                 {Object.entries(receiptMap.lastReadMessageIds)
                                                     .filter(([, msgId]) => msgId === msg.id)
                                                     .map(([address]) => {
@@ -894,17 +898,35 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                                     })
                                                 }
                                                 
-                                                {/* 2. Delivered Receipts (Hollow Circles) */}
+                                                {/* 2. Delivered Receipts (Avatars in grayscale) */}
                                                 {Object.entries(receiptMap.lastDeliveredMessageIds)
                                                     .filter(([, msgId]) => msgId === msg.id)
-                                                    .map(([address]) => (
-                                                        <div key={`${address}-delivered`} className="receipt-avatar delivered" title="Delivered" />
-                                                    ))
+                                                    .map(([address]) => {
+                                                        const contact = contacts.find(c => c.address.toLowerCase() === address.toLowerCase());
+                                                        return (
+                                                            <div key={`${address}-delivered`} className="receipt-avatar delivered" title={`Delivered to ${contact?.username || formatAddress(address)}`}>
+                                                                {contact?.avatar ? (
+                                                                    <img src={contact.avatar} alt="pfp" />
+                                                                ) : (
+                                                                    <div className="receipt-avatar-fallback">
+                                                                        {(contact?.username || address).slice(0, 1).toUpperCase()}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })
                                                 }
+
+                                                {/* 3. Sent Receipts (Hollow Circle) - Only if it's the latest message we sent and it has no delivery/read receipts yet */}
+                                                {msg.id === latestMyMsgId && !msg.queued &&
+                                                 (!msg.receipts || (!Object.values(msg.receipts).includes('delivered') && !Object.values(msg.receipts).includes('read'))) && (
+                                                    <div className="receipt-avatar sent" title="Sent" />
+                                                 )}
                                             </div>
                                         )}
                                     </div>
-                                ))
+                                    ));
+                                })()
                             )}
                             <div ref={messagesEndRef} />
                         </div>

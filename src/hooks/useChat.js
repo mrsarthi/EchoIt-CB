@@ -752,9 +752,25 @@ export function useChat(myAddress) {
             const chat = activeChatRef.current;
             if (!chat) return;
             setMessages(prev => {
-                const unread = prev.filter(m => m.from?.toLowerCase() !== myAddress?.toLowerCase() && m.status !== 'read');
-                unread.forEach(m => sendReadReceipt(m.from, m.id, chat.address));
-                return prev;
+                let changed = false;
+                const unreadIds = [];
+                const updated = prev.map(m => {
+                    if (m.from?.toLowerCase() !== myAddress?.toLowerCase() && m.status !== 'read') {
+                        sendReadReceipt(m.from, m.id, chat.address);
+                        unreadIds.push(m.id);
+                        changed = true;
+                        return { ...m, status: 'read' };
+                    }
+                    return m;
+                });
+                
+                if (changed && unreadIds.length > 0) {
+                    import('../services/storageService').then(s => 
+                        s.updateMessageReceipt(chat.address, unreadIds, myAddress, 'read').catch(() => {})
+                    );
+                }
+                
+                return changed ? updated : prev;
             });
         };
         window.addEventListener('focus', handleFocus);

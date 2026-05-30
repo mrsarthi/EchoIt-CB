@@ -1,6 +1,8 @@
 import localforage from 'localforage';
 import { insertMessage } from './stateEngine';
 import { setStorageSessionKey, encryptContent, decryptContent } from './storageEncryption';
+import { Filesystem, Directory } from '@capacitor/filesystem';
+import { Capacitor } from '@capacitor/core';
 
 // Configure localforage for mobile stability
 localforage.config({
@@ -252,7 +254,8 @@ export async function updateMessageStatus(chatId, messageIds, status) {
             if (!index) index = await rebuildChatIndex(chatId);
             
             const keysToUpdate = index.filter(entry => {
-                const id = entry.key.split('_').pop();
+                const parts = entry.key.split('_');
+                const id = parts.slice(3).join('_'); // V2 key: msg_{chatId}_{timestamp}_{messageId}
                 return messageIds.includes(id);
             }).map(entry => entry.key);
 
@@ -314,14 +317,16 @@ export async function updateMessageReceipt(chatId, messageIds, fromAddress, type
                 let index = await chatIndexStore.getItem(lowerChatId);
                 if (!index) index = await rebuildChatIndex(lowerChatId);
                 keysToUpdate = index.filter(entry => {
-                    const id = entry.key.split('_').pop();
+                    const parts = entry.key.split('_');
+                    const id = parts.slice(3).join('_');
                     return messageIds.includes(id);
                 }).map(entry => entry.key);
             } else {
                 // Fallback for when chatId isn't known (rare)
                 const allKeys = await individualMessageStore.keys();
                 keysToUpdate = allKeys.filter(key => {
-                    const id = key.split('_').pop();
+                    const parts = key.split('_');
+                    const id = parts.slice(3).join('_');
                     return messageIds.includes(id);
                 });
             }
@@ -391,6 +396,11 @@ export async function getSavedContacts() {
             for (const c of contacts) {
                 if (!seen.has(c.address.toLowerCase())) {
                     seen.add(c.address.toLowerCase());
+                    if (c.avatar && c.avatar.startsWith('file://')) {
+                        try {
+                            c.avatar = Capacitor.convertFileSrc(c.avatar);
+                        } catch (e) { }
+                    }
                     unique.push(c);
                 }
             }
@@ -407,18 +417,37 @@ export async function saveContacts(contacts) {
     if (!contacts) return;
     return getMutex('visible_contacts').lock(async () => {
         try {
-            const minimized = contacts.map(c => ({
-                address: c.address,
-                username: c.username,
-                publicKey: c.publicKey,
-                isGroup: c.isGroup,
-                members: c.members,
-                admins: c.admins,
-                lastMessageTime: c.lastMessageTime,
-                unreadCount: c.unreadCount,
-                avatar: c.avatar,
-                status: c.status,
-                isVerified: c.isVerified,
+            const minimized = await Promise.all(contacts.map(async c => {
+                let avatarUri = c.avatar;
+                if (avatarUri && avatarUri.startsWith('data:image')) {
+                    try {
+                        const base64Content = avatarUri.split(',')[1];
+                        const ext = avatarUri.substring("data:image/".length, avatarUri.indexOf(";base64"));
+                        const fileName = `avatar_${c.address}.${ext}`;
+                        const result = await Filesystem.writeFile({
+                            path: `avatars/${fileName}`,
+                            data: base64Content,
+                            directory: Directory.Cache,
+                            recursive: true
+                        });
+                        avatarUri = result.uri;
+                    } catch (e) {
+                        console.error('Failed to cache avatar to disk:', e);
+                    }
+                }
+                return {
+                    address: c.address,
+                    username: c.username,
+                    publicKey: c.publicKey,
+                    isGroup: c.isGroup,
+                    members: c.members,
+                    admins: c.admins,
+                    lastMessageTime: c.lastMessageTime,
+                    unreadCount: c.unreadCount,
+                    avatar: avatarUri,
+                    status: c.status,
+                    isVerified: c.isVerified,
+                };
             }));
             await messageStore.setItem('visible_contacts', minimized);
         } catch (err) {

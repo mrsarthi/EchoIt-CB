@@ -116,3 +116,14 @@ blob-report/
 test_*.js
 *_test.js
 test-*.js
+e2e-*.mjs
+
+# Stitch MCP Exports
+stitch_*/
+
+# Landing Page (separate project)
+landing-page/
+
+# Temporary Git Dumps
+gitdiff.txt
+gitlog.txt

@@ -8,7 +8,7 @@ self.onmessage = async (e) => {
             pass: challenge,
             salt: salt,
             time: 2,
-            mem: 16384,
+            mem: 65536,
             hashLen: 32,
             parallelism: 1,
             type: argon2.ArgonType.Argon2id
