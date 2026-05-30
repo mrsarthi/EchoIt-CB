@@ -874,13 +874,24 @@ export function listenForAuth(sessionId) {
     return new Promise((resolve, reject) => {
         // 2 minute timeout - mobile auth can take a while if the user is slow in MetaMask
         const timeout = setTimeout(() => {
+            clearInterval(pollInterval);
             socket.off('wallet_auth_result', handler);
             activeAuthSessionId = null;
             reject(new Error('Authentication timed out after 2 minutes. Please try again.'));
         }, 120000);
 
+        // Android OS often silently drops TCP connections when in background.
+        // If the server emits the result while we're in the background, it might vanish into a dead pipe.
+        // We poll the server every 3 seconds to check the buffer.
+        const pollInterval = setInterval(() => {
+            if (socket?.connected) {
+                socket.emit('join_auth_room', { sessionId });
+            }
+        }, 3000);
+
         const handler = (data) => {
             clearTimeout(timeout);
+            clearInterval(pollInterval);
             console.log('✅ Received Auth Result via WebSocket Relay!');
             socket.off('wallet_auth_result', handler);
             socket.emit('leave_auth_room', { sessionId });
