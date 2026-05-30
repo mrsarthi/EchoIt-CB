@@ -170,7 +170,7 @@ export function WalletProvider({ children }) {
                 );
             }
 
-            if (isElectron) {
+            if (platform.isElectron) {
                 setIsWeb3Detected(true);
                 onWalletAuth(async (data) => {
                     if (data.token) {
@@ -185,6 +185,12 @@ export function WalletProvider({ children }) {
                         await handleElectronAuth(data);
                     }
                 });
+            }
+            
+            // For Capacitor, we still need to set isWeb3Detected
+            if (platform.isCapacitor) {
+                setIsWeb3Detected(true);
+            }
 
                 const exists = await hasStoredKeys();
                 if (exists) {

@@ -43,6 +43,37 @@ export async function openAuthBrowser() {
     if (_isCapacitor) {
         const { Browser } = await import('@capacitor/browser');
         const { listenForAuth } = await import('./socketService');
+        const { App } = await import('@capacitor/app');
+
+        // Setup deep link listener once
+        if (!App._hasAuthDeepLinkListener) {
+            App._hasAuthDeepLinkListener = true;
+            App.addListener('appUrlOpen', (event) => {
+                try {
+                    // Check if it's a URL we can parse
+                    if (event.url && event.url.includes('decentrachat://auth')) {
+                        // Custom regex extraction to avoid URL parser issues
+                        const params = new URLSearchParams(event.url.split('?')[1]);
+                        const address = params.get('address');
+                        const signature = params.get('signature');
+                        const token = params.get('token');
+                        
+                        if (address && signature) {
+                            const payload = { address, signature, token, sessionId: _activeSessionId };
+                            if (_deepLinkResolver) {
+                                _deepLinkResolver(payload);
+                                _deepLinkResolver = null;
+                            }
+                            if (_walletAuthCallback) {
+                                _walletAuthCallback(payload);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error('Failed to parse auth deep link:', e);
+                }
+            });
+        }
 
         // To use MetaMask on mobile, the DApp URL must be publicly accessible.
         // We use the signaling server since we just configured it to host auth.html.
@@ -164,34 +195,6 @@ export function onWalletAuth(callback) {
 
     if (_isCapacitor) {
         _walletAuthCallback = callback; // save callback for the WebSocket relay
-        import('@capacitor/app').then(({ App }) => {
-            App.addListener('appUrlOpen', (event) => {
-                try {
-                    const url = new URL(event.url);
-                    const address = url.searchParams.get('address');
-                    const signature = url.searchParams.get('signature');
-                    const token = url.searchParams.get('token');
-                    
-                    if (address && signature) {
-                        // Create payload mimicking the WebSocket buffer
-                        const payload = { address, signature, token, sessionId: _activeSessionId };
-                        
-                        // If openAuthBrowser is waiting via _deepLinkResolver, trigger it
-                        if (_deepLinkResolver) {
-                            _deepLinkResolver(payload);
-                            _deepLinkResolver = null;
-                        }
-                        
-                        // Trigger the global callback
-                        if (_walletAuthCallback) {
-                            _walletAuthCallback(payload);
-                        }
-                    }
-                } catch (e) {
-                    console.error('Failed to parse auth deep link:', e);
-                }
-            });
-        });
         return;
     }
     // browser — nothing to listen for
