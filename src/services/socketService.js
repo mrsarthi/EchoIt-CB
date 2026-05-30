@@ -20,6 +20,9 @@ let groupCreatedCallback = null;
 let groupDeletedCallback = null;
 let reactionCallback = null;
 let groupAvatarUpdatedCallback = null;
+let groupMemberRemovedCallback = null;
+let mediaQueryCallback = null;
+let mediaOfferCallback = null;
 
 /**
  * Initialize socket connection
@@ -128,6 +131,16 @@ export function initSocket() {
             return;
         }
 
+        // Handle Media Swarm Signals
+        if (data.signal?.type === 'MEDIA_QUERY') {
+            if (mediaQueryCallback) mediaQueryCallback(data);
+            return;
+        }
+        if (data.signal?.type === 'MEDIA_OFFER') {
+            if (mediaOfferCallback) mediaOfferCallback(data);
+            return;
+        }
+
         console.log('📡 Received WebRTC signal from:', data.from?.slice(0, 10));
         if (signalCallback) {
             signalCallback(data);
@@ -165,8 +178,13 @@ export function initSocket() {
     });
 
     socket.on('groupDeleted', (data) => {
-        console.log('👥- Group deleted notification:', data.groupId?.slice(0, 10));
+        console.log('🗑️ Group deleted notification:', data.groupId?.slice(0, 10));
         if (groupDeletedCallback) groupDeletedCallback(data);
+    });
+
+    socket.on('groupMemberRemoved', (data) => {
+        console.log('🚪 Group member removed:', data.memberAddress?.slice(0, 10));
+        if (groupMemberRemovedCallback) groupMemberRemovedCallback(data);
     });
 
     socket.on('groupAvatarUpdated', (data) => {
@@ -543,6 +561,14 @@ export function onGroupCreated(callback) {
 }
 
 /**
+ * Subscribe to group member removed events
+ * @param {Function} callback 
+ */
+export function onGroupMemberRemoved(callback) {
+    groupMemberRemovedCallback = callback;
+}
+
+/**
  * Subscribe to group deleted events
  * @param {Function} callback - ({ groupId, deletedBy }) => void
  */
@@ -873,4 +899,50 @@ export function isConnected() {
  */
 export function getSocket() {
     return socket;
+}
+
+// ====== MEDIA SELF-HEALING (P2P SWARM) ======
+
+/**
+ * Broadcast a request for missing media chunks to the chat members
+ * @param {string} chatId The chat/group ID
+ * @param {string} mediaId The ID of the missing media
+ */
+export function requestMedia(chatId, mediaId) {
+    if (!socket?.connected) return;
+    socket.emit('signal', {
+        groupId: chatId, // If it's a group, send to group. If direct, the server handles it if to === chatId.
+        to: chatId,      // Server will route based on what this is
+        signal: { type: 'MEDIA_QUERY', mediaId, chatId }
+    });
+    console.log(`[Media Swarm] 📡 Broadcasted MEDIA_QUERY for ${mediaId}`);
+}
+
+/**
+ * Offer media chunks to the chat (so others know it's handled)
+ * @param {string} chatId The chat/group ID
+ * @param {string} mediaId The ID of the media
+ */
+export function offerMedia(chatId, mediaId) {
+    if (!socket?.connected) return;
+    socket.emit('signal', {
+        groupId: chatId,
+        to: chatId,
+        signal: { type: 'MEDIA_OFFER', mediaId }
+    });
+    console.log(`[Media Swarm] 🤝 Sent MEDIA_OFFER to ${chatId} for ${mediaId}`);
+}
+
+/**
+ * Subscribe to incoming media queries
+ */
+export function onMediaQuery(callback) {
+    mediaQueryCallback = callback;
+}
+
+/**
+ * Subscribe to incoming media offers
+ */
+export function onMediaOffer(callback) {
+    mediaOfferCallback = callback;
 }

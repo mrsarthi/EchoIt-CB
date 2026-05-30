@@ -1,15 +1,16 @@
-/* Secure Premium Design System - DecentraChat */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-/* Import Google Font */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+/* Secure Premium Design System - DecentraChat */
 
 /* CSS Custom Properties */
 :root {
-  /* Graphite Surface System */
-  --bg-primary: #0e0f12;     /* Deep Graphite */
-  --bg-secondary: #16171d;   /* Surface 1 */
-  --bg-tertiary: #1f2029;    /* Surface 2 */
-  --bg-elevated: #282a36;    /* Surface 3 */
+  /* Cypher Glass Surface System */
+  --bg-primary: #121316;     /* surface */
+  --bg-secondary: #1b1b1f;   /* surface-container-low */
+  --bg-tertiary: #1f1f23;    /* surface-container */
+  --bg-elevated: #292a2d;    /* surface-container-high */
   
   /* Semantic Colors */
   --primary: #818cf8;        /* Pastel Indigo */

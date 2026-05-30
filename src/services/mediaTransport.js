@@ -16,14 +16,14 @@ const mediaStore = localforage.createInstance({
  * Encrypts a media payload and transmits it.
  * Tries direct WebRTC P2P first, falls back to IPFS (via Pinata).
  */
-export async function sliceAndTransmitMedia(base64Data, mimeType, onProgress, recipientAddress = null) {
+export async function sliceAndTransmitMedia(base64Data, mimeType, onProgress, recipientAddress = null, predefinedMediaId = null) {
     console.log('[MediaTransport] Starting upload pipeline...');
     
     const ephemeralKey = generateSymmetricKey();
     const { encrypted, nonce } = encryptSymmetric(base64Data, ephemeralKey);
 
     const manifest = {
-        mediaId: `media_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+        mediaId: predefinedMediaId || `media_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
         mimeType,
         ephemeralKey,
         nonce
@@ -36,25 +36,11 @@ export async function sliceAndTransmitMedia(base64Data, mimeType, onProgress, re
             const p2pSuccess = await pipeMedia(recipientAddress, manifest.mediaId, encrypted, onProgress, 'p2p');
             if (p2pSuccess) {
                 manifest.isP2P = true;
-                return manifest;
+                // Still upload to relay as backup for others
+                console.log('[MediaTransport] P2P Success! Uploading background relay backup...');
             }
         } catch (err) {
             console.warn('[MediaTransport] P2P pipe failed, falling back to Waku/IPFS:', err.message);
-        }
-    }
-
-    // --- Layer 6 Fallback 1: Stateless Waku/MQTT Fallback (Chunked) ---
-    // If file is reasonably small (< 500KB), try chunked Waku delivery
-    if (recipientAddress && encrypted.length < 512000) {
-        console.log('[MediaTransport] Attempting chunked Waku delivery...');
-        try {
-            const wakuSuccess = await pipeMedia(recipientAddress, manifest.mediaId, encrypted, onProgress, 'waku');
-            if (wakuSuccess) {
-                manifest.isWaku = true;
-                return manifest;
-            }
-        } catch (err) {
-            console.warn('[MediaTransport] Waku delivery failed:', err);
         }
     }
 
@@ -66,12 +52,14 @@ export async function sliceAndTransmitMedia(base64Data, mimeType, onProgress, re
         const { wakeUpRelays, uploadChunkWithRetry } = await import('./customRelayService');
         wakeUpRelays(); // Fire and forget
         
-        const CHUNK_SIZE = 1024 * 1024 * 2; // 2MB chunks for HTTP Relay
+        // 1MB chunks are supported by most Express servers (default limit)
+        const CHUNK_SIZE = 1024 * 1024; 
         const totalSize = encrypted.length;
         const totalChunks = Math.ceil(totalSize / CHUNK_SIZE);
         
         manifest.relayChunks = totalChunks;
         
+        // Upload sequentially for better rate-limit stability
         for (let i = 0; i < totalChunks; i++) {
             const start = i * CHUNK_SIZE;
             const end = Math.min(start + CHUNK_SIZE, totalSize);
@@ -90,6 +78,8 @@ export async function sliceAndTransmitMedia(base64Data, mimeType, onProgress, re
         return manifest;
     } catch (err) {
         console.error('[MediaTransport] Relay Upload failed:', err);
+        // Even if relay fails, if p2p worked, we can still send the manifest
+        if (manifest.isP2P) return manifest;
         throw err;
     }
 }
@@ -140,6 +130,8 @@ async function pipeMedia(peerAddress, mediaId, data, onProgress, transport = 'p2
  * Downloads and decrypts media from manifest.
  */
 export async function fetchAndReconstructMedia(manifest, onProgress) {
+    const { wakeUpRelays, fetchChunkWithTimeout } = await import('./customRelayService');
+    
     // 1. Check Local P2P/Waku Buffer (Persisted in localforage)
     if (manifest.isP2P || manifest.isWaku) {
         console.log('[MediaTransport] Reassembling from local persistent buffer...');
@@ -152,21 +144,35 @@ export async function fetchAndReconstructMedia(manifest, onProgress) {
     // 2. Check Relay Fallback
     if (manifest.isRelay) {
         console.log('[MediaTransport] Fetching from Multi-Homing Relays...');
-        if (onProgress) onProgress(20);
+        if (onProgress) onProgress(10);
         
-        const { fetchChunkWithTimeout } = await import('./customRelayService');
-        let fullData = '';
+        // Trigger wake-up in background
+        wakeUpRelays();
         
-        for (let i = 0; i < manifest.relayChunks; i++) {
-            const chunkId = `${manifest.mediaId}_${i}`;
-            const chunkData = await fetchChunkWithTimeout(chunkId);
-            if (!chunkData) throw new Error(`Relay download failed at chunk ${i}`);
-            
-            fullData += chunkData;
-            
-            if (onProgress) onProgress(20 + Math.round(((i + 1) / manifest.relayChunks) * 80));
+        const total = manifest.relayChunks || 1;
+        const chunkResults = new Array(total);
+        const concurrencyLimit = 5;
+        let completed = 0;
+
+        for (let i = 0; i < total; i += concurrencyLimit) {
+            const batchPromises = [];
+            for (let j = 0; j < concurrencyLimit && (i + j) < total; j++) {
+                const chunkIndex = i + j;
+                const chunkId = `${manifest.mediaId}_${chunkIndex}`;
+                
+                batchPromises.push(
+                    fetchChunkWithTimeout(chunkId).then(data => {
+                        if (!data) throw new Error(`Failed to fetch chunk ${chunkIndex}`);
+                        chunkResults[chunkIndex] = data;
+                        completed++;
+                        if (onProgress) onProgress(10 + Math.round((completed / total) * 90));
+                    })
+                );
+            }
+            await Promise.all(batchPromises);
         }
         
+        const fullData = chunkResults.join('');
         const decrypted = decryptSymmetric(fullData, manifest.nonce, manifest.ephemeralKey);
         if (onProgress) onProgress(100);
         return decrypted;
@@ -188,6 +194,50 @@ export async function fetchAndReconstructMedia(manifest, onProgress) {
     }
 
     throw new Error('Media not available (Offline or still downloading)');
+}
+
+export async function reseedMediaToRelays(base64Data, manifest) {
+    if (!base64Data || !manifest || !manifest.ephemeralKey || !manifest.nonce) return false;
+    
+    console.log(`[MediaTransport] Re-seeding media ${manifest.mediaId} to relays...`);
+    
+    // Re-encrypt the raw data identically to the original sender
+    const { encrypted } = encryptSymmetric(base64Data, manifest.ephemeralKey, manifest.nonce);
+
+    // MUST match the exact number of chunks the original manifest specified!
+    const totalSize = encrypted.length;
+    const totalChunks = manifest.relayChunks || 1;
+    const CHUNK_SIZE = Math.ceil(totalSize / totalChunks);
+
+    try {
+        const { wakeUpRelays, uploadChunkWithRetry } = await import('./customRelayService');
+        wakeUpRelays();
+        
+        const concurrencyLimit = 5;
+        for (let i = 0; i < totalChunks; i += concurrencyLimit) {
+            const batchPromises = [];
+            for (let j = 0; j < concurrencyLimit && (i + j) < totalChunks; j++) {
+                const chunkIndex = i + j;
+                const start = chunkIndex * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, totalSize);
+                const chunkData = encrypted.slice(start, end);
+                const chunkId = `${manifest.mediaId}_${chunkIndex}`;
+                
+                batchPromises.push(
+                    uploadChunkWithRetry(chunkId, chunkData, null, 3).then(success => {
+                        if (!success) throw new Error(`Relay upload failed at chunk ${chunkIndex}`);
+                    })
+                );
+            }
+            await Promise.all(batchPromises);
+        }
+        
+        console.log(`[MediaTransport] Successfully re-seeded ${manifest.mediaId} (${totalChunks} chunks)`);
+        return true;
+    } catch (err) {
+        console.error('[MediaTransport] Failed to reseed media:', err);
+        return false;
+    }
 }
 
 /**

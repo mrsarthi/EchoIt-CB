@@ -19,13 +19,9 @@ export async function setStorageSessionKey(pin, address = null) {
     // Use the user's wallet address as salt for the hash
     const saltAddress = address || localStorage.getItem('decentrachat_address') || 'default_salt';
     
-    try {
-        const hash = await hashArgon2(pin, saltAddress.slice(0, 16));
-        storageSessionKey = hash; 
-        console.debug('🔐 Storage session key derived via Argon2 and cached');
-    } catch (error) {
-        throw error;
-    }
+    const hash = await hashArgon2(pin, saltAddress.slice(0, 16));
+    storageSessionKey = hash; 
+    console.debug('🔐 Storage session key derived via Argon2 and cached');
 }
 
 /**

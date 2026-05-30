@@ -25,7 +25,8 @@ import {
     MessageSquare, 
     Users, 
     Zap, 
-    X
+    X,
+    Clock
 } from 'lucide-react';
 import { App as CapacitorApp } from '@capacitor/app';
 import { platform } from '../services/platformService';
@@ -86,12 +87,15 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
     const mediaTypeRef = useRef('image'); // 'image' or 'video'
     const mediaMimeTypeRef = useRef('image/jpeg');
     const [profilePreview, setProfilePreview] = useState(null); // User object for preview modal
-    const [isUploadingMedia, setIsUploadingMedia] = useState(false);
-    const [uploadProgress, setUploadProgress] = useState(0);
     const [lightboxProgress, setLightboxProgress] = useState(null);
     const [activeTab, setActiveTab] = useState('chats'); // 'chats', 'contacts', 'settings'
     const [showSelfTrustDetails, setShowSelfTrustDetails] = useState(false);
     const [showContactProfile, setShowContactProfile] = useState(false);
+
+    const [locallyAvailableMedia, setLocallyAvailableMedia] = useState(new Set());
+    const [downloadingMedia, setDownloadingMedia] = useState(new Map()); // mediaId -> progress
+    const [waitingForPeers, setWaitingForPeers] = useState(new Set()); // mediaIds in watch list
+    const [backgroundUploads, setBackgroundUploads] = useState(new Map()); // mediaId -> progress (0-100)
 
     // Layer 5: Extract shared media for a specific contact
     const sharedMedia = useMemo(() => {
@@ -100,6 +104,33 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
             .filter(m => (m.type === 'image' || m.type === 'video') && !m.decryptionFailed)
             .map(m => m.content);
     }, [messages]);
+
+    // Check which media items are locally available in high-res and which are waiting
+    useEffect(() => {
+        const checkMedia = async () => {
+            const { hasMedia, getMediaWatchList } = await import('../services/storageService');
+            const newAvailable = new Set(locallyAvailableMedia);
+            let changed = false;
+
+            for (const msg of messages) {
+                if (msg.mediaId && !newAvailable.has(msg.mediaId)) {
+                    const exists = await hasMedia(msg.mediaId);
+                    if (exists) {
+                        newAvailable.add(msg.mediaId);
+                        changed = true;
+                    }
+                }
+            }
+
+            if (changed) setLocallyAvailableMedia(newAvailable);
+
+            const watchList = await getMediaWatchList();
+            const waitingSet = new Set(watchList.map(item => item.mediaId));
+            setWaitingForPeers(waitingSet);
+        };
+
+        if (messages.length > 0) checkMedia();
+    }, [messages, locallyAvailableMedia]);
 
     const handleOpenContactProfile = () => {
         if (activeChat && !activeChat.isGroup) {
@@ -115,27 +146,90 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
     // Media Lightbox Lazy Loading
     useEffect(() => {
         if (lightboxMedia?.manifest && !lightboxMedia.loadedSrc) {
-            setLightboxProgress(0);
             let active = true;
             
-            import('../services/mediaTransport').then(({ fetchAndReconstructMedia }) => {
-                fetchAndReconstructMedia(lightboxMedia.manifest, (progress) => {
-                    if (active) setLightboxProgress(progress);
-                }).then((base64Data) => {
+            const loadMedia = async () => {
+                const { getMedia, saveMedia } = await import('../services/storageService');
+                
+                // 1. Check local storage first
+                if (lightboxMedia.mediaId) {
+                    const local = await getMedia(lightboxMedia.mediaId);
+                    if (local && active) {
+                        setLightboxMedia(prev => ({ ...prev, loadedSrc: local }));
+                        return;
+                    }
+                }
+
+                // 2. Download from network
+                setLightboxProgress(0);
+                try {
+                    const { fetchAndReconstructMedia } = await import('../services/mediaTransport');
+                    const base64Data = await fetchAndReconstructMedia(lightboxMedia.manifest, (progress) => {
+                        if (active) setLightboxProgress(progress);
+                    });
+
                     if (active) {
                         setLightboxMedia(prev => ({ ...prev, loadedSrc: base64Data }));
                         setLightboxProgress(null);
+                        
+                        // Save to local storage for future use
+                        if (lightboxMedia.mediaId) {
+                            await saveMedia(lightboxMedia.mediaId, base64Data);
+                            setLocallyAvailableMedia(prev => new Set(prev).add(lightboxMedia.mediaId));
+                        }
                     }
-                }).catch(err => {
+                } catch (err) {
                     if (active) {
                         console.error("Failed to load high-res media", err);
                         setLightboxProgress(null);
                     }
-                });
-            });
+                }
+            };
+
+            loadMedia();
             return () => { active = false; };
         }
     }, [lightboxMedia]);
+
+    const downloadMedia = async (msg) => {
+        if (!msg.manifest || downloadingMedia.has(msg.mediaId)) return;
+
+        setDownloadingMedia(prev => new Map(prev).set(msg.mediaId, 0));
+
+        try {
+            const { fetchAndReconstructMedia } = await import('../services/mediaTransport');
+            const { saveMedia } = await import('../services/storageService');
+
+            const base64Data = await fetchAndReconstructMedia(msg.manifest, (progress) => {
+                setDownloadingMedia(prev => new Map(prev).set(msg.mediaId, progress));
+            });
+
+            if (base64Data) {
+                await saveMedia(msg.mediaId, base64Data);
+                setLocallyAvailableMedia(prev => new Set(prev).add(msg.mediaId));
+                const { removeMediaFromWatchList } = await import('../services/storageService');
+                await removeMediaFromWatchList(msg.mediaId);
+            }
+        } catch (err) {
+            console.error("Download failed:", err);
+            // Initiate P2P Swarm Self-Healing
+            const { requestMedia } = await import('../services/socketService');
+            const { addMediaToWatchList } = await import('../services/storageService');
+            if (activeChat?.address) {
+                requestMedia(activeChat.address, msg.mediaId);
+                await addMediaToWatchList(activeChat.address, msg.mediaId);
+                
+                const target = activeChat.isGroup ? "the group" : "the sender";
+                alert(`Original file is currently unavailable on relays. A background request has been sent to ${target} to re-sync it.`);
+            }
+        } finally {
+            setDownloadingMedia(prev => {
+                const newMap = new Map(prev);
+                newMap.delete(msg.mediaId);
+                return newMap;
+            });
+        }
+    };
 
     const forceScrollToBottom = (smooth = false) => {
         const container = messagesContainerRef.current;
@@ -319,14 +413,33 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
 
     const cancelReply = () => setReplyingTo(null);
 
-    const resizeImage = (file, maxWidth = 1280) => {
+    const resizeImage = (file, maxWidth = 2560) => {
         return new Promise((resolve) => {
             const reader = new FileReader();
             reader.onload = (e) => {
                 const img = new Image();
                 img.onload = () => {
-                    const canvas = document.createElement('canvas');
                     let { width, height } = img;
+                    
+                    // Optimization: If image is already within limits, don't re-encode to preserve quality
+                    if (width <= maxWidth && file.type === 'image/jpeg' && file.size < 2 * 1024 * 1024) {
+                        const thumbCanvas = document.createElement('canvas');
+                        const thumbMaxWidth = 160; // Smaller thumbnail
+                        let thumbW = width, thumbH = height;
+                        if (thumbW > thumbMaxWidth) {
+                            thumbH = (thumbH * thumbMaxWidth) / thumbW;
+                            thumbW = thumbMaxWidth;
+                        }
+                        thumbCanvas.width = thumbW;
+                        thumbCanvas.height = thumbH;
+                        const thumbCtx = thumbCanvas.getContext('2d');
+                        thumbCtx.drawImage(img, 0, 0, thumbW, thumbH);
+                        const thumbnail = thumbCanvas.toDataURL('image/jpeg', 0.3); // Blurry thumbnail
+                        resolve({ fullRes: e.target.result, thumbnail });
+                        return;
+                    }
+
+                    const canvas = document.createElement('canvas');
                     if (width > maxWidth) {
                         height = (height * maxWidth) / width;
                         width = maxWidth;
@@ -335,10 +448,10 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                     canvas.height = height;
                     const ctx = canvas.getContext('2d');
                     ctx.drawImage(img, 0, 0, width, height);
-                    const fullRes = canvas.toDataURL('image/jpeg', 0.85);
+                    const fullRes = canvas.toDataURL('image/jpeg', 0.95);
 
                     const thumbCanvas = document.createElement('canvas');
-                    const thumbMaxWidth = 320;
+                    const thumbMaxWidth = 160; 
                     let thumbW = width, thumbH = height;
                     if (thumbW > thumbMaxWidth) {
                         thumbH = (thumbH * thumbMaxWidth) / thumbW;
@@ -348,7 +461,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                     thumbCanvas.height = thumbH;
                     const thumbCtx = thumbCanvas.getContext('2d');
                     thumbCtx.drawImage(img, 0, 0, thumbW, thumbH);
-                    const thumbnail = thumbCanvas.toDataURL('image/jpeg', 0.6);
+                    const thumbnail = thumbCanvas.toDataURL('image/jpeg', 0.3); 
 
                     resolve({ fullRes, thumbnail });
                 };
@@ -431,14 +544,18 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
     };
 
     const handleSendMedia = async () => {
-        if (!imagePreview || isLoading || isUploadingMedia) return;
+        if (!imagePreview || isLoading) return;
         const imgData = imagePreview;
         const mediaId = mediaIdRef.current;
         const mediaType = mediaTypeRef.current;
         const mimeType = mediaMimeTypeRef.current;
         
-        setIsUploadingMedia(true);
-        setUploadProgress(0);
+        // Non-blocking: Clear preview immediately so user can keep chatting
+        setImagePreview(null);
+        mediaIdRef.current = null;
+        
+        // Add to background tracking
+        setBackgroundUploads(prev => new Map(prev).set(mediaId, 0));
 
         try {
             const { getMedia } = await import('../services/storageService');
@@ -447,21 +564,27 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
             if (fullRes) {
                 const { sliceAndTransmitMedia } = await import('../services/mediaTransport');
                 manifest = await sliceAndTransmitMedia(fullRes, mimeType, (progress) => {
-                    setUploadProgress(progress);
-                }, activeChat?.address);
+                    // Update specific background progress
+                    setBackgroundUploads(prev => new Map(prev).set(mediaId, progress));
+                }, activeChat?.address, mediaId);
             }
 
-            setImagePreview(null);
-            mediaIdRef.current = null;
-            setIsUploadingMedia(false);
-            setUploadProgress(0);
-
+            // Once finished, send the message and remove from background list
             await sendMessage(imgData, null, mediaType, { mediaId, manifest });
+            setBackgroundUploads(prev => {
+                const newMap = new Map(prev);
+                newMap.delete(mediaId);
+                return newMap;
+            });
         } catch (err) {
             console.error("Failed to send media:", err);
-            alert(`Media upload failed: ${err.message}`);
-            setIsUploadingMedia(false);
-            setUploadProgress(0);
+            // Optionally notify user of background failure
+            setBackgroundUploads(prev => {
+                const newMap = new Map(prev);
+                newMap.delete(mediaId);
+                return newMap;
+            });
+            alert(`Background media upload failed: ${err.message}`);
         }
     };
 
@@ -524,19 +647,23 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
 
     const typingText = getTypingText();
 
+    // receiptMap - Precompute the latest read/delivered message for each peer
     const receiptMap = useMemo(() => {
         const reads = {};      // address -> msgId
         const delivered = {};  // address -> msgId
         
-        const peers = activeChat?.isGroup ? (activeChat.info?.members || []) : [activeChat?.address];
+        // Robust peer identification: check both activeChat.members and activeChat.info.members
+        const peers = activeChat?.isGroup ? (activeChat.members || activeChat.info?.members || []) : [activeChat?.address];
         
         peers.forEach(peer => {
             if (!peer) return;
             const lowerPeer = peer.toLowerCase();
             if (lowerPeer === walletAddress?.toLowerCase()) return;
 
+            // Start from the latest message and work backwards
             for (let i = messages.length - 1; i >= 0; i--) {
                 const msg = messages[i];
+                // Only look at messages sent by the current user
                 if (msg.from?.toLowerCase() !== walletAddress?.toLowerCase()) continue;
 
                 const status = msg.receipts?.[lowerPeer];
@@ -636,40 +763,47 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                             />
                         )}
 
-                        <header className="chat-header">
-                            <button className="btn btn-ghost back-btn" onClick={closeChat} aria-label="Back to chat list">
-                                <ArrowLeft size={24} />
-                            </button>
-                            <div className="chat-header-info clickable" onClick={() => activeChat.isGroup ? setShowGroupDetails(true) : handleOpenContactProfile()}>
-                                <div className="avatar" style={{ overflow: 'hidden' }}>
-                                    {activeChat.isGroup ? (
-                                        activeChat.info?.avatar ? (
-                                            <img src={activeChat.info.avatar} alt="G" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                                        ) : <Users size={20} />
-                                    ) : (
-                                        activeChat.info?.avatar ? (
-                                            <img src={activeChat.info.avatar} alt="A" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                                        ) : activeChat.address.slice(2, 4).toUpperCase()
-                                    )}
-                                </div>
-                                <div className="chat-header-details">
-                                    <span className="chat-header-name">
-                                        {activeChat.info?.username || (activeChat.isGroup ? 'Unnamed Group' : formatAddress(activeChat.address))}
-                                        {!activeChat.isGroup && <TrustBadge stage={activeChat.info?.trustStage || 1} compact />}
-                                    </span>
-                                    <div className="chat-status-line">
-                                        {typingText ? <span className="text-xs text-primary animate-pulse font-medium">{typingText}</span> : (
-                                            <>
-                                                <span className={`status-indicator ${activeChat.info?.online ? 'online' : 'offline'}`}></span>
-                                                <span className="status-text">{activeChat.isGroup ? `${activeChat.info?.members?.length || 0} members` : (activeChat.info?.online ? 'Online' : 'Away')}</span>
-                                                <span className="encrypted-badge"><Lock size={10} /> Secure</span>
-                                            </>
+                        <header className="w-full flex-shrink-0 z-10 bg-surface h-16 flex items-center justify-between px-gutter border-b border-outline-variant/30 chat-header-container">
+                            <div className="flex items-center gap-3 min-w-0 flex-1">
+                                <button className="active:scale-95 duration-200 hover:opacity-80 transition-opacity flex items-center justify-center text-on-surface-variant flex-shrink-0" onClick={closeChat} aria-label="Back to chat list">
+                                    <span className="material-symbols-outlined">arrow_back</span>
+                                </button>
+                                <div className="flex items-center gap-3 cursor-pointer min-w-0" onClick={() => activeChat.isGroup ? setShowGroupDetails(true) : handleOpenContactProfile()}>
+                                    <div className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg overflow-hidden text-white bg-surface-container-highest flex-shrink-0">
+                                        {activeChat.isGroup ? (
+                                            activeChat.info?.avatar ? (
+                                                <img src={activeChat.info.avatar} alt="G" className="w-full h-full object-cover" />
+                                            ) : <span className="material-symbols-outlined text-white">group</span>
+                                        ) : (
+                                            activeChat.info?.avatar ? (
+                                                <img src={activeChat.info.avatar} alt="A" className="w-full h-full object-cover" />
+                                            ) : activeChat.address.slice(2, 4).toUpperCase()
                                         )}
+                                    </div>
+                                    <div className="flex flex-col min-w-0">
+                                        <span className="font-headline-md text-[16px] font-semibold text-primary flex items-center gap-1 min-w-0">
+                                            <span className="truncate">{activeChat.info?.username || (activeChat.isGroup ? 'Unnamed Group' : formatAddress(activeChat.address))}</span>
+                                            {!activeChat.isGroup && <TrustBadge stage={activeChat.info?.trustStage || 1} compact />}
+                                        </span>
+                                        <div className="flex items-center gap-1">
+                                            {typingText ? <span className="text-xs text-primary animate-pulse font-medium">{typingText}</span> : (
+                                                <>
+                                                    <span className={`w-2 h-2 rounded-full ${activeChat.info?.online ? 'bg-secondary' : 'bg-outline-variant'}`}></span>
+                                                    <span className="text-[12px] text-on-surface-variant leading-none">{activeChat.isGroup ? `${activeChat.info?.members?.length || 0} members` : (activeChat.info?.online ? 'Online' : 'Away')}</span>
+                                                    <div className="flex items-center ml-2 bg-surface-container px-1.5 py-0.5 rounded text-trust">
+                                                        <span className="material-symbols-outlined text-[10px] mr-0.5" style={{ fontVariationSettings: "'FILL' 1" }}>lock</span>
+                                                        <span className="text-[9px] font-bold uppercase tracking-wider">Secure</span>
+                                                    </div>
+                                                </>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
                             </div>
-                            <div className="header-actions">
-                                <button className={`btn btn-ghost debug-btn ${showDebug ? 'active' : ''}`} onClick={() => setShowDebug(!showDebug)} aria-label="Toggle Debug Info"><Code size={18} /></button>
+                            <div className="flex items-center gap-4 flex-shrink-0">
+                                <button className={`transition-colors active:scale-95 duration-200 flex items-center justify-center ${showDebug ? 'text-primary' : 'text-on-surface-variant'}`} onClick={() => setShowDebug(!showDebug)} aria-label="Toggle Debug Info">
+                                    <span className="material-symbols-outlined text-[24px]">code</span>
+                                </button>
                             </div>
                         </header>
 
@@ -684,12 +818,14 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                             </div>
                         )}
 
-                        <div className="messages-container" ref={messagesContainerRef} onClick={() => { if (reactionPickerMsgId) setReactionPickerMsgId(null); }}>
-                            {isLoadingMore && <div className="load-more-indicator"><div className="spinner-small"></div></div>}
-                            {messages.length === 0 ? <div className="no-messages"><p className="text-muted text-sm">No messages yet</p></div> : (
-                                messages.map((msg, index) => (
-                                    <div key={msg.id || index} id={msg.id ? `msg-${msg.id}` : undefined} className={`message animate-fadeIn ${msg.from?.toLowerCase() === walletAddress?.toLowerCase() ? 'sent' : 'received'}`}>
-                                        <div className="message-bubble" onDoubleClick={() => !msg.decryptionFailed && handleReply(msg)} onContextMenu={(e) => { if (msg.decryptionFailed) return; e.preventDefault(); setReactionPickerMsgId(msg.id); }}>
+                        <div className="flex-1 overflow-y-auto chat-scroll px-container-padding-mobile md:px-container-padding-desktop pt-6 pb-32 max-w-3xl mx-auto w-full flex flex-col gap-6" ref={messagesContainerRef} onClick={() => { if (reactionPickerMsgId) setReactionPickerMsgId(null); }}>
+                            {isLoadingMore && <div className="flex justify-center py-4"><div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin"></div></div>}
+                            {messages.length === 0 ? <div className="text-center py-10"><p className="text-on-surface-variant font-body-md">No messages yet</p></div> : (
+                                (() => {
+                                    const latestMyMsgId = messages.slice().reverse().find(m => m.from?.toLowerCase() === walletAddress?.toLowerCase())?.id;
+                                    return messages.map((msg, index) => (
+                                    <div key={msg.id || index} id={msg.id ? `msg-${msg.id}` : undefined} className={`relative animate-fadeIn flex flex-col gap-1 max-w-[85%] ${msg.from?.toLowerCase() === walletAddress?.toLowerCase() ? 'items-end self-end' : 'items-start self-start'}`}>
+                                        <div className={`p-4 rounded-2xl shadow-sm relative font-body-md ${msg.from?.toLowerCase() === walletAddress?.toLowerCase() ? 'bg-primary-container text-on-primary-container rounded-br-none' : 'bg-surface-container text-on-surface rounded-bl-none'}`} onDoubleClick={() => !msg.decryptionFailed && handleReply(msg)} onContextMenu={(e) => { if (msg.decryptionFailed) return; e.preventDefault(); setReactionPickerMsgId(msg.id); }}>
                                             {reactionPickerMsgId === msg.id && (
                                                 <div className={`reaction-picker ${msg.from === walletAddress ? 'sent' : 'received'}`} onClick={(e) => e.stopPropagation()}>
                                                     {QUICK_EMOJIS.map(emoji => (
@@ -700,16 +836,50 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                             {activeChat.isGroup && msg.from?.toLowerCase() !== walletAddress?.toLowerCase() && <div className="text-xs font-bold mb-1" style={{ color: 'var(--primary)' }}>{msg.senderUsername || formatAddress(msg.from)}</div>}
                                             {msg.replyTo && <div className="message-reply-context" onClick={() => scrollToMessage(msg.replyTo.id)}><div className="reply-bar-line" /><div className="reply-content"><span className="reply-sender">{msg.replyTo.senderUsername}</span><span className="reply-text">{msg.replyTo.content}</span></div></div>}
                                             {msg.decryptionFailed ? <div className="decryption-failed-content"><Lock size={14} className="text-error" /><p className="message-content text-muted italic">Decryption failed</p></div> : (msg.type === 'image' || msg.type === 'video') ? (
-                                                <div className="message-image-wrapper" onClick={() => setLightboxMedia({ src: msg.content, type: msg.type, manifest: msg.manifest, mediaId: msg.mediaId })}><img src={msg.content} alt="Media" className="message-image" /></div>
-                                            ) : <p className="message-content">{msg.content}</p>}
-                                            <div className="message-meta"><span>{formatTime(msg.timestamp)}</span>{msg.from?.toLowerCase() === walletAddress?.toLowerCase() && <Lock size={10} />}</div>
+                                                <div className="message-image-wrapper" onClick={() => (locallyAvailableMedia.has(msg.mediaId) || !msg.manifest) ? setLightboxMedia({ src: msg.content, type: msg.type, manifest: msg.manifest, mediaId: msg.mediaId }) : null}>
+                                                    <img 
+                                                        src={msg.content} 
+                                                        alt="Media" 
+                                                        className={`message-image ${(!locallyAvailableMedia.has(msg.mediaId) && msg.manifest) ? 'blurry' : ''}`} 
+                                                    />
+                                                    
+                                                    {msg.manifest && !locallyAvailableMedia.has(msg.mediaId) && (
+                                                        <div className="media-download-overlay" onClick={(e) => { e.stopPropagation(); if (!waitingForPeers.has(msg.mediaId)) downloadMedia(msg); }}>
+                                                            {downloadingMedia.has(msg.mediaId) ? (
+                                                                <div className="download-progress-container">
+                                                                    <div className="spinner-small" style={{ width: '24px', height: '24px' }}></div>
+                                                                    <span className="text-xs mt-2 text-white font-bold">{downloadingMedia.get(msg.mediaId)}%</span>
+                                                                </div>
+                                                            ) : waitingForPeers.has(msg.mediaId) ? (
+                                                                <div className="download-progress-container">
+                                                                    <div className="download-btn-circle" style={{ background: 'rgba(255, 165, 0, 0.4)', borderColor: 'orange' }}>
+                                                                        <Clock size={20} className="text-warning" />
+                                                                    </div>
+                                                                    <span className="text-xs mt-2 text-white font-bold bg-black/40 px-2 py-0.5 rounded-full">Waiting for peer...</span>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="download-btn-circle">
+                                                                    <Zap size={20} />
+                                                                </div>
+                                                            )}
+                                                            {!downloadingMedia.has(msg.mediaId) && !waitingForPeers.has(msg.mediaId) && <span className="text-xs text-white font-medium bg-black/40 px-2 py-0.5 rounded-full">Download Original</span>}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ) : <p className="whitespace-pre-wrap break-words">{msg.content}</p>}
+                                            <div className="flex items-center gap-1 mt-1 justify-end opacity-80">
+                                                <span className="font-label-sm text-[10px]">{formatTime(msg.timestamp)}</span>
+                                                {msg.from?.toLowerCase() === walletAddress?.toLowerCase() && msg.queued && (
+                                                    <span className="material-symbols-outlined text-[12px] text-error" title="Queued">schedule</span>
+                                                )}
+                                            </div>
                                         </div>
                                         {msg.reactions && Object.keys(msg.reactions).length > 0 && (
                                             <div className="reaction-pills">{Object.entries(msg.reactions).map(([emoji, users]) => (<button key={emoji} className="reaction-pill" onClick={() => setReactionDetailModal({ emoji, users, msgId: msg.id })}><span>{emoji}</span>{users.length > 1 && <span className="text-xs">{users.length}</span>}</button>))}</div>
                                         )}
                                         {msg.from?.toLowerCase() === walletAddress?.toLowerCase() && (
                                             <div className="receipt-anchors">
-                                                {/* 1. Seen Receipts (Avatars) */}
+                                                {/* 1. Seen Receipts (Avatars in color) */}
                                                 {Object.entries(receiptMap.lastReadMessageIds)
                                                     .filter(([, msgId]) => msgId === msg.id)
                                                     .map(([address]) => {
@@ -728,45 +898,90 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                                                     })
                                                 }
                                                 
-                                                {/* 2. Delivered Receipts (Hollow Circles) */}
+                                                {/* 2. Delivered Receipts (Avatars in grayscale) */}
                                                 {Object.entries(receiptMap.lastDeliveredMessageIds)
                                                     .filter(([, msgId]) => msgId === msg.id)
-                                                    .map(([address]) => (
-                                                        <div key={`${address}-delivered`} className="receipt-avatar delivered" title="Delivered" />
-                                                    ))
+                                                    .map(([address]) => {
+                                                        const contact = contacts.find(c => c.address.toLowerCase() === address.toLowerCase());
+                                                        return (
+                                                            <div key={`${address}-delivered`} className="receipt-avatar delivered" title={`Delivered to ${contact?.username || formatAddress(address)}`}>
+                                                                {contact?.avatar ? (
+                                                                    <img src={contact.avatar} alt="pfp" />
+                                                                ) : (
+                                                                    <div className="receipt-avatar-fallback">
+                                                                        {(contact?.username || address).slice(0, 1).toUpperCase()}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })
                                                 }
+
+                                                {/* 3. Sent Receipts (Hollow Circle) - Only if it's the latest message we sent and it has no delivery/read receipts yet */}
+                                                {msg.id === latestMyMsgId && !msg.queued &&
+                                                 (!msg.receipts || (!Object.values(msg.receipts).includes('delivered') && !Object.values(msg.receipts).includes('read'))) && (
+                                                    <div className="receipt-avatar sent" title="Sent" />
+                                                 )}
                                             </div>
                                         )}
                                     </div>
-                                ))
+                                    ));
+                                })()
                             )}
                             <div ref={messagesEndRef} />
                         </div>
 
-                        <div className="message-input-form">
-                            {replyingTo && <div className="reply-preview-bar"><div className="reply-preview-content"><span className="reply-to-label">Replying to {replyingTo.senderUsername}</span><span className="reply-preview-text">{replyingTo.type === 'image' ? '📷 Photo' : replyingTo.type === 'video' ? '🎥 Video' : replyingTo.content}</span></div><button type="button" onClick={cancelReply} aria-label="Cancel Reply"><X size={16} /></button></div>}
-                            {imagePreview && (
-                                <div className="image-preview-bar animate-fadeIn">
-                                    <img src={imagePreview} alt="Preview" className="image-preview-thumb" />
-                                    {isUploadingMedia ? (
-                                        <div className="upload-progress-container" style={{ flex: 1, padding: '0 15px' }}>
-                                            <span className="image-preview-label" style={{ display: 'block', marginBottom: '5px', fontSize: '10px' }}>Uploading high-res ({uploadProgress}%)</span>
-                                            <div className="progress-bar-bg" style={{ width: '100%', height: '4px', background: 'var(--bg-elevated)', borderRadius: '2px', overflow: 'hidden' }}><div className="progress-bar-fill" style={{ width: `${uploadProgress}%`, height: '100%', background: 'var(--primary)', transition: 'width 0.3s' }}></div></div>
+                        <div className="w-full px-4 py-2 z-40 bg-surface flex-shrink-0 chat-input-container">
+                            <div className="bg-surface-container rounded-[28px] flex flex-col px-2 py-2 gap-2 shadow-lg ring-1 ring-white/5 chat-input-pill">
+                                {replyingTo && (
+                                    <div className="flex items-center justify-between bg-surface-container-high rounded-2xl px-4 py-2 mx-2 mt-2">
+                                        <div className="flex flex-col min-w-0">
+                                            <span className="font-label-sm text-[11px] text-primary font-bold">Replying to {replyingTo.senderUsername}</span>
+                                            <span className="font-body-md text-sm text-on-surface-variant truncate">{replyingTo.type === 'image' ? '📷 Photo' : replyingTo.type === 'video' ? '🎥 Video' : replyingTo.content}</span>
                                         </div>
-                                    ) : <span className="image-preview-label text-sm text-secondary">Media ready to send</span>}
-                                    {!isUploadingMedia && <button type="button" onClick={cancelMediaPreview} aria-label="Cancel Media Attachment"><X size={16} /></button>}
-                                </div>
-                            )}
-                            <form className="message-input-row" onSubmit={imagePreview ? (e) => { e.preventDefault(); handleSendMedia(); } : handleSend}>
-                                <button type="button" className="btn btn-ghost attach-btn" onClick={() => fileInputRef.current?.click()} aria-label="Attach File">
-                                <Paperclip size={20} />
-                            </button>
-                                <input ref={inputRef} type="text" className="input message-input" placeholder="Message..." value={newMessage} onChange={handleInput} />
-                                <button type="submit" className="btn btn-primary send-btn" disabled={(!newMessage.trim() && !imagePreview) || isUploadingMedia || isLoading} aria-label="Send Message">
-                                <Send size={18} />
-                            </button>
-                            </form>
-                            <input type="file" ref={fileInputRef} hidden onChange={handleMediaSelect} />
+                                        <button type="button" onClick={cancelReply} aria-label="Cancel Reply" className="text-on-surface-variant hover:text-on-surface active:scale-95 ml-2">
+                                            <span className="material-symbols-outlined text-[18px]">close</span>
+                                        </button>
+                                    </div>
+                                )}
+                                {imagePreview && (
+                                    <div className="flex flex-col gap-2 bg-surface-container-high rounded-2xl p-2 mx-2 mt-2">
+                                        <div className="flex justify-between items-start">
+                                            <img src={imagePreview} alt="Preview" className="w-24 h-24 object-cover rounded-xl" />
+                                            <button type="button" onClick={cancelMediaPreview} aria-label="Cancel" className="bg-black/50 text-white rounded-full p-1 active:scale-95"><span className="material-symbols-outlined text-[16px]">close</span></button>
+                                        </div>
+                                        <span className="text-xs text-secondary px-1">Media ready to send</span>
+                                    </div>
+                                )}
+                                
+                                {backgroundUploads.size > 0 && (
+                                    <div className="flex flex-col gap-1 mx-2 mt-1">
+                                        {Array.from(backgroundUploads.entries()).map(([mediaId, progress]) => (
+                                            <div key={mediaId} className="w-full">
+                                                <div className="flex justify-between text-[9px] text-on-surface-variant mb-0.5">
+                                                    <span className="italic">Sending media...</span><span>{progress}%</span>
+                                                </div>
+                                                <div className="w-full bg-surface-container-highest h-1 rounded-full overflow-hidden">
+                                                    <div className="bg-primary h-full transition-all duration-300" style={{ width: `${progress}%` }}></div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                <form className="flex items-center gap-2 w-full" onSubmit={imagePreview ? (e) => { e.preventDefault(); handleSendMedia(); } : handleSend}>
+                                    <button type="button" className="w-10 h-10 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-surface-container-high transition-colors active:scale-95 duration-200" onClick={() => fileInputRef.current?.click()} aria-label="Attach File">
+                                        <span className="material-symbols-outlined text-[20px]">add</span>
+                                    </button>
+                                    <div className="flex-1 min-w-0">
+                                        <input ref={inputRef} type="text" className="w-full bg-transparent border-none text-on-surface placeholder:text-outline focus:ring-0 text-body-lg px-2 h-10 outline-none font-body-md" placeholder="Message..." value={newMessage} onChange={handleInput} />
+                                    </div>
+                                    <button type="submit" className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors active:scale-95 duration-200 shadow-sm flex-shrink-0 ${(!newMessage.trim() && !imagePreview) || isLoading ? 'bg-surface-container-highest text-on-surface-variant cursor-not-allowed' : 'bg-primary text-on-primary hover:bg-primary-container hover:text-on-primary-container'}`} disabled={(!newMessage.trim() && !imagePreview) || isLoading} aria-label="Send Message">
+                                        <span className="material-symbols-outlined text-[20px]" style={{ fontVariationSettings: "'FILL' 1" }}>send</span>
+                                    </button>
+                                </form>
+                                <input type="file" ref={fileInputRef} hidden onChange={handleMediaSelect} />
+                            </div>
                         </div>
                     </>
                 )}
@@ -827,7 +1042,7 @@ export function ChatInterface({ walletAddress, username, onDeleteAccount }) {
                             )
                         ) : (
                             <QuickPinchZoom onUpdate={({ x, y, scale }) => { const imgEntry = document.getElementById('lightbox-zoomed-img'); if (imgEntry) imgEntry.style.setProperty('transform', make3dTransformValue({ x, y, scale })); }} maxZoom={5} wheelScaleFactor={500}>
-                                <img id="lightbox-zoomed-img" src={lightboxMedia.loadedSrc || lightboxMedia.src} alt="Full size" className="lightbox-image" style={{ transition: 'filter 0.3s', filter: lightboxMedia.loadedSrc ? 'none' : 'blur(5px)' }} />
+                                <img id="lightbox-zoomed-img" src={lightboxMedia.loadedSrc || lightboxMedia.src} alt="Full size" className="lightbox-image" />
                             </QuickPinchZoom>
                         )}
                     </div>

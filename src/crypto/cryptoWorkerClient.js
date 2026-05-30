@@ -62,6 +62,22 @@ function localRatchetEpochKey(currentKeyBase64) {
     return encodeBase64(nextKey);
 }
 
+async function localDeriveEpochKey(rootKey, epochIndex) {
+    const label = `epoch_derivation_${epochIndex}`;
+    const key = typeof rootKey === 'string' ? rootKey : encodeBase64(rootKey);
+    return await localHmacSha256(key, label);
+}
+
+async function localRatchetMessageKey(chainKeyBase64) {
+    const messageKeyBase64 = await localHmacSha256(chainKeyBase64, 'message_key');
+    const nextChainKeyBase64 = await localHmacSha256(chainKeyBase64, 'next_chain_key');
+    
+    return {
+        messageKey: messageKeyBase64,
+        nextChainKey: nextChainKeyBase64
+    };
+}
+
 function localEncryptGroupMessage(epochKeyBase64, plaintext, myEd25519SecretBase64, messageId, timestamp) {
     const epochKey = decodeBase64(epochKeyBase64);
     const mySecret = decodeBase64(myEd25519SecretBase64);
@@ -122,6 +138,10 @@ async function runTaskLocally(type, payload) {
             return localGenerateKeyPair();
         case 'ratchetEpochKey':
             return localRatchetEpochKey(payload.currentKeyBase64);
+        case 'deriveEpochKey':
+            return await localDeriveEpochKey(payload.rootKey, payload.epochIndex);
+        case 'ratchetMessageKey':
+            return await localRatchetMessageKey(payload.chainKeyBase64);
         case 'encryptGroupMessage':
             return localEncryptGroupMessage(payload.epochKeyBase64, payload.plaintext, payload.myEd25519SecretBase64, payload.messageId, payload.timestamp);
         case 'decryptGroupMessage':
@@ -259,6 +279,8 @@ export const cryptoWorker = {
     dhBefore: (publicKeyBase64, secretKeyBase64) => runTask('dhBefore', { publicKeyBase64, secretKeyBase64 }),
     generateKeyPair: () => runTask('generateKeyPair', {}),
     ratchetEpochKey: (currentKeyBase64) => runTask('ratchetEpochKey', { currentKeyBase64 }),
+    deriveEpochKey: (rootKey, epochIndex) => runTask('deriveEpochKey', { rootKey, epochIndex }),
+    ratchetMessageKey: (chainKeyBase64) => runTask('ratchetMessageKey', { chainKeyBase64 }),
     encryptGroupMessage: (epochKeyBase64, plaintext, myEd25519SecretBase64, messageId, timestamp) => runTask('encryptGroupMessage', { epochKeyBase64, plaintext, myEd25519SecretBase64, messageId, timestamp }),
     decryptGroupMessage: (epochKeyBase64, ciphertextBase64, nonceBase64, signatureBase64, senderPublicSignKeyBase64, messageId, timestamp) => runTask('decryptGroupMessage', { epochKeyBase64, ciphertextBase64, nonceBase64, signatureBase64, senderPublicSignKeyBase64, messageId, timestamp })
 };

@@ -123,35 +123,8 @@ db.serialize(() => {
     db.run(`CREATE INDEX IF NOT EXISTS idx_pre_keys_addr ON pre_keys (address)`);
 });
 
-// Initialize Firebase Admin for Push Notifications
-let fcmReady = false;
-try {
-    let serviceAccount;
-    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-        serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    } else {
-        serviceAccount = require('./serviceAccountKey.json');
-    }
-
-    if (serviceAccount) {
-        admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount)
-        });
-        fcmReady = true;
-        console.log('[Firebase] Push notifications initialized successfully.');
-    }
-} catch (err) {
-    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-        console.error('[Firebase] Error parsing FIREBASE_SERVICE_ACCOUNT environment variable:', err.message);
-    } else {
-        console.warn('[Firebase] Warning: serviceAccountKey.json not found or invalid. Push notifications are disabled.');
-    }
-}
-
-// Helper: Send Push Notification
+// Helper: Send Push Notification (via Stateless Push Buffer)
 async function pushOfflineNotification(toAddress, payload, type) {
-    if (!fcmReady) return;
-    
     db.get(`SELECT push_token FROM users WHERE address = ?`, [toAddress.toLowerCase()], async (err, user) => {
         if (err || !user || !user.push_token) return;
 
@@ -179,22 +152,34 @@ async function pushOfflineNotification(toAddress, payload, type) {
                 body = `${senderName} added you to a group`;
             }
 
-            await admin.messaging().send({
-                token: user.push_token,
-                notification: { title, body },
-                android: { priority: 'high' },
-                data: {
-                    type,
-                    from: payload.from,
-                    groupId: payload.groupId || ''
-                }
+            // Forward to Push Buffer microservice
+            const PUSH_BUFFER_URL = process.env.PUSH_BUFFER_URL || 'http://localhost:3002/push';
+            const response = await fetch(PUSH_BUFFER_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    pushToken: user.push_token,
+                    title,
+                    body,
+                    data: {
+                        type,
+                        from: payload.from,
+                        groupId: payload.groupId || ''
+                    }
+                })
             });
-            console.log(`[Firebase] Push sent to ${toAddress.slice(0, 8)}`);
-        } catch (err) {
-            console.error('[Firebase] Failed to send push:', err.message);
-            if (err.code === 'messaging/registration-token-not-registered') {
-                db.run(`UPDATE users SET push_token = NULL WHERE address = ?`, [toAddress.toLowerCase()]);
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                console.error('[Push] Buffer service error:', errorData);
+                if (errorData.code === 'messaging/registration-token-not-registered') {
+                    db.run(`UPDATE users SET push_token = NULL WHERE address = ?`, [toAddress.toLowerCase()]);
+                }
+            } else {
+                console.log(`[Push] Forwarded notification to buffer for ${toAddress.slice(0, 8)}`);
             }
+        } catch (err) {
+            console.error('[Push] Failed to forward to buffer:', err.message);
         }
     });
 }
@@ -322,14 +307,15 @@ function getTrustStage(registeredAt, trustScore) {
 }
 
 function incrementTrustScore(address, points) {
-    db.run(`UPDATE users SET trust_score = COALESCE(trust_score, 0) + ? WHERE address = ?`, [points, address.toLowerCase()]);
+    db.run(`UPDATE users SET trust_score = COALESCE(trust_score, 100) + ? WHERE address = ?`, [points, address.toLowerCase()]);
 }
 
 // --- V3 Staged Privileges & Rate Limiting ---
 const messageCounters = new Map(); // address -> { count, resetAt }
 const groupCreationCounters = new Map(); // address -> { count, resetAt }
+const strangerDMLimits = new Map(); // address -> { lastInitiatedAt, initiatedRecipients: Set }
 
-async function checkPrivileges(address, action) {
+async function checkPrivileges(address, action, toAddress = null) {
     const user = await new Promise(resolve => {
         db.get(`SELECT * FROM users WHERE address = ?`, [address.toLowerCase()], (err, row) => resolve(row));
     });
@@ -341,6 +327,7 @@ async function checkPrivileges(address, action) {
     if (action === 'sendMessage') {
         if (stage >= 2) return { allowed: true }; // Stage 2+ unlimited
         
+        // 1. General Rate Limit (10 per minute)
         const limit = messageCounters.get(address) || { count: 0, resetAt: now + 60000 };
         if (now > limit.resetAt) {
             limit.count = 1;
@@ -353,9 +340,38 @@ async function checkPrivileges(address, action) {
         if (limit.count > 10) {
             return { allowed: false, error: 'Rate limit exceeded for Stage 1. Verify a contact to unlock higher limits.' };
         }
+
+        // 2. Stranger DM Rate Limit (1 NEW stranger per hour)
+        if (toAddress) {
+            const normalizedTo = toAddress.toLowerCase();
+            // A recipient is NOT a stranger if they have verified the sender
+            const hasVerifiedMe = await new Promise(resolve => {
+                db.get(`SELECT 1 FROM verifications WHERE verifier = ? AND verified = ?`, [normalizedTo, address.toLowerCase()], (err, row) => resolve(!!row));
+            });
+
+            if (!hasVerifiedMe) {
+                const strangerLimit = strangerDMLimits.get(address) || { lastInitiatedAt: 0, initiatedRecipients: new Set() };
+                
+                // If we haven't messaged this stranger yet in this session
+                if (!strangerLimit.initiatedRecipients.has(normalizedTo)) {
+                    const oneHour = 60 * 60 * 1000;
+                    if (now - strangerLimit.lastInitiatedAt < oneHour) {
+                        return { allowed: false, error: 'Stage 1 users can only initiate 1 new DM to a stranger per hour. Get verified to unlock.' };
+                    }
+                    // Record the initiation
+                    strangerLimit.lastInitiatedAt = now;
+                    strangerLimit.initiatedRecipients.add(normalizedTo);
+                    strangerDMLimits.set(address, strangerLimit);
+                    console.log(`🛡️ Stage 1 DM Gating: ${address.slice(0, 10)} initiated DM to stranger ${normalizedTo.slice(0, 10)}`);
+                }
+            }
+        }
     }
 
     if (action === 'createGroup') {
+        if (stage === 1) {
+            return { allowed: false, error: 'Stage 1 (Quarantine) users cannot create groups. Aging and verification points required.' };
+        }
         if (stage >= 3) return { allowed: true }; // Stage 3 unlimited
         
         const limit = groupCreationCounters.get(address) || { count: 0, resetAt: now + (24 * 60 * 60 * 1000) };
@@ -367,7 +383,7 @@ async function checkPrivileges(address, action) {
         }
         groupCreationCounters.set(address, limit);
 
-        const maxGroups = stage === 2 ? 5 : 1;
+        const maxGroups = stage === 2 ? 5 : 0;
         if (limit.count > maxGroups) {
             return { allowed: false, error: `Daily group limit reached for Stage ${stage}.` };
         }
@@ -443,7 +459,7 @@ io.on('connection', (socket) => {
                 password: challenge,
                 salt: salt,
                 iterations: 2,
-                memory: 16384,
+                memory: 65536,
                 parallelism: 1,
                 hashLength: 32,
                 outputType: 'hex',
@@ -499,7 +515,7 @@ io.on('connection', (socket) => {
         const finalRegisteredAt = dbUser?.registered_at || (registeredAt || Date.now());
         const finalPushToken = pushToken || dbUser?.push_token;
         const finalOsPlatform = osPlatform || dbUser?.os_platform;
-        const trustScore = dbUser?.trust_score !== undefined ? dbUser.trust_score : 100;
+        const trustScore = dbUser?.trust_score ?? 100;
 
         db.run(`INSERT OR REPLACE INTO users (address, username, public_key, signing_public_key, signed_pre_key, signed_pre_key_signature, avatar, status, registered_at, trust_score, push_token, os_platform)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -564,6 +580,7 @@ io.on('connection', (socket) => {
                 else if (msg._isGroupDeleted) socket.emit('groupDeleted', msg);
                 else if (msg._isGroupAvatarUpdate) socket.emit('groupAvatarUpdated', msg);
                 else if (msg._isGroupMessage) socket.emit('groupMessage', msg);
+                else if (msg._isReceipt) socket.emit('messageReceipt', msg);
                 else socket.emit('message', msg);
             });
         }
@@ -829,7 +846,7 @@ io.on('connection', (socket) => {
         const toAddress = to.toLowerCase();
         if (!requireAuth(socket)) return;
 
-        const { allowed, error } = await checkPrivileges(socket.address, 'sendMessage');
+        const { allowed, error } = await checkPrivileges(socket.address, 'sendMessage', toAddress);
         if (!allowed) {
             return socket.emit('error', { message: error });
         }
@@ -972,16 +989,31 @@ io.on('connection', (socket) => {
                 rows.forEach(row => {
                     const memberAddr = row.user_address.toLowerCase();
                     if (memberAddr === fromAddress) return;
+                    
+                    const payload = { id: `rcpt_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`, messageId, type, from: socket.address, chatId, _isReceipt: true, timestamp: Date.now() };
                     const member = users.get(memberAddr);
                     if (member && member.online) {
-                        io.to(member.socketId).emit('messageReceipt', { messageId, type, from: socket.address, chatId });
+                        io.to(member.socketId).emit('messageReceipt', payload);
+                    } else {
+                        const pending = offlineMessages.get(memberAddr) || [];
+                        pending.push(payload);
+                        offlineMessages.set(memberAddr, pending);
+                        saveOfflineMessagesDb();
+                        // No push notification needed for read receipts
                     }
                 });
             });
         } else {
+            const payload = { id: `rcpt_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`, messageId, type, from: socket.address, chatId, _isReceipt: true, timestamp: Date.now() };
             const recipient = users.get(toAddress);
             if (recipient && recipient.online) {
-                io.to(recipient.socketId).emit('messageReceipt', { messageId, type, from: socket.address, chatId });
+                io.to(recipient.socketId).emit('messageReceipt', payload);
+            } else {
+                const pending = offlineMessages.get(toAddress) || [];
+                pending.push(payload);
+                offlineMessages.set(toAddress, pending);
+                saveOfflineMessagesDb();
+                // No push notification needed for read receipts
             }
         }
     });

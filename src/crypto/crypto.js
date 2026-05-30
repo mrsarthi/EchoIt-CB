@@ -58,11 +58,12 @@ export function generateSymmetricKey() {
  * Encrypt a payload symmetrically
  * @param {string|Uint8Array} payload - Data to encrypt (string or Uint8Array)
  * @param {string} secretKey - Symmetric key (base64)
+ * @param {string} predefinedNonce - Optional predefined nonce (base64)
  * @returns {Object} { encrypted, nonce } both as base64 strings
  */
-export function encryptSymmetric(payload, secretKey) {
+export function encryptSymmetric(payload, secretKey, predefinedNonce = null) {
   const key = decodeBase64(secretKey);
-  const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
+  const nonce = predefinedNonce ? decodeBase64(predefinedNonce) : nacl.randomBytes(nacl.secretbox.nonceLength);
   const message = typeof payload === 'string' ? decodeUTF8(payload) : payload;
   
   const encrypted = nacl.secretbox(message, nonce, key);

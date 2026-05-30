@@ -24,11 +24,11 @@ import {
     onUserStatus,
     onReconnect,
     getUser,
-    onGroupMessage,
     emitCreateGroup,
     emitDeleteGroup,
     onGroupCreated,
     onGroupDeleted,
+    onGroupMemberRemoved,
     ackOfflineMessages,
     onGroupAvatarUpdated,
     onReaction,
@@ -43,7 +43,8 @@ import {
     getSavedContacts,
     clearHistory,
     migrateOldHistory,
-    setJoinedAt
+    setJoinedAt,
+    getMediaWatchList
 } from '../services/storageService';
 import { getLoadedMessages, loadPreviousEpoch, getLatestEpochIndex, migrateToYjs } from '../services/stateEngine';
 
@@ -486,19 +487,6 @@ export function useChat(myAddress) {
                 }
             }, keys);
 
-            onGroupMessage(async (msg) => {
-                if (!msg.groupId) return;
-                try {
-                    await saveMessage(msg.groupId, msg);
-                    if (msg.id) ackOfflineMessages([msg.id]);
-                } catch (err) { console.error('Failed to persists group message:', err); }
-                if (activeChatRef.current?.address === msg.groupId) {
-                    setMessages(prev => prev.some(m => m.id === msg.id) ? prev : [...prev, msg]);
-                } else {
-                    setContacts(prev => prev.map(c => c.address === msg.groupId ? { ...c, unreadCount: (c.unreadCount || 0) + 1, lastMessageTime: msg.timestamp } : c));
-                }
-            });
-
             onGroupCreated((data) => {
                 const { id, groupId, groupName, members, admins, createdBy } = data;
                 if (!groupId) return;
@@ -527,6 +515,17 @@ export function useChat(myAddress) {
                 }
             });
 
+            onGroupMemberRemoved((data) => {
+                const { groupId, memberAddress } = data;
+                if (!groupId || !memberAddress) return;
+                setContacts(prev => prev.map(c => {
+                    if (c.address === groupId && c.isGroup && c.members) {
+                        return { ...c, members: c.members.filter(m => m.toLowerCase() !== memberAddress.toLowerCase()) };
+                    }
+                    return c;
+                }));
+            });
+
             onGroupAvatarUpdated((data) => {
                 const { id, groupId, avatar } = data;
                 if (!groupId) return;
@@ -551,6 +550,49 @@ export function useChat(myAddress) {
                 }
             });
 
+            // ====== MEDIA SWARM LOGIC ======
+            import('../services/socketService').then(({ onMediaQuery, onMediaOffer, offerMedia }) => {
+                const handledQueries = new Set();
+                
+                onMediaQuery(async (data) => {
+                    const { mediaId, chatId } = data.signal;
+                    if (handledQueries.has(mediaId)) return; // Don't respond if someone else already offered
+                    
+                    const { hasMedia, getMedia } = await import('../services/storageService');
+                    if (await hasMedia(mediaId)) {
+                        console.log(`[Media Swarm] 🩺 I have ${mediaId}, offering to re-seed...`);
+                        offerMedia(chatId, mediaId);
+                        handledQueries.add(mediaId); // Prevent duplicate reseeding
+                        
+                        // Grab the manifest from our messages
+                        let targetMsg = null;
+                        setMessages(prev => {
+                            targetMsg = prev.find(m => m.mediaId === mediaId);
+                            return prev;
+                        });
+                        
+                        // If not in current chat view, search local storage history
+                        if (!targetMsg) {
+                            const history = await getLocalHistory(chatId);
+                            targetMsg = history.find(m => m.mediaId === mediaId);
+                        }
+                        
+                        if (targetMsg?.manifest) {
+                            const base64Data = await getMedia(mediaId);
+                            const { reseedMediaToRelays } = await import('../services/mediaTransport');
+                            await reseedMediaToRelays(base64Data, targetMsg.manifest);
+                        }
+                    }
+                });
+
+                onMediaOffer((data) => {
+                    const { mediaId } = data.signal;
+                    console.log(`[Media Swarm] 🤫 Peer offered ${mediaId}. Staying silent.`);
+                    handledQueries.add(mediaId);
+                });
+            });
+            // ===============================
+
             onMessageReceipt(({ messageId, type, from, chatId }) => {
                 if (from) {
                     setContacts(prev => {
@@ -573,9 +615,22 @@ export function useChat(myAddress) {
                         return prev;
                     });
                 }
-                setMessages(prev => prev.map(m => m.id === messageId ? { ...m, receipts: { ...(m.receipts || {}), [from.toLowerCase()]: type } } : m));
+                
+                // Update messages state, preventing downgrading from 'read' to 'delivered'
+                setMessages(prev => prev.map(m => {
+                    if (m.id === messageId) {
+                        const currentType = m.receipts?.[from.toLowerCase()];
+                        if (currentType === 'read' && type === 'delivered') return m;
+                        return { ...m, receipts: { ...(m.receipts || {}), [from.toLowerCase()]: type } };
+                    }
+                    return m;
+                }));
+
                 if (from && messageId) {
-                    import('../services/storageService').then(s => s.updateMessageReceipt(chatId, [messageId], from, type).catch(() => {}));
+                    // For DMs, the chatId for storage is the peer's address (from), 
+                    // whereas for groups it is the groupId.
+                    const storageChatId = (chatId && chatId.startsWith('group_')) ? chatId : from;
+                    import('../services/storageService').then(s => s.updateMessageReceipt(storageChatId, [messageId], from, type).catch(() => {}));
                 }
             });
 
@@ -614,6 +669,32 @@ export function useChat(myAddress) {
                 if (online && myAddress) {
                     flushPendingMessages(myAddress, ({ id, msgStatus }) => {
                         setMessages(prev => prev.map(m => m.id === id ? { ...m, status: msgStatus, transport: 'relay' } : m));
+                    }).catch(() => {});
+
+                    // Check Media Watch List (Phase 3: Presence Trigger)
+                    getMediaWatchList().then(async (watchList) => {
+                        if (watchList.length > 0) {
+                            const { requestMedia } = await import('../services/socketService');
+                            const { getSavedContacts } = await import('../services/storageService');
+                            const savedContacts = await getSavedContacts();
+                            
+                            watchList.forEach(item => {
+                                let shouldRequest = false;
+                                if (item.chatId.toLowerCase() === userAddr.toLowerCase()) {
+                                    shouldRequest = true; // Direct message peer came online
+                                } else {
+                                    const group = savedContacts.find(c => c.address === item.chatId && c.isGroup);
+                                    if (group && group.members && group.members.some(m => m.toLowerCase() === userAddr.toLowerCase())) {
+                                        shouldRequest = true; // A group member came online
+                                    }
+                                }
+                                
+                                if (shouldRequest) {
+                                    console.log(`[Media Swarm] 🔄 Peer ${userAddr.slice(0,6)} online. Re-requesting ${item.mediaId}`);
+                                    requestMedia(item.chatId, item.mediaId);
+                                }
+                            });
+                        }
                     }).catch(() => {});
                 }
             });
@@ -671,9 +752,25 @@ export function useChat(myAddress) {
             const chat = activeChatRef.current;
             if (!chat) return;
             setMessages(prev => {
-                const unread = prev.filter(m => m.from?.toLowerCase() !== myAddress?.toLowerCase() && m.status !== 'read');
-                unread.forEach(m => sendReadReceipt(m.from, m.id, chat.address));
-                return prev;
+                let changed = false;
+                const unreadIds = [];
+                const updated = prev.map(m => {
+                    if (m.from?.toLowerCase() !== myAddress?.toLowerCase() && m.status !== 'read') {
+                        sendReadReceipt(m.from, m.id, chat.address);
+                        unreadIds.push(m.id);
+                        changed = true;
+                        return { ...m, status: 'read' };
+                    }
+                    return m;
+                });
+                
+                if (changed && unreadIds.length > 0) {
+                    import('../services/storageService').then(s => 
+                        s.updateMessageReceipt(chat.address, unreadIds, myAddress, 'read').catch(() => {})
+                    );
+                }
+                
+                return changed ? updated : prev;
             });
         };
         window.addEventListener('focus', handleFocus);

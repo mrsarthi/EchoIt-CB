@@ -86,41 +86,57 @@ export async function uploadChunkWithRetry(chunkId, base64Data, token = null, ma
 /**
  * Fetches a chunk by racing all known relays.
  * The first one to return the chunk wins.
+ * Includes a retry mechanism for robustness.
  * @param {string} chunkId - Unique identifier for the chunk
+ * @param {number} maxRetries - Maximum number of retry attempts
  * @returns {Promise<string|null>} The chunk data, or null if not found
  */
-export async function fetchChunkWithTimeout(chunkId) {
-    return new Promise((resolve) => {
-        let isResolved = false;
+export async function fetchChunkWithTimeout(chunkId, maxRetries = 3) {
+    let attempt = 0;
 
-        const promises = RELAYS.map(async (relayUrl) => {
-            try {
-                const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
-                
-                const response = await fetch(`${relayUrl}/fetch/${chunkId}`, {
-                    signal: controller.signal
-                });
-                
-                clearTimeout(timeout);
-                
-                if (response.ok) {
-                    const data = await response.json();
-                    if (!isResolved && data.success && data.data) {
-                        isResolved = true;
-                        resolve(data.data);
+    while (attempt < maxRetries) {
+        const result = await new Promise((resolve) => {
+            let isResolved = false;
+            let finishedCount = 0;
+
+            const promises = RELAYS.map(async (relayUrl) => {
+                try {
+                    const controller = new AbortController();
+                    const timeout = setTimeout(() => controller.abort(), 20000); // 20s individual race
+                    
+                    const response = await fetch(`${relayUrl}/fetch/${chunkId}`, {
+                        signal: controller.signal
+                    });
+                    
+                    clearTimeout(timeout);
+                    
+                    if (response.ok) {
+                        const data = await response.json();
+                        if (!isResolved && data.success && data.data) {
+                            isResolved = true;
+                            resolve(data.data);
+                        }
+                    }
+                } catch (err) {
+                    // Ignore individual failures
+                } finally {
+                    finishedCount++;
+                    if (finishedCount === RELAYS.length && !isResolved) {
+                        resolve(null);
                     }
                 }
-            } catch (err) {
-                // Ignore fetch errors from individual nodes, we are racing them
-            }
+            });
         });
 
-        Promise.allSettled(promises).then(() => {
-            if (!isResolved) {
-                console.error(`[Relay] Failed to fetch chunk ${chunkId} from all relays.`);
-                resolve(null);
-            }
-        });
-    });
+        if (result) return result;
+
+        attempt++;
+        if (attempt < maxRetries) {
+            console.warn(`[Relay] Fetch attempt ${attempt} failed for chunk ${chunkId}. Retrying in 2s...`);
+            await new Promise(r => setTimeout(r, 2000));
+        }
+    }
+
+    console.error(`[Relay] Failed to fetch chunk ${chunkId} from all relays after ${maxRetries} attempts.`);
+    return null;
 }

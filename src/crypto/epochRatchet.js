@@ -7,7 +7,7 @@
 import { encodeBase64, decodeBase64, decodeUTF8, encodeUTF8 } from 'tweetnacl-util';
 import localforage from 'localforage';
 import { cryptoWorker } from './cryptoWorkerClient';
-import { encryptSensitive, decryptSensitive } from './doubleRatchet';
+import { encryptContent, decryptContent } from '../services/storageEncryption';
 
 // Mutex for sequential ratchet operations per peer
 const peerLocks = new Map();
@@ -43,7 +43,7 @@ const epochSessionStore = localforage.createInstance({
  * Helper to save a session with at-rest encryption.
  */
 async function saveEpochSession(id, session) {
-    const encrypted = await encryptSensitive(session);
+    const encrypted = await encryptContent(JSON.stringify(session));
     if (!encrypted) {
         // Fallback to plain only if session key isn't set (graceful fail for dev)
         return await epochSessionStore.setItem(id, session);
@@ -58,32 +58,10 @@ async function getEpochSession(id) {
     const data = await epochSessionStore.getItem(id);
     if (!data) return null;
     if (data._encrypted) {
-        return await decryptSensitive(data._encrypted);
+        const decrypted = await decryptContent(data._encrypted);
+        return JSON.parse(decrypted);
     }
     return data; // Legacy or dev fallback
-}
-
-/**
- * Derive a 32-byte Epoch Key from a Root Key and Epoch Index.
- */
-export async function deriveEpochKey(rootKey, epochIndex) {
-    const label = `epoch_derivation_${epochIndex}`;
-    const key = typeof rootKey === 'string' ? rootKey : encodeBase64(rootKey);
-    const signature = await cryptoWorker.hmacSha256(key, label);
-    return decodeBase64(signature);
-}
-
-/**
- * Derive the next message key within the current epoch.
- */
-export async function ratchetMessageKey(chainKeyBase64) {
-    const messageKeyBase64 = await cryptoWorker.hmacSha256(chainKeyBase64, 'message_key');
-    const nextChainKeyBase64 = await cryptoWorker.hmacSha256(chainKeyBase64, 'next_chain_key');
-    
-    return {
-        messageKey: decodeBase64(messageKeyBase64).slice(0, 32),
-        nextChainKey: nextChainKeyBase64
-    };
 }
 
 /**
@@ -91,12 +69,12 @@ export async function ratchetMessageKey(chainKeyBase64) {
  */
 export async function initEpochSession(peerAddress, rootKey) {
     const rootKeyBase64 = typeof rootKey === 'string' ? rootKey : encodeBase64(rootKey);
-    const epochKey = await deriveEpochKey(rootKeyBase64, 0);
+    const epochKey = await cryptoWorker.deriveEpochKey(rootKeyBase64, 0);
     const session = {
         peerAddress,
         rootKey: rootKeyBase64,
         epochIndex: 0,
-        chainKey: encodeBase64(epochKey),
+        chainKey: epochKey, // Already base64 from worker
         messageIndex: 0,
         skippedKeys: {} // { "epoch:index": base64Key }
     };
@@ -115,17 +93,17 @@ export async function encryptEpoch(peerAddress, plaintext) {
         // Check if we need to roll over to a new epoch
         if (session.messageIndex >= EPOCH_MAX_MESSAGES) {
             session.epochIndex += 1;
-            const newEpochKey = await deriveEpochKey(session.rootKey, session.epochIndex);
-            session.chainKey = encodeBase64(newEpochKey);
+            const newEpochKey = await cryptoWorker.deriveEpochKey(session.rootKey, session.epochIndex);
+            session.chainKey = newEpochKey;
             session.messageIndex = 0;
         }
 
-        const { messageKey, nextChainKey } = await ratchetMessageKey(session.chainKey);
+        const { messageKey, nextChainKey } = await cryptoWorker.ratchetMessageKey(session.chainKey);
         const index = session.messageIndex++;
         session.chainKey = nextChainKey;
 
         // Perform encryption via worker
-        const { ciphertext, nonce } = await cryptoWorker.encryptSymmetric(plaintext, encodeBase64(messageKey));
+        const { ciphertext, nonce } = await cryptoWorker.encryptSymmetric(plaintext, messageKey);
 
         await saveEpochSession(peerAddress.toLowerCase(), session);
 
@@ -155,9 +133,9 @@ export async function decryptEpoch(peerAddress, { ciphertext, nonce, header }) {
 
         // 1. Handle Epoch Skips
         if (epochIndex > session.epochIndex) {
-            const newEpochKey = await deriveEpochKey(session.rootKey, epochIndex);
+            const newEpochKey = await cryptoWorker.deriveEpochKey(session.rootKey, epochIndex);
             session.epochIndex = epochIndex;
-            session.chainKey = encodeBase64(newEpochKey);
+            session.chainKey = newEpochKey;
             session.messageIndex = 0;
         }
 
@@ -182,19 +160,19 @@ export async function decryptEpoch(peerAddress, { ciphertext, nonce, header }) {
 
         // Skip ahead if needed
         while (session.messageIndex < messageIndex) {
-            const { messageKey, nextChainKey } = await ratchetMessageKey(session.chainKey);
-            session.skippedKeys[`${epochIndex}:${session.messageIndex}`] = encodeBase64(messageKey);
+            const { messageKey, nextChainKey } = await cryptoWorker.ratchetMessageKey(session.chainKey);
+            session.skippedKeys[`${epochIndex}:${session.messageIndex}`] = messageKey;
             session.chainKey = nextChainKey;
             session.messageIndex++;
         }
 
         // Derive current key
-        const { messageKey, nextChainKey } = await ratchetMessageKey(session.chainKey);
+        const { messageKey, nextChainKey } = await cryptoWorker.ratchetMessageKey(session.chainKey);
         session.chainKey = nextChainKey;
         session.messageIndex++;
 
         try {
-            const decrypted = await cryptoWorker.decryptSymmetric(ciphertext, nonce, encodeBase64(messageKey));
+            const decrypted = await cryptoWorker.decryptSymmetric(ciphertext, nonce, messageKey);
             if (decrypted) {
                 await saveEpochSession(peerAddress.toLowerCase(), session);
                 return decrypted;
