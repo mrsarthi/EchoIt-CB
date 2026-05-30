@@ -118,7 +118,6 @@ export async function getOrCreateKeys(walletAddress, signMessageFn, pin) {
     const keysWithAddress = {
         ...keys,
         address: walletAddress,
-        walletSignature: signature
     };
 
     // Store keys locally with mandatory PIN encryption
@@ -192,7 +191,6 @@ export async function storeKeysFromSignature(walletAddress, signature, pin) {
     const keysWithAddress = {
         ...keys,
         address: walletAddress,
-        walletSignature: signature
     };
 
     // Store keys locally with mandatory PIN encryption

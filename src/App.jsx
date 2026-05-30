@@ -112,9 +112,7 @@ function AppContent() {
           storedStatus,
           signMessage,
           solveProofOfWork,
-          pushToken,
-          keys.signingSecretKey,
-          keys.walletSignature
+          pushToken
         );
 
         if (mounted) {

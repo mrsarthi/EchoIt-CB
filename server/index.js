@@ -21,7 +21,7 @@ const GRACE_PERIOD_ENABLED = false; // Hard-enforced Sybil resistance
 
 // ===== JWT Security Config =====
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
-const JWT_EXPIRY = '30d'; // Stable token session for mobile & desktop continuity
+const JWT_EXPIRY = '4h'; // Short-lived VIP pass for session continuity
 
 // ===== CORS Lockdown =====
 const ALLOWED_ORIGINS = [
@@ -185,6 +185,7 @@ async function pushOfflineNotification(toAddress, payload, type) {
 }
 
 const app = express();
+app.set('trust proxy', 1); // Trust Render's reverse proxy for correct req.ip
 app.use(cors(corsOptions));
 app.use(express.json());
 
@@ -212,7 +213,7 @@ function rateLimitMiddleware(req, res, next) {
         limit.count++;
     }
     ipRateLimits.set(ip, limit);
-    if (limit.count > 10) return res.status(429).json({ error: 'Too many requests' });
+    if (limit.count > 30) return res.status(429).json({ error: 'Too many requests' });
     next();
 }
 
@@ -408,8 +409,9 @@ app.post('/api/auth/callback', rateLimitMiddleware, (req, res) => {
         return res.status(400).json({ error: 'Invalid signature format' });
     }
 
+    const token = jwt.sign({ address: address.toLowerCase() }, JWT_SECRET, { expiresIn: JWT_EXPIRY });
     authResults.set(sessionId, { address, signature, timestamp: Date.now() });
-    io.to(`auth_${sessionId}`).emit('wallet_auth_result', { address, signature });
+    io.to(`auth_${sessionId}`).emit('wallet_auth_result', { address, signature, token });
     res.json({ success: true });
 });
 
@@ -445,13 +447,11 @@ io.on('connection', (socket) => {
         callback(challenge);
     });
 
-    socket.on('register', async ({ address, publicKey, signingPublicKey, signedPreKey, signedPreKeySignature, username, avatar, status, registeredAt, challenge, signature, signatureMethod, proofOfWork, pushToken, osPlatform }) => {
+    socket.on('register', async ({ address, publicKey, signingPublicKey, signedPreKey, signedPreKeySignature, username, avatar, status, registeredAt, challenge, signature, proofOfWork, pushToken, osPlatform }) => {
         const normalizedAddress = address.toLowerCase();
+        const isAuthenticated = socket.address === normalizedAddress;
 
-        // If the socket is already authenticated via a valid JWT token for this address, bypass the checks
-        const isAuthTokenValid = socket.address && socket.address === normalizedAddress;
-
-        if (!isAuthTokenValid) {
+        if (!isAuthenticated) {
             if (!challenge || !signature || !proofOfWork) {
                 return socket.emit('registrationError', { error: 'Missing challenge, signature, or security proof.' });
             }
@@ -488,48 +488,14 @@ io.on('connection', (socket) => {
             }
             pendingChallenges.delete(socket.id); 
 
-            // 2. Verify Signature
             try {
                 const expectedMessage = `Authorize DecentraChat Registration: ${challenge}`;
-                
-                if (signatureMethod === 'identity') {
-                    // Recover from identity signing public key stored in the database
-                    const dbUser = await new Promise(resolve => {
-                        db.get(`SELECT signing_public_key FROM users WHERE address = ?`, [normalizedAddress], (err, row) => resolve(row));
-                    });
-
-                    if (!dbUser || !dbUser.signing_public_key) {
-                        return socket.emit('registrationError', { error: 'Identity public key not found. Please sign with your Web3 wallet.' });
-                    }
-
-                    // Verify Ed25519 detached signature
-                    const nacl = require('tweetnacl');
-                    const { decodeBase64 } = require('tweetnacl-util');
-                    const msgBytes = Buffer.from(expectedMessage, 'utf8');
-                    const sigBytes = decodeBase64(signature);
-                    const pubKeyBytes = decodeBase64(dbUser.signing_public_key);
-
-                    const verified = nacl.sign.detached.verify(msgBytes, sigBytes, pubKeyBytes);
-                    if (!verified) {
-                        return socket.emit('registrationError', { error: 'Identity signature verification failed.' });
-                    }
-                } else if (signatureMethod === 'pairing') {
-                    // Mobile pairing flow signature
-                    const pairingMessage = `Authorize DecentraChat Auth: ${challenge}`;
-                    const recoveredAddress = ethers.verifyMessage(pairingMessage, signature);
-                    if (recoveredAddress.toLowerCase() !== normalizedAddress) {
-                        return socket.emit('registrationError', { error: 'Pairing signature mismatch.' });
-                    }
-                } else {
-                    // Standard wallet signature
-                    const recoveredAddress = ethers.verifyMessage(expectedMessage, signature);
-                    if (recoveredAddress.toLowerCase() !== normalizedAddress) {
-                        return socket.emit('registrationError', { error: 'Signature mismatch' });
-                    }
+                const recoveredAddress = ethers.verifyMessage(expectedMessage, signature);
+                if (recoveredAddress.toLowerCase() !== normalizedAddress) {
+                    return socket.emit('registrationError', { error: 'Signature mismatch' });
                 }
             } catch (err) {
-                console.error('Signature Verification Error:', err.message);
-                return socket.emit('registrationError', { error: 'Invalid signature format or verification failure.' });
+                return socket.emit('registrationError', { error: 'Invalid signature format' });
             }
         }
 
