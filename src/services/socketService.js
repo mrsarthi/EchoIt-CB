@@ -34,7 +34,10 @@ export function initSocket() {
     // Fire an HTTP request BEFORE opening the socket so the server spins up
     fetch(SERVER_URL, { method: 'GET', mode: 'no-cors' }).catch(() => {});
 
+    const token = localStorage.getItem('decentrachat_session_token');
+
     socket = io(SERVER_URL, {
+        auth: token ? { token } : undefined,
         withCredentials: true,
         reconnection: true,
         reconnectionAttempts: Infinity,  // Never give up
@@ -61,12 +64,16 @@ export function initSocket() {
                 currentUser.address,
                 currentUser.publicKey,
                 currentUser.signingPublicKey,
+                currentUser.signedPreKey,
+                currentUser.signedPreKeySignature,
                 currentUser.username,
                 currentUser.avatar,
                 currentUser.status,
                 currentUser.signMessage,
                 currentUser.getPoW,
-                currentUser.pushToken
+                currentUser.pushToken,
+                currentUser.signingSecretKey,
+                currentUser.walletSignature
             ).catch(err => {
                 console.error('⚠️ Challenge-response re-registration failed:', err.message);
             });
@@ -295,22 +302,26 @@ export function fetchPreKey(address) {
  * @param {string} [pushToken] Optional FCM/APNs token for background push
  * @returns {Promise<{address: string, username?: string}>}
  */
-export async function register(address, publicKey, signingPublicKey, signedPreKey, signedPreKeySignature, username, avatar, status, signMessage, getPoW, pushToken) {
+export async function register(address, publicKey, signingPublicKey, signedPreKey, signedPreKeySignature, username, avatar, status, signMessage, getPoW, pushToken, signingSecretKey = null, walletSignature = null) {
     if (registrationPromise) return registrationPromise;
 
     if (!socket) initSocket();
 
     // Store credentials so they persist across socket disconnects/reconnects
-    currentUser = { address, publicKey, signingPublicKey, signedPreKey, signedPreKeySignature, username, avatar, status, signMessage, getPoW, pushToken };
+    currentUser = { address, publicKey, signingPublicKey, signedPreKey, signedPreKeySignature, username, avatar, status, signMessage, getPoW, pushToken, signingSecretKey, walletSignature };
 
     registrationPromise = (async () => {
         try {
             let challenge = null;
             let signature = null;
             let proofOfWork = null;
+            let signatureMethod = 'wallet';
 
-            // If a signMessage function is provided, we perform the challenge-response handshake
-            if (signMessage) {
+            // Check if we are already authenticated via token on the socket
+            const storedToken = localStorage.getItem('decentrachat_session_token');
+            const hasValidToken = storedToken && socket.auth?.token === storedToken;
+
+            if (!hasValidToken) {
                 try {
                     console.log('🛡️ Requesting registration challenge...');
                     challenge = await requestChallenge();
@@ -321,11 +332,45 @@ export async function register(address, publicKey, signingPublicKey, signedPreKe
                         proofOfWork = await getPoW(challenge);
                     }
 
-                    const message = `Authorize DecentraChat Registration: ${challenge}`;
-                    console.log('🛡️ Signing registration challenge...');
-                    signature = await signMessage(message);
+                    if (signingSecretKey) {
+                        // Method 1: Detached signature using stored Identity key (Zero Wallet Popups)
+                        console.log('🛡️ Signing registration challenge via Identity Key...');
+                        const { signDetached } = await import('../crypto/crypto');
+                        const msg = `Authorize DecentraChat Registration: ${challenge}`;
+                        signature = signDetached(msg, signingSecretKey);
+                        signatureMethod = 'identity';
+                    } else if (signMessage) {
+                        // Method 2: Standard Wallet personal_sign
+                        console.log('🛡️ Signing registration challenge via Web3 Wallet...');
+                        const msg = `Authorize DecentraChat Registration: ${challenge}`;
+                        signature = await signMessage(msg);
+                        signatureMethod = 'wallet';
+                    } else if (walletSignature) {
+                        // Method 3: Fallback using cached Wallet signature (Pairing / Generation Proof)
+                        console.log('🛡️ Utilizing cached wallet signature fallback...');
+                        signature = walletSignature;
+                        if (activeAuthSessionId) {
+                            challenge = activeAuthSessionId;
+                            signatureMethod = 'pairing';
+                        } else {
+                            challenge = address;
+                            signatureMethod = 'generation';
+                        }
+                    }
                 } catch (err) {
-                    console.warn('⚠️ Challenge-response failed:', err.message);
+                    console.warn('⚠️ Signature flow failed, trying cached wallet signature fallback:', err.message);
+                    if (walletSignature) {
+                        signature = walletSignature;
+                        if (activeAuthSessionId) {
+                            challenge = activeAuthSessionId;
+                            signatureMethod = 'pairing';
+                        } else {
+                            challenge = address;
+                            signatureMethod = 'generation';
+                        }
+                    } else {
+                        throw err;
+                    }
                 }
             }
 
@@ -339,7 +384,22 @@ export async function register(address, publicKey, signingPublicKey, signedPreKe
                     }
                 }, 15000);
 
-                socket.emit('register', { address, publicKey, signingPublicKey: currentUser.signingPublicKey, signedPreKey: currentUser.signedPreKey, signedPreKeySignature: currentUser.signedPreKeySignature, username, avatar, status, challenge, signature, proofOfWork, pushToken });
+                socket.emit('register', { 
+                    address, 
+                    publicKey, 
+                    signingPublicKey: currentUser.signingPublicKey, 
+                    signedPreKey: currentUser.signedPreKey, 
+                    signedPreKeySignature: currentUser.signedPreKeySignature, 
+                    username, 
+                    avatar, 
+                    status, 
+                    challenge, 
+                    signature, 
+                    signatureMethod,
+                    proofOfWork, 
+                    pushToken 
+                });
+                
                 socket.once('registered', (data) => {
                     isResolved = true;
                     isRegistered = true;
