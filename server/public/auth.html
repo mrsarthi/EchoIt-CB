@@ -211,6 +211,9 @@
 
                 // Relay via WebSocket if session ID is present (already parsed above)
 
+                const platform = urlParams.get('platform');
+                const isCapacitor = platform === 'capacitor';
+
                 // If we have a sessionId, use the WebSocket relay (robust mobile flow)
                 if (sessionId) {
                     showStatus(`✅ Signature complete! Relaying to session ${sessionId.substring(0, 8)}...`, 'success');
@@ -226,42 +229,40 @@
                     });
 
                     if (relayResponse.ok) {
-                        showStatus('✅ Login Successful! You can now switch back to DecentraChat.', 'success');
+                        const relayData = await relayResponse.json();
+                        const token = relayData.token || ''; 
+                        
+                        showStatus('✅ Login Successful! Returning to DecentraChat...', 'success');
                         connectBtn.innerHTML = '✅ Signed';
                         connectBtn.disabled = true;
 
-                        // Add a simple button as a fallback for manually switching back
-                        const returnBtn = document.createElement('div');
-                        returnBtn.innerHTML = '<p style="margin-top: 20px; color: #a0a0b0;">You may now minimize this and return to the app.</p>';
-                        connectBtn.after(returnBtn);
+                        // Fallback: ALWAYS trigger the deep link for Capacitor so the promise resolves instantly!
+                        if (isCapacitor) {
+                            const returnUrl = `decentrachat://auth?address=${address}&signature=${signature}&token=${token}`;
+                            
+                            // Create the physical anchor tag for deep linking
+                            const returnBtn = document.createElement('a');
+                            returnBtn.href = returnUrl;
+                            returnBtn.className = 'btn btn-primary full-width';
+                            returnBtn.style.marginTop = '20px';
+                            returnBtn.innerHTML = 'Return to DecentraChat';
+                            
+                            connectBtn.after(returnBtn);
+                            
+                            // Attempt to auto-redirect
+                            setTimeout(() => {
+                                window.location.href = returnUrl;
+                            }, 500);
+                        } else {
+                            const returnBtn = document.createElement('div');
+                            returnBtn.innerHTML = '<p style="margin-top: 20px; color: #a0a0b0;">You may now minimize this and return to the app.</p>';
+                            connectBtn.after(returnBtn);
+                        }
+                        return;
                     } else {
                         const errData = await relayResponse.json().catch(() => ({}));
                         throw new Error(errData.error || `Relay server rejected authentication (Status: ${relayResponse.status})`);
                     }
-                    return;
-                }
-
-                // Check if we originated from the Capacitor app (Legacy Intent Fallback)
-                const platform = urlParams.get('platform');
-                if (platform === 'capacitor') {
-                    showStatus('✅ Complete! Tap the button below to return to the app.', 'success');
-
-                    // Standard deep link URI - works widely when clicked via an anchor tag
-                    const returnUrl = `decentrachat://auth?address=${address}&signature=${signature}`;
-
-                    // Replace the button with a physical HTML <a> tag. 
-                    // In-app browsers often sandbox JavaScript redirects (window.location),
-                    // but they universally respect physical link clicks.
-                    const linkEl = document.createElement('a');
-                    linkEl.href = returnUrl;
-                    linkEl.className = 'btn btn-primary';
-                    linkEl.innerHTML = 'Return to DecentraChat';
-                    linkEl.style.textDecoration = 'none';
-                    connectBtn.replaceWith(linkEl);
-
-                    // Still try a silent automatic native redirect in the background
-                    window.location.href = returnUrl;
-                    return;
                 }
 
                 // Default: Send to local Electron server

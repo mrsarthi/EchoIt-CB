@@ -26,6 +26,8 @@ export const platform = {
 // ─── Wallet / Auth ─────────────────────────────────────────────
 
 let _walletAuthCallback = null;
+let _deepLinkResolver = null;
+let _activeSessionId = null;
 
 /**
  * Open the system browser for MetaMask wallet authentication.
@@ -64,6 +66,12 @@ export async function openAuthBrowser() {
         // Pre-listen to the socket room BEFORE launching the browser
         const authPromise = listenForAuth(sessionId);
 
+        // Also create a promise that resolves if the appUrlOpen deep-link fires!
+        const deepLinkPromise = new Promise((resolve) => {
+            _deepLinkResolver = resolve;
+            _activeSessionId = sessionId;
+        });
+
         try {
             // Import the newly installed AppLauncher
             const { AppLauncher } = await import('@capacitor/app-launcher');
@@ -81,11 +89,15 @@ export async function openAuthBrowser() {
             }
         }
 
-        // Wait for the websocket to deliver the signature!
+        // Wait for EITHER the websocket to deliver the signature OR the deep link to resolve!
         try {
-            const result = await authPromise;
+            const result = await Promise.race([authPromise, deepLinkPromise]);
+            
+            // Clean up the deep link resolver so it doesn't fire again
+            _deepLinkResolver = null;
+            
             if (_walletAuthCallback) {
-                _walletAuthCallback({ address: result.address, signature: result.signature, sessionId });
+                _walletAuthCallback({ address: result.address, signature: result.signature, token: result.token, sessionId });
             }
             return { ...result, sessionId };
         } catch (e) {
@@ -158,8 +170,22 @@ export function onWalletAuth(callback) {
                     const url = new URL(event.url);
                     const address = url.searchParams.get('address');
                     const signature = url.searchParams.get('signature');
-                    if (address && signature && _walletAuthCallback) {
-                        _walletAuthCallback({ address, signature });
+                    const token = url.searchParams.get('token');
+                    
+                    if (address && signature) {
+                        // Create payload mimicking the WebSocket buffer
+                        const payload = { address, signature, token, sessionId: _activeSessionId };
+                        
+                        // If openAuthBrowser is waiting via _deepLinkResolver, trigger it
+                        if (_deepLinkResolver) {
+                            _deepLinkResolver(payload);
+                            _deepLinkResolver = null;
+                        }
+                        
+                        // Trigger the global callback
+                        if (_walletAuthCallback) {
+                            _walletAuthCallback(payload);
+                        }
                     }
                 } catch (e) {
                     console.error('Failed to parse auth deep link:', e);
