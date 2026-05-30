@@ -173,6 +173,9 @@ export function WalletProvider({ children }) {
             if (isElectron) {
                 setIsWeb3Detected(true);
                 onWalletAuth(async (data) => {
+                    if (data.token) {
+                        localStorage.setItem('decentrachat_session_token', data.token);
+                    }
                     const exists = await hasStoredKeys();
                     if (!exists) {
                         setPendingAuthData({ type: 'electron_auth', data });
@@ -238,6 +241,9 @@ export function WalletProvider({ children }) {
             if (isElectron) {
                 const authResult = await openAuthBrowser();
                 if (authResult && authResult.sessionId) {
+                    if (authResult.token) {
+                        localStorage.setItem('decentrachat_session_token', authResult.token);
+                    }
                     activeAuthSessionIdRef.current = authResult.sessionId;
                     const exists = await hasStoredKeys();
                     if (!exists) {

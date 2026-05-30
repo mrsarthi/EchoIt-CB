@@ -16,8 +16,6 @@
         "hash-wasm": "^4.12.0",
         "jsonwebtoken": "^9.0.3",
         "socket.io": "^4.7.4",
-        "sqlite3": "^6.0.1",
-        "tweetnacl": "^1.0.3",
-        "tweetnacl-util": "^0.15.1"
+        "sqlite3": "^6.0.1"
     }
 }

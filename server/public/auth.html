@@ -235,7 +235,8 @@
                         returnBtn.innerHTML = '<p style="margin-top: 20px; color: #a0a0b0;">You may now minimize this and return to the app.</p>';
                         connectBtn.after(returnBtn);
                     } else {
-                        throw new Error('Relay server rejected authentication');
+                        const errData = await relayResponse.json().catch(() => ({}));
+                        throw new Error(errData.error || `Relay server rejected authentication (Status: ${relayResponse.status})`);
                     }
                     return;
                 }

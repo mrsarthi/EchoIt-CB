@@ -294,35 +294,3 @@ export async function getFingerprint(publicKeyBase64) {
     return 'Error generating fingerprint';
   }
 }
-
-/**
- * Sign a message detached using Ed25519 identity key
- * @param {Uint8Array|string} message
- * @param {string} secretKeyBase64
- * @returns {string} signature (base64)
- */
-export function signDetached(message, secretKeyBase64) {
-    const msg = typeof message === 'string' ? decodeUTF8(message) : message;
-    const sec = decodeBase64(secretKeyBase64);
-    const signature = nacl.sign.detached(msg, sec);
-    return encodeBase64(signature);
-}
-
-/**
- * Verify a detached Ed25519 signature
- * @param {Uint8Array|string} message
- * @param {string} signatureBase64
- * @param {string} publicKeyBase64
- * @returns {boolean}
- */
-export function verifyDetached(message, signatureBase64, publicKeyBase64) {
-    try {
-        const msg = typeof message === 'string' ? decodeUTF8(message) : message;
-        const sig = decodeBase64(signatureBase64);
-        const pub = decodeBase64(publicKeyBase64);
-        return nacl.sign.detached.verify(msg, sig, pub);
-    } catch {
-        return false;
-    }
-}
-
