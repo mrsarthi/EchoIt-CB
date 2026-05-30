@@ -170,27 +170,24 @@ export function WalletProvider({ children }) {
                 );
             }
 
-            if (platform.isElectron) {
+            if (platform.isNativeApp) {
                 setIsWeb3Detected(true);
-                onWalletAuth(async (data) => {
-                    if (data.token) {
-                        localStorage.setItem('decentrachat_session_token', data.token);
-                    }
-                    const exists = await hasStoredKeys();
-                    if (!exists) {
-                        setPendingAuthData({ type: 'electron_auth', data });
-                        setIsPINSetup(true);
-                        setShowPINModal(true);
-                    } else {
-                        await handleElectronAuth(data);
-                    }
-                });
-            }
-            
-            // For Capacitor, we still need to set isWeb3Detected
-            if (platform.isCapacitor) {
-                setIsWeb3Detected(true);
-            }
+                
+                if (platform.isElectron) {
+                    onWalletAuth(async (data) => {
+                        if (data.token) {
+                            localStorage.setItem('decentrachat_session_token', data.token);
+                        }
+                        const exists = await hasStoredKeys();
+                        if (!exists) {
+                            setPendingAuthData({ type: 'electron_auth', data });
+                            setIsPINSetup(true);
+                            setShowPINModal(true);
+                        } else {
+                            await handleElectronAuth(data);
+                        }
+                    });
+                }
 
                 const exists = await hasStoredKeys();
                 if (exists) {

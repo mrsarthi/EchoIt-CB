@@ -421,6 +421,24 @@ app.post('/api/auth/callback', rateLimitMiddleware, (req, res) => {
     }
 });
 
+app.get('/api/auth/status/:sessionId', (req, res) => {
+    const sessionId = req.params.sessionId;
+    const bufferedResult = authResults.get(sessionId);
+    if (bufferedResult) {
+        authResults.delete(sessionId);
+        res.json({ 
+            success: true, 
+            data: {
+                address: bufferedResult.address,
+                signature: bufferedResult.signature,
+                token: bufferedResult.token
+            }
+        });
+    } else {
+        res.json({ success: false });
+    }
+});
+
 io.on('connection', (socket) => {
     // Re-join room if authenticated via token
     if (socket.address) {

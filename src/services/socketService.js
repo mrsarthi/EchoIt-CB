@@ -882,17 +882,28 @@ export function listenForAuth(sessionId) {
 
         // Android OS often silently drops TCP connections when in background.
         // If the server emits the result while we're in the background, it might vanish into a dead pipe.
-        // We poll the server every 3 seconds to check the buffer.
-        const pollInterval = setInterval(() => {
-            if (socket?.connected) {
-                socket.emit('join_auth_room', { sessionId });
+        // We poll the server every 3 seconds to check the buffer using an HTTP GET request, 
+        // which completely bypasses the zombie-socket issue on mobile OSes.
+        const pollInterval = setInterval(async () => {
+            try {
+                const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'https://decentrachat-singnalling.onrender.com';
+                const response = await fetch(`${SERVER_URL}/api/auth/status/${sessionId}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.success && data.data) {
+                        // Found it in the buffer! Trigger the handler manually.
+                        handler(data.data);
+                    }
+                }
+            } catch (err) {
+                // Ignore network errors during polling (might be offline briefly)
             }
         }, 3000);
 
         const handler = (data) => {
             clearTimeout(timeout);
             clearInterval(pollInterval);
-            console.log('✅ Received Auth Result via WebSocket Relay!');
+            console.log('✅ Received Auth Result (via Relay or HTTP Poll)!');
             socket.off('wallet_auth_result', handler);
             socket.emit('leave_auth_room', { sessionId });
             activeAuthSessionId = null;
