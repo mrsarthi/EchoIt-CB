@@ -54,7 +54,7 @@ class ErrorBoundary extends Component {
 }
 
 function AppContent() {
-  const { isConnected, address, pushToken } = useWallet();
+  const { isConnected, address, pushToken, disconnect: disconnectWallet } = useWallet();
   const [username, setUsername] = useState(() => {
     return localStorage.getItem('decentrachat_username') || null;
   });
@@ -132,7 +132,12 @@ function AppContent() {
       } catch (err) {
         console.error('Failed to initialize:', err);
         if (mounted) {
-            setConnectionError(err.message || 'Failed to connect to signaling server.');
+            if (err.message?.includes('Missing challenge') || err.message?.includes('Authentication required')) {
+                localStorage.removeItem('decentrachat_session_token');
+                setConnectionError('Session Expired. Please reconnect your wallet.');
+            } else {
+                setConnectionError(err.message || 'Failed to connect to signaling server.');
+            }
             setIsSolvingPoW(false);
         }
       }
@@ -195,7 +200,11 @@ function AppContent() {
                     </div>
                     <h3 style={{ margin: '0 0 8px 0', color: 'white' }}>Connection Failed</h3>
                     <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '24px' }}>{connectionError}</p>
-                    <button className="btn btn-primary" onClick={() => window.location.reload()} style={{ width: '100%' }}>Retry Connection</button>
+                    {connectionError.includes('Session Expired') ? (
+                        <button className="btn btn-primary" onClick={() => disconnectWallet()} style={{ width: '100%' }}>Reconnect Wallet</button>
+                    ) : (
+                        <button className="btn btn-primary" onClick={() => window.location.reload()} style={{ width: '100%' }}>Retry Connection</button>
+                    )}
                 </>
             ) : (
                 <>
