@@ -19,7 +19,7 @@ import {
     unlockKeys,
     getStoredWalletAddress
 } from '../crypto/keyManager';
-import { register as registerUser } from '../services/socketService';
+import { register as registerUser, disconnect as disconnectSocket, initSocket } from '../services/socketService';
 import { platform, openAuthBrowser, onWalletAuth } from '../services/platformService';
 import { initPushNotifications } from '../services/pushService';
 import { setStorageSessionKey } from '../services/storageEncryption';
@@ -177,6 +177,8 @@ export function WalletProvider({ children }) {
                     onWalletAuth(async (data) => {
                         if (data.token) {
                             localStorage.setItem('decentrachat_session_token', data.token);
+                            disconnectSocket();
+                            initSocket();
                         }
                         const exists = await hasStoredKeys();
                         if (!exists) {
@@ -246,6 +248,8 @@ export function WalletProvider({ children }) {
                 if (authResult && authResult.sessionId) {
                     if (authResult.token) {
                         localStorage.setItem('decentrachat_session_token', authResult.token);
+                        disconnectSocket();
+                        initSocket();
                     }
                     activeAuthSessionIdRef.current = authResult.sessionId;
                     const exists = await hasStoredKeys();
