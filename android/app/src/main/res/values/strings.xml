@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">DecentraChat</string>
-    <string name="title_activity_main">DecentraChat</string>
+    <string name="app_name">Echo Messenger</string>
+    <string name="title_activity_main">Echo Messenger</string>
     <string name="package_name">com.decentrachat.app</string>
     <string name="custom_url_scheme">com.decentrachat.app</string>
 </resources>

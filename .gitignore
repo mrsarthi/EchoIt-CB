@@ -88,6 +88,8 @@ server/*.sqlite
 build_error*.*
 *.txt
 server/*.json
+!server/package.json
+!server/package-lock.json
 screenshot.js
 screenshot*.png
 
