@@ -2,9 +2,8 @@ services:
   - type: web
     name: decentrachat-signaling
     runtime: node
-    rootDir: server
-    buildCommand: cd .. && npm install && npm run build && cd server && npm install
-    startCommand: npm start
+    buildCommand: npm install && npm run build && cd server && npm install
+    startCommand: node server/server.js
     envVars:
       - key: NODE_ENV
         value: production
