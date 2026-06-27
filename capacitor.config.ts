@@ -2,14 +2,13 @@ import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
     appId: 'com.decentrachat.app',
-    appName: 'DecentraChat',
+    appName: 'Echo Messenger',
     webDir: 'dist',
     server: {
         // Use the bundled web assets (don't connect to a live dev server)
         androidScheme: 'https',
         // Allow the app to open intent:// and external deep links
         allowNavigation: [
-            "metamask.app.link",
             "decentrachat-singnalling.onrender.com",
             "intent://*"
         ]

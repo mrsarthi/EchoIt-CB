@@ -131,6 +131,17 @@ async function runTest() {
         await bobPage.waitForSelector('.message-content:has-text("Alice via Playwright")', { timeout: 15000 });
         console.log('✅ Bob received Alice\'s message!');
 
+        // Step 3b: Bidirectional check - Bob sending message to Alice
+        console.log('Bob sending reply to Alice...');
+        await bobPage.fill('.message-input', 'Bob reply via Playwright');
+        await bobPage.waitForSelector('.send-btn:not([disabled])', { timeout: 10000 });
+        await bobPage.click('.send-btn');
+
+        // Verify Alice receives it
+        console.log('Waiting for Alice to receive Bob\'s reply...');
+        await alicePage.waitForSelector('.message-content:has-text("Bob reply via Playwright")', { timeout: 15000 });
+        console.log('✅ Alice received Bob\'s reply!');
+
         // Step 4: UI/UX Checks (Trust Badges)
         console.log('Verifying Layer 7 UI Trust Badges...');
         // Alice should have a TrustBadge next to Bob's name

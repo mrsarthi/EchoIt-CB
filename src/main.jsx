@@ -1,10 +1,17 @@
-// App entry point - uses HashRouter for Electron compatibility
+import { Buffer } from 'buffer'
+window.Buffer = Buffer
+globalThis.Buffer = Buffer
+
+import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { HashRouter } from 'react-router-dom'
+import './index.css'
 import App from './App.jsx'
+import { DecentraChatProvider } from './DecentraChatContext.jsx'
 
 createRoot(document.getElementById('root')).render(
-  <HashRouter>
-    <App />
-  </HashRouter>,
+  <StrictMode>
+    <DecentraChatProvider>
+      <App />
+    </DecentraChatProvider>
+  </StrictMode>,
 )
