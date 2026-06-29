@@ -9,12 +9,15 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const crypto = require('crypto');
+const fs = require('fs');
 const { pool, runMigrations } = require('./db');
 runMigrations().catch(err => {
   console.error("Migration error at startup:", err);
 });
 const {
   generateChallenge,
+  generateStatelessPuzzle,
+  verifyStatelessPuzzle,
   verifyWalletSignature,
   generateAccessToken,
   verifyAccessToken,
@@ -27,7 +30,13 @@ const app = express();
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS 
   ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim()) 
-  : ['http://localhost:5173', 'http://127.0.0.1:5173'];
+  : [
+      'http://localhost:5173', 
+      'http://127.0.0.1:5173',
+      'http://localhost',
+      'https://localhost',
+      'capacitor://localhost'
+    ];
 
 app.use(cors({
   origin: function (origin, callback) {
@@ -60,8 +69,35 @@ const io = new Server(server, {
 // Port configuration
 const PORT = process.env.PORT || 3000;
 
-// Temporary active socket challenges mapping
-const socketChallenges = new Map();
+function logConnection(publicKey, socket) {
+  const ip = socket.handshake.headers['x-forwarded-for'] 
+    || socket.handshake.address 
+    || (socket.request && socket.request.connection && socket.request.connection.remoteAddress)
+    || (socket.conn && socket.conn.remoteAddress);
+  const timestamp = new Date().toISOString();
+  const logLine = `[${timestamp}] | ${publicKey} | ${ip}\n`;
+  fs.appendFileSync(path.join(__dirname, 'connection_audit.log'), logLine);
+}
+
+function isPublicKeyBanned(publicKey) {
+  if (!publicKey) return false;
+  try {
+    const bannedPath = path.join(__dirname, 'banned_keys.json');
+    if (!fs.existsSync(bannedPath)) {
+      return false;
+    }
+    const content = fs.readFileSync(bannedPath, 'utf8');
+    const bannedKeys = JSON.parse(content);
+    if (Array.isArray(bannedKeys)) {
+      return bannedKeys.includes(publicKey);
+    }
+    return false;
+  } catch (err) {
+    console.error("[Banned Keys Check] Error reading banned_keys.json:", err.message);
+    return false;
+  }
+}
+
 
 // Rate limiting Map: sender_address -> array of timestamps of messages sent in the last 1 second
 const rateLimiter = new Map();
@@ -135,33 +171,19 @@ io.on('connection', (socket) => {
   }
 
   // 1. Request Challenge Event
-  socket.on('requestChallenge', (callback) => {
+  socket.on('requestChallenge', async (callback) => {
     try {
-      // Limit to 1 active challenge per socket
-      if (socketChallenges.has(socket.id)) {
-        return callback(socketChallenges.get(socket.id));
-      }
-
       // Track request timestamps per socket to prevent challenge flooding
       if (!socket.challengeAttempts) socket.challengeAttempts = [];
       const now = Date.now();
       socket.challengeAttempts = socket.challengeAttempts.filter(ts => now - ts < 60000);
-      if (socket.challengeAttempts.length >= 3) {
+      if (socket.challengeAttempts.length >= 5) {
         return callback(null);
       }
       socket.challengeAttempts.push(now);
 
-      const challenge = generateChallenge();
-      socketChallenges.set(socket.id, challenge);
-      
-      // Automatic challenge cleanup after 5 minutes
-      setTimeout(() => {
-        if (socketChallenges.get(socket.id) === challenge) {
-          socketChallenges.delete(socket.id);
-        }
-      }, 5 * 60 * 1000);
-
-      callback(challenge);
+      const puzzle = await generateStatelessPuzzle();
+      callback(puzzle);
     } catch (err) {
       console.error("Error in requestChallenge:", err.message);
       callback(null);
@@ -178,22 +200,30 @@ io.on('connection', (socket) => {
         signedPreKey,
         preKeySignature,
         challenge,
-        signature
+        signature,
+        publicKey,
+        secretNumber,
+        proofToken
       } = payload;
 
       // Validate required inputs
-      if (!address || !username || !identityKey || !signedPreKey || !preKeySignature || !challenge || !signature) {
+      if (!address || !username || !identityKey || !signedPreKey || !preKeySignature || !challenge || !signature || !secretNumber || !proofToken) {
         return callback({ success: false, error: "Missing required fields in registration payload." });
       }
 
-      // Check stored challenge
-      const activeChallenge = socketChallenges.get(socket.id);
-      if (!activeChallenge || activeChallenge !== challenge) {
-        return callback({ success: false, error: "Invalid or expired challenge nonce." });
+      // Check if key is banned
+      if (isPublicKeyBanned(publicKey)) {
+        return callback({ success: false, error: "This key is banned from the platform." });
       }
 
-      // Verify wallet signature
-      const isSignatureValid = verifyWalletSignature(address, challenge, signature, 'registration');
+      // Verify stateless puzzle solution
+      const isPuzzleValid = verifyStatelessPuzzle(proofToken, challenge, secretNumber);
+      if (!isPuzzleValid) {
+        return callback({ success: false, error: "Invalid or expired challenge puzzle." });
+      }
+
+      // Verify wallet signature (with publicKey for Ed25519)
+      const isSignatureValid = verifyWalletSignature(address, challenge, signature, publicKey, 'registration');
       if (!isSignatureValid) {
         return callback({ success: false, error: "Wallet signature verification failed." });
       }
@@ -219,17 +249,21 @@ io.on('connection', (socket) => {
       // Insert new user into database
       const registeredAt = Date.now();
       await pool.query(
-        `INSERT INTO users (address, username, identity_key, signed_pre_key, pre_key_signature, registered_at)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
+        `INSERT INTO users (address, username, identity_key, signed_pre_key, pre_key_signature, registered_at, identity_signing_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [
           address.toLowerCase(),
           username,
           identityKey,
           signedPreKey,
           preKeySignature,
-          registeredAt
+          registeredAt,
+          publicKey
         ]
       );
+
+      // Write connection log
+      logConnection(publicKey, socket);
 
       // Limit refresh tokens count before inserting
       await limitRefreshTokens(address);
@@ -249,9 +283,6 @@ io.on('connection', (socket) => {
           refreshExpiresAt
         ]
       );
-
-      // Clean challenge
-      socketChallenges.delete(socket.id);
 
       // Generate session token
       const token = generateAccessToken(address);
@@ -309,6 +340,8 @@ io.on('connection', (socket) => {
         
         socket.join(socket.username.toLowerCase());
         console.log(`Socket ${socket.id} joined username room: ${socket.username.toLowerCase()}`);
+      } else {
+        return callback({ success: false, error: "Wallet address is not registered yet." });
       }
 
       // Count remaining one-time pre-keys for this user
@@ -337,19 +370,24 @@ io.on('connection', (socket) => {
   // 3b. Login with Signature Event (Restoring credentials via Web3 signature)
   socket.on('loginWithSignature', async (payload, callback) => {
     try {
-      const { address, challenge, signature } = payload;
-      if (!address || !challenge || !signature) {
+      const { address, challenge, signature, publicKey, secretNumber, proofToken } = payload;
+      if (!address || !challenge || !signature || !secretNumber || !proofToken) {
         return callback({ success: false, error: "Missing required fields for signature login." });
       }
 
-      // Check stored challenge
-      const activeChallenge = socketChallenges.get(socket.id);
-      if (!activeChallenge || activeChallenge !== challenge) {
-        return callback({ success: false, error: "Invalid or expired challenge nonce." });
+      // Check if key is banned
+      if (isPublicKeyBanned(publicKey)) {
+        return callback({ success: false, error: "This key is banned from the platform." });
+      }
+
+      // Verify stateless puzzle solution
+      const isPuzzleValid = verifyStatelessPuzzle(proofToken, challenge, secretNumber);
+      if (!isPuzzleValid) {
+        return callback({ success: false, error: "Invalid or expired challenge puzzle." });
       }
 
       // Verify wallet signature using the session prefix
-      const isSignatureValid = verifyWalletSignature(address, challenge, signature, 'session');
+      const isSignatureValid = verifyWalletSignature(address, challenge, signature, publicKey, 'session');
       if (!isSignatureValid) {
         return callback({ success: false, error: "Wallet signature verification failed." });
       }
@@ -361,6 +399,9 @@ io.on('connection', (socket) => {
       }
       
       const user = userResult.rows[0];
+
+      // Write connection log
+      logConnection(publicKey, socket);
 
       // Limit refresh tokens count before inserting
       await limitRefreshTokens(address);
@@ -392,9 +433,6 @@ io.on('connection', (socket) => {
       socket.pfp = user.pfp || null;
       socket.join(user.username.toLowerCase());
       console.log(`Socket ${socket.id} signature-authenticated as ${socket.address} and joined username room: ${user.username.toLowerCase()}`);
-
-      // Clean challenge
-      socketChallenges.delete(socket.id);
 
       // Count remaining one-time pre-keys for this user
       const opkRes = await pool.query('SELECT COUNT(*) FROM one_time_keys WHERE address = $1', [socket.address]);
@@ -720,13 +758,13 @@ io.on('connection', (socket) => {
       if (address.toLowerCase().startsWith('0x') && address.length === 42) {
         recipient = address.toLowerCase();
         userRes = await pool.query(
-          `SELECT address, username, identity_key AS "identityKey", signed_pre_key AS "signedPreKey", pre_key_signature AS "preKeySignature", hide_wallet AS "hideWallet", bio, pfp
+          `SELECT address, username, identity_key AS "identityKey", signed_pre_key AS "signedPreKey", pre_key_signature AS "preKeySignature", hide_wallet AS "hideWallet", bio, pfp, identity_signing_key AS "identitySigningKey"
            FROM users WHERE address = $1`,
           [recipient]
         );
       } else {
         userRes = await pool.query(
-          `SELECT address, username, identity_key AS "identityKey", signed_pre_key AS "signedPreKey", pre_key_signature AS "preKeySignature", hide_wallet AS "hideWallet", bio, pfp
+          `SELECT address, username, identity_key AS "identityKey", signed_pre_key AS "signedPreKey", pre_key_signature AS "preKeySignature", hide_wallet AS "hideWallet", bio, pfp, identity_signing_key AS "identitySigningKey"
            FROM users WHERE LOWER(username) = $1`,
           [address.toLowerCase()]
         );
@@ -739,7 +777,7 @@ io.on('connection', (socket) => {
         return callback({ success: false, error: "User not found." });
       }
 
-      const { identityKey, signedPreKey, preKeySignature } = userRes.rows[0];
+      const { identityKey, signedPreKey, preKeySignature, identitySigningKey } = userRes.rows[0];
 
       // Fetch and consume one OPK if available
       let opk = null;
@@ -765,6 +803,7 @@ io.on('connection', (socket) => {
         success: true,
         bundle: {
           identityKey,
+          identitySigningKey,
           signedPreKey,
           preKeySignature,
           oneTimeKey: opk ? opk.publicKey : null,
@@ -1048,7 +1087,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    socketChallenges.delete(socket.id);
     console.log(`Socket disconnected: ${socket.id}`);
   });
 });

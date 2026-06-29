@@ -29,5 +29,11 @@ class EventEmitter {
     return true;
   }
 }
+EventEmitter.EventEmitter = EventEmitter;
 
-module.exports = EventEmitter;
+export { EventEmitter };
+export default EventEmitter;
+
+if (typeof module !== 'undefined') {
+  module.exports = EventEmitter;
+}

@@ -1,2 +1,7 @@
-// http-shim.js: Empty stub for http/https/url/sqlite modules using CommonJS
-module.exports = {};
+const _exports = {};
+
+export default _exports;
+
+if (typeof module !== 'undefined') {
+  module.exports = _exports;
+}

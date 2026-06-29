@@ -144,7 +144,8 @@ const migrations = [
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT DEFAULT '';`,
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS pfp TEXT;`,
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS username_changes_count INT DEFAULT 0;`,
-  `ALTER TABLE users ADD COLUMN IF NOT EXISTS last_username_change_at BIGINT;`
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS last_username_change_at BIGINT;`,
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS identity_signing_key TEXT;`
 ];
 
 async function runMigrations() {

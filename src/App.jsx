@@ -40,10 +40,8 @@ function App() {
     reconnect,
     logout,
     serverUrl,
-    connectWalletAction,
     walletRegisteredOnServer,
     loginUser,
-    isWeb3Available,
     sessionExpired,
     reauthenticateUser,
     stealthMode,
@@ -60,7 +58,14 @@ function App() {
     updateProfile,
     deleteAccountAction,
     refreshData,
-    client
+    client,
+    generateMnemonic,
+    validateMnemonic,
+    unlockWallet,
+    unlockWithBiometrics,
+    saveCredentialsAndRegister,
+    biometricsSupported,
+    resetWallet
   } = useDecentraChat();
 
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
@@ -108,6 +113,18 @@ function App() {
   // Navigation & Search States
   const [activeTab, setActiveTab] = useState('chats'); // 'chats', 'contacts', 'settings'
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Onboarding & Lockbox states
+  const [onboardingStep, setOnboardingStep] = useState('home'); // 'home', 'show-seed', 'verify-seed', 'restore', 'choose-password'
+  const [generatedMnemonic, setGeneratedMnemonic] = useState('');
+  const [mnemonicInput, setMnemonicInput] = useState('');
+  const [mnemonicError, setMnemonicError] = useState('');
+  const [localPassword, setLocalPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [optInBiometrics, setOptInBiometrics] = useState(true);
+  const [unlockPasswordInput, setUnlockPasswordInput] = useState('');
+  const [localUnlockError, setLocalUnlockError] = useState('');
+  const [passwordVerificationText, setPasswordVerificationText] = useState('');
 
   // Settings States (stored in localStorage)
   const [darkMode, setDarkMode] = useState(() => {
@@ -233,6 +250,89 @@ function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  if (bootPhase === 'lockbox_locked') {
+    return (
+      <div className="mesh-gradient-bg" style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-primary)', backgroundColor: 'var(--bg-primary)', padding: '24px' }}>
+        <div className="glass-panel" style={{ width: '100%', maxWidth: '400px', borderRadius: '16px', padding: '32px', display: 'flex', flexDirection: 'column', alignItems: 'center', boxShadow: '0 20px 50px rgba(0,0,0,0.5)', backgroundColor: 'rgba(29, 32, 33, 0.75)', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.05)' }}>
+          <div style={{ width: '80px', height: '80px', borderRadius: '50%', backgroundColor: 'rgba(255, 255, 255, 0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid rgba(255, 255, 255, 0.1)', marginBottom: '16px' }}>
+            <img style={{ width: '48px', height: '48px', objectFit: 'contain' }} alt="Echo Logo" src={logo} />
+          </div>
+          <h2 style={{ fontSize: '22px', fontWeight: 'bold', marginBottom: '8px', color: 'var(--text-primary)' }}>Unlock Echo</h2>
+          <p style={{ fontSize: '13px', color: 'var(--text-secondary)', textAlign: 'center', marginBottom: '24px' }}>
+            Enter your secure password to decrypt your credentials and synchronize keys.
+          </p>
+
+          <form onSubmit={async (e) => {
+            e.preventDefault();
+            if (!unlockPasswordInput) return;
+            setLocalUnlockError('');
+            try {
+              await unlockWallet(unlockPasswordInput);
+            } catch (err) {
+              setLocalUnlockError("Incorrect password or key decryption error.");
+            }
+          }} style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div className="auth-input-group" style={{ display: 'flex', width: '100%', position: 'relative' }}>
+              <input
+                type="password"
+                className="auth-input"
+                placeholder="Enter password"
+                value={unlockPasswordInput}
+                onChange={(e) => setUnlockPasswordInput(e.target.value)}
+                style={{ width: '100%', paddingRight: biometricsSupported ? '48px' : '16px' }}
+                required
+                autoFocus
+              />
+              {biometricsSupported && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setLocalUnlockError('');
+                    try {
+                      await unlockWithBiometrics();
+                    } catch (err) {
+                      setLocalUnlockError("Biometrics failed. Please enter password.");
+                    }
+                  }}
+                  style={{ position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--accent-indigo)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '32px', height: '32px' }}
+                  title="Unlock with Biometrics"
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '24px' }}>fingerprint</span>
+                </button>
+              )}
+            </div>
+
+            {localUnlockError && (
+              <div style={{ color: 'var(--accent-rose)', fontSize: '13px', textAlign: 'center', marginTop: '4px' }}>
+                {localUnlockError}
+              </div>
+            )}
+
+            <button type="submit" className="auth-btn" style={{ width: '100%', height: '48px', borderRadius: '8px', background: 'var(--accent-indigo)', color: '#ffffff', border: 'none', fontWeight: 'bold', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              Unlock Lockbox
+            </button>
+          </form>
+
+          <div style={{ marginTop: '24px', textAlign: 'center', display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'center' }}>
+            <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+              Forgot password? Use your 12-word seed phrase to restore access.
+            </span>
+            <button
+              onClick={() => {
+                if (window.confirm("WARNING: This will permanently delete your local database and credentials from this device. You will need your 12-word seed phrase to restore your account. Proceed?")) {
+                  resetWallet();
+                }
+              }}
+              style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', fontSize: '12px', cursor: 'pointer', textDecoration: 'underline' }}
+            >
+              Reset App (Wipe local keys)
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (bootPhase !== 'ready') {
     return <SplashScreen phase={bootPhase} error={bootError} />;
@@ -561,305 +661,303 @@ function App() {
 
   // 1. Wallet Connection State (Mockup: Connect Wallet (Desktop / Mobile))
   if (!wallet) {
-    // 1a. If MetaMask or any Web3 wallet is not found, urge them to download it
-    if (!isWeb3Available()) {
-      if (isMobile) {
-        return (
-          <div className="mesh-gradient-bg" style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', color: 'var(--text-primary)', backgroundColor: 'var(--bg-primary)' }}>
-            <header className="safe-header" style={{ width: '100%', position: 'fixed', top: 0, left: 0, zIndex: 40, borderBottom: '1px solid var(--border-light)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 24px', backgroundColor: 'var(--bg-secondary)', backdropFilter: 'blur(10px)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span className="material-symbols-outlined" style={{ color: 'var(--accent-indigo)' }}>shield</span>
-                <span className="font-headline-md font-bold" style={{ fontSize: '20px', color: 'var(--accent-indigo)' }}>Echo</span>
-              </div>
-            </header>
-            <main className="safe-pt safe-pb" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flexGrow: 1, padding: '24px 20px', paddingTop: '100px', width: '100%' }}>
-              <div className="animate-float" style={{ position: 'relative', marginBottom: '24px', width: '160px', height: '160px', borderRadius: '50%', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <img 
-                  style={{ width: '100px', height: '100px', objectFit: 'contain' }}
-                  alt="Echo Logo" 
-                  src={logo}
-                />
-                <div style={{ position: 'absolute', bottom: '8px', right: '8px', backgroundColor: 'var(--accent-rose)', width: '24px', height: '24px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <span className="material-symbols-outlined" style={{ fontSize: '14px', color: '#ffffff' }}>close</span>
-                </div>
-              </div>
-              <h1 className="font-headline-lg-mobile" style={{ fontSize: '22px', textAlign: 'center', marginBottom: '12px' }}>MetaMask Required</h1>
-              <p style={{ fontSize: '14px', color: 'var(--text-secondary)', textAlign: 'center', maxWidth: '320px', lineHeight: '1.5', marginBottom: '32px' }}>
-                To connect to Echo, you need to open this page inside MetaMask's In-App Browser or connect from a desktop browser.
-              </p>
-              <a 
-                href={getMetaMaskLink()}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ width: '100%', maxWidth: '320px', background: 'var(--accent-indigo)', color: '#ffffff', fontSize: '16px', fontWeight: 'bold', height: '56px', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', textDecoration: 'none' }}
-              >
-                <span className="material-symbols-outlined">phone_iphone</span>
-                Open MetaMask App
-              </a>
-            </main>
-            <footer className="safe-footer" style={{ padding: '16px 24px', display: 'flex', justifyContent: 'center', gap: '16px', fontSize: '11px', color: 'var(--text-secondary)', borderTop: '1px solid var(--border-light)' }}>
-              <span>PROTOCOL_V2.0.48_STABLE</span>
-            </footer>
-          </div>
-        );
+    const handleCreateAccount = () => {
+      const phrase = generateMnemonic();
+      setGeneratedMnemonic(phrase);
+      setOnboardingStep('show-seed');
+    };
+
+    const handleRestoreAccount = () => {
+      setMnemonicInput('');
+      setMnemonicError('');
+      setOnboardingStep('restore');
+    };
+
+    const handleBackToHome = () => {
+      setOnboardingStep('home');
+    };
+
+    const handleVerifySeed = () => {
+      const trimmedInput = mnemonicInput.trim().toLowerCase().replace(/\s+/g, ' ');
+      if (trimmedInput === generatedMnemonic.toLowerCase()) {
+        setOnboardingStep('choose-password');
+      } else {
+        setMnemonicError("The entered seed phrase does not match. Please verify and try again.");
       }
-      return (
-        <div className="mesh-gradient-bg" style={{ width: '100%', minHeight: '100vh', display: 'flex', flexDirection: 'column', position: 'relative', overflowY: 'auto' }}>
-          <header style={{ width: '100%', height: '64px', position: 'fixed', top: 0, left: 0, zIndex: 40, backgroundColor: 'rgba(17, 20, 21, 0.85)', backdropFilter: 'blur(10px)', borderBottom: '1px solid rgba(255, 255, 255, 0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 24px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <img src={logo} alt="Echo Logo" style={{ height: '32px', width: 'auto' }} />
-              <span className="font-headline-md font-bold" style={{ fontSize: '20px', fontFamily: 'Manrope, sans-serif', color: 'var(--text-primary)' }}>Echo</span>
-            </div>
-            <div>
-              <button style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer' }} onClick={() => window.open('https://metamask.io/', '_blank')}>
-                <span className="material-symbols-outlined">help</span>
-              </button>
-            </div>
-          </header>
+    };
 
-          <main style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flexGrow: 1, padding: '40px 24px', paddingTop: '90px', width: '100%' }}>
-            <div className="glass-panel" style={{ width: '100%', maxWidth: '480px', borderRadius: '16px', padding: '32px', display: 'flex', flexDirection: 'column', alignItems: 'center', position: 'relative', boxShadow: '0 20px 50px rgba(0,0,0,0.5)', overflow: 'hidden', backgroundColor: 'rgba(29, 32, 33, 0.7)', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.05)' }}>
-              <div style={{ position: 'absolute', top: '-96px', left: '-96px', width: '192px', height: '192px', borderRadius: '50%', background: 'rgba(129, 140, 248, 0.1)', filter: 'blur(80px)' }}></div>
-              
-              <div style={{ position: 'relative', marginBottom: '16px', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-                <div style={{ width: '96px', height: '96px', borderRadius: '50%', backgroundColor: 'rgba(255, 255, 255, 0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid rgba(255, 255, 255, 0.1)', overflow: 'hidden', padding: '12px' }}>
-                  <img 
-                    style={{ width: '56px', height: '56px', objectFit: 'contain' }}
-                    alt="Echo Logo" 
-                    src={logo}
-                  />
-                </div>
-                <div style={{ position: 'absolute', bottom: '-2px', right: '-2px', backgroundColor: 'var(--accent-rose)', width: '24px', height: '24px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '3px solid var(--bg-primary)' }}>
-                  <span className="material-symbols-outlined font-bold" style={{ fontSize: '12px', color: '#ffffff' }}>close</span>
-                </div>
-              </div>
+    const handleRestoreMnemonic = () => {
+      const cleaned = mnemonicInput.trim().toLowerCase().replace(/\s+/g, ' ');
+      if (validateMnemonic(cleaned)) {
+        setGeneratedMnemonic(cleaned);
+        setOnboardingStep('choose-password');
+      } else {
+        setMnemonicError("Invalid 12-word seed phrase. Check spelling and formatting.");
+      }
+    };
 
-              <div style={{ textAlign: 'center', marginBottom: '16px' }}>
-                <h1 style={{ fontSize: '24px', fontWeight: 'bold', color: 'var(--text-primary)', fontFamily: 'Manrope, sans-serif' }}>MetaMask Not Found</h1>
-                <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginTop: '8px', maxWidth: '320px', lineHeight: '1.5' }}>
-                  To access Echo, you need to install the MetaMask wallet browser extension or use the MetaMask mobile app.
-                </p>
-              </div>
+    const validatePassword = (pass) => {
+      const hasMinLength = pass.length >= 8;
+      const hasUppercase = /[A-Z]/.test(pass);
+      const hasLowercase = /[a-z]/.test(pass);
+      const hasNumber = /[0-9]/.test(pass);
+      return hasMinLength && hasUppercase && hasLowercase && hasNumber;
+    };
 
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', width: '100%' }}>
-                <a 
-                  href="https://metamask.io/download/" 
-                  target="_blank" 
-                  rel="noopener noreferrer"
-                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', background: 'var(--accent-indigo)', color: '#ffffff', fontSize: '16px', fontWeight: 'bold', gap: '8px', height: '56px', borderRadius: '8px', textDecoration: 'none', width: '100%' }}
-                >
-                  <span className="material-symbols-outlined">download</span>
-                  Download MetaMask
-                </a>
+    const handlePasswordSubmit = async (e) => {
+      e.preventDefault();
+      if (!validatePassword(localPassword)) {
+        alert("Password does not meet complexity requirements.");
+        return;
+      }
+      if (localPassword !== confirmPassword) {
+        alert("Passwords do not match.");
+        return;
+      }
 
-                <div style={{ display: 'flex', alignItems: 'center', margin: '8px 0', width: '100%' }}>
-                  <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.1)' }}></div>
-                  <span style={{ fontSize: '11px', color: 'var(--text-secondary)', letterSpacing: '1px', padding: '0 8px' }}>OR</span>
-                  <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.1)' }}></div>
-                </div>
+      setIsDerivingKey(true);
+      try {
+        await saveCredentialsAndRegister(generatedMnemonic, localPassword, optInBiometrics);
+      } catch (err) {
+        alert("Account setup failed: " + err.message);
+      } finally {
+        setIsDerivingKey(false);
+      }
+    };
 
-                <a 
-                  href={getMetaMaskLink()}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="action-btn"
-                  style={{ padding: '12px', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', background: 'rgba(255,255,255,0.02)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', textDecoration: 'none', color: '#ffffff', cursor: 'pointer', width: '100%' }}
-                >
-                  <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>phone_iphone</span>
-                  Open MetaMask App
-                </a>
-              </div>
-
-              <div style={{ marginTop: '24px', background: 'rgba(255, 180, 171, 0.1)', border: '1px solid rgba(255, 180, 171, 0.2)', padding: '6px 12px', borderRadius: '20px', display: 'flex', alignItems: 'center' }}>
-                <span style={{ fontSize: '11px', fontFamily: 'monospace', color: 'var(--accent-rose)' }}>STATUS: COMPATIBLE WALLET REQUIRED</span>
-              </div>
-            </div>
-          </main>
-
-          <footer style={{ display: 'flex', justifyContent: 'space-between', padding: '16px 24px', fontSize: '11px', color: 'var(--text-secondary)', width: '100%' }}>
-            <div style={{ display: 'flex', gap: '16px' }}>
-              <a href="#" className="hover:text-primary transition-colors">PRIVACY POLICY</a>
-              <a href="#" className="hover:text-primary transition-colors">TERMS OF SERVICE</a>
-            </div>
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-              <span>VERSION 4.0.1-STABLE</span>
-              <span style={{ width: '4px', height: '4px', borderRadius: '50%', backgroundColor: 'rgba(255,255,255,0.3)' }}></span>
-              <span>BUILD 9301</span>
-            </div>
-          </footer>
-        </div>
-      );
-    }
-
-    // 1b. If MetaMask is found, display the Connect Wallet mobile/desktop screen
-    if (isMobile) {
-      return (
-        <div className="mesh-gradient-bg animate-fade-in" style={{ width: '100%', minHeight: '100vh', display: 'flex', flexDirection: 'column', position: 'relative', overflowX: 'hidden', color: 'var(--text-primary)', backgroundColor: 'var(--bg-primary)' }}>
-          {/* Header */}
-          <header className="safe-header" style={{ width: '100%', position: 'fixed', top: 0, left: 0, zIndex: 50, backgroundColor: 'rgba(27, 27, 34, 0.85)', backdropFilter: 'blur(10px)', borderBottom: '1px solid var(--border-light)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 20px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span className="material-symbols-outlined" style={{ color: 'var(--accent-indigo)', fontSize: '24px' }}>shield</span>
-              <span className="font-headline-md font-bold" style={{ fontSize: '20px', color: 'var(--text-primary)', fontFamily: 'Manrope, sans-serif' }}>Echo</span>
-            </div>
-            <button style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer' }} onClick={() => window.open('https://metamask.io/faqs/', '_blank')}>
-              <span className="material-symbols-outlined">help</span>
-            </button>
-          </header>
-
-          {/* Main Canvas */}
-          <main className="safe-pt safe-pb" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flexGrow: 1, padding: '24px 20px', paddingTop: '100px', position: 'relative', zIndex: 10 }}>
-            {/* Metafox Floating Visual */}
-            <div style={{ position: 'relative', marginBottom: '32px' }} className="group">
-              <div style={{ position: 'absolute', inset: 0, background: 'rgba(129, 140, 248, 0.15)', filter: 'blur(40px)', borderRadius: '50%', transform: 'scale(1.2)' }}></div>
-              <div className="animate-float" style={{ position: 'relative', width: '180px', height: '180px', borderRadius: '50%', background: 'rgba(27, 27, 34, 0.6)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255, 255, 255, 0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-                <img 
-                  style={{ width: '120px', height: '120px', objectFit: 'contain' }}
-                  alt="Echo Logo" 
-                  src={logo}
-                />
-              </div>
-            </div>
-
-            {/* Text details */}
-            <div style={{ textAlign: 'center', marginBottom: '32px' }}>
-              <h1 className="font-headline-lg-mobile" style={{ fontSize: '24px', fontWeight: '700', color: 'var(--text-primary)', fontFamily: 'Manrope, sans-serif', letterSpacing: '-0.5px' }}>Connect Your Wallet</h1>
-              <p style={{ fontSize: '15px', color: 'var(--text-secondary)', marginTop: '12px', maxWidth: '300px', lineHeight: '1.6', margin: '12px auto 0' }}>
-                Start your decentralized messaging journey by connecting your MetaMask wallet. Your wallet address will be your secure identity.
-              </p>
-            </div>
-
-            {/* CTA Connect */}
-            <div style={{ width: '100%', maxWidth: '320px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <button 
-                type="button" 
-                onClick={connectWalletAction}
-                style={{ border: 'none', background: 'var(--accent-indigo)', color: '#ffffff', fontSize: '16px', fontWeight: 'bold', gap: '10px', height: '56px', borderRadius: '14px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', width: '100%', boxShadow: '0 8px 24px rgba(129, 140, 248, 0.25)' }}
-              >
-                <span className="material-symbols-outlined" style={{ fontVariationSettings: "'FILL' 1" }}>account_balance_wallet</span>
-                Connect MetaMask
-              </button>
-
-              <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'rgba(27, 27, 34, 0.5)', border: '1px solid var(--border-light)', borderRadius: '12px', marginTop: '12px' }}>
-                <span className="material-symbols-outlined text-[18px]" style={{ color: 'var(--accent-indigo)', fontVariationSettings: "'FILL' 1" }}>verified_user</span>
-                <span className="font-label-mono" style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--text-secondary)' }}>Secure Protocol Active</span>
-              </div>
-            </div>
-          </main>
-
-          {/* Footer */}
-          <footer className="safe-footer" style={{ padding: '16px 24px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '6px', color: 'rgba(255,255,255,0.2)', fontSize: '10px' }}>
-            <span className="material-symbols-outlined text-[12px]">terminal</span>
-            <span className="font-label-mono">PROTOCOL_V2.0.48_STABLE</span>
-          </footer>
-        </div>
-      );
-    }
-
-    // 1b. If MetaMask is found, display the Connect Wallet desktop screen (exact Stitch design)
     return (
-      <div className="mesh-gradient-bg" style={{ width: '100%', minHeight: '100vh', display: 'flex', flexDirection: 'column', position: 'relative', overflowY: 'auto' }}>
-        <header style={{ width: '100%', height: '64px', position: 'fixed', top: 0, left: 0, zIndex: 40, backgroundColor: 'rgba(17, 20, 21, 0.85)', backdropFilter: 'blur(10px)', borderBottom: '1px solid rgba(255, 255, 255, 0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 24px' }}>
+      <div className="mesh-gradient-bg" style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', color: 'var(--text-primary)', backgroundColor: 'var(--bg-primary)' }}>
+        <header className="safe-header" style={{ width: '100%', position: 'fixed', top: 0, left: 0, zIndex: 40, borderBottom: '1px solid var(--border-light)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 24px', backgroundColor: 'rgba(27, 27, 34, 0.85)', backdropFilter: 'blur(10px)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <img src={logo} alt="Echo Logo" style={{ height: '32px', width: 'auto' }} />
-            <span className="font-headline-md font-bold" style={{ fontSize: '20px', fontFamily: 'Manrope, sans-serif', color: 'var(--text-primary)' }}>Echo</span>
-          </div>
-          <div>
-            <button style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer' }} onClick={() => window.open('https://metamask.io/faqs/', '_blank')}>
-              <span className="material-symbols-outlined">help</span>
-            </button>
+            <span className="material-symbols-outlined" style={{ color: 'var(--accent-indigo)' }}>shield</span>
+            <span className="font-headline-md font-bold" style={{ fontSize: '20px', color: 'var(--text-primary)' }}>Echo</span>
           </div>
         </header>
 
-        <main style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flexGrow: 1, padding: '40px 24px', paddingTop: '90px', width: '100%' }}>
-          <div className="glass-panel" style={{ width: '100%', maxWidth: '480px', borderRadius: '16px', padding: '32px', display: 'flex', flexDirection: 'column', alignItems: 'center', position: 'relative', boxShadow: '0 20px 50px rgba(0,0,0,0.5)', overflow: 'hidden', backgroundColor: 'rgba(29, 32, 33, 0.7)', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.05)' }}>
-            <div style={{ position: 'absolute', top: '-96px', left: '-96px', width: '192px', height: '192px', borderRadius: '50%', background: 'rgba(129, 140, 248, 0.1)', filter: 'blur(80px)' }}></div>
-            
-            <div style={{ position: 'relative', marginBottom: '16px', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-              <div style={{ width: '96px', height: '96px', borderRadius: '50%', backgroundColor: 'rgba(255, 255, 255, 0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid rgba(255, 255, 255, 0.1)', overflow: 'hidden', padding: '12px' }}>
-                <img 
-                  style={{ width: '56px', height: '56px', objectFit: 'contain' }}
-                  alt="Echo Logo" 
-                  src={logo}
-                  onError={(e) => {
-                    e.target.src = logo;
+        <main className="safe-pt safe-pb" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flexGrow: 1, padding: '24px 20px', paddingTop: '100px', width: '100%' }}>
+          
+          {onboardingStep === 'home' && (
+            <div className="glass-panel animate-fade-in" style={{ width: '100%', maxWidth: '440px', borderRadius: '16px', padding: '32px', display: 'flex', flexDirection: 'column', alignItems: 'center', boxShadow: '0 20px 50px rgba(0,0,0,0.5)', backgroundColor: 'rgba(29, 32, 33, 0.7)', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <div className="animate-float" style={{ position: 'relative', marginBottom: '24px', width: '120px', height: '120px', borderRadius: '50%', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <img style={{ width: '80px', height: '80px', objectFit: 'contain' }} alt="Echo Logo" src={logo} />
+              </div>
+              <h1 className="font-headline-lg-mobile" style={{ fontSize: '24px', fontWeight: 'bold', color: 'var(--text-primary)', textAlign: 'center', marginBottom: '8px' }}>Welcome to Echo</h1>
+              <p style={{ fontSize: '14px', color: 'var(--text-secondary)', textAlign: 'center', maxWidth: '340px', lineHeight: '1.6', marginBottom: '32px' }}>
+                Echo is a fully decentralized, peer-to-peer messaging application. All cryptographic keys are generated and stored locally on your device.
+              </p>
+              
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', width: '100%' }}>
+                <button onClick={handleCreateAccount} className="auth-btn" style={{ width: '100%', height: '52px', borderRadius: '10px', background: 'var(--accent-indigo)', color: '#ffffff', fontWeight: 'bold', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                  <span className="material-symbols-outlined">add_circle</span>
+                  Create New Account
+                </button>
+                <button onClick={handleRestoreAccount} className="action-btn" style={{ width: '100%', height: '52px', borderRadius: '10px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.1)', color: '#ffffff', fontWeight: 'bold', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                  <span className="material-symbols-outlined">restore</span>
+                  Restore Account
+                </button>
+              </div>
+            </div>
+          )}
+
+          {onboardingStep === 'show-seed' && (
+            <div className="glass-panel animate-fade-in" style={{ width: '100%', maxWidth: '480px', borderRadius: '16px', padding: '32px', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 50px rgba(0,0,0,0.5)', backgroundColor: 'rgba(29, 32, 33, 0.7)', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <h2 style={{ fontSize: '20px', fontWeight: 'bold', color: 'var(--text-primary)', marginBottom: '8px', textAlign: 'center' }}>Secure Recovery Mnemonic</h2>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.5', marginBottom: '20px', textAlign: 'center' }}>
+                Write down these 12 words in order and store them in a secure place. This is your master key. <strong style={{ color: 'var(--accent-rose)' }}>If you forget your password, this seed phrase is the ONLY way to recover your account.</strong> If you lose this phrase, you lose your account and all encrypted chats forever.
+              </p>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', margin: '16px 0' }}>
+                {generatedMnemonic.split(' ').map((word, idx) => (
+                  <div key={idx} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', padding: '10px 8px', borderRadius: '8px', textAlign: 'center', fontSize: '13px', fontFamily: 'monospace', color: 'var(--text-primary)' }}>
+                    <span style={{ color: 'var(--text-secondary)', marginRight: '4px', fontSize: '10px' }}>{idx + 1}.</span>
+                    {word}
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ display: 'flex', gap: '12px', marginTop: '24px' }}>
+                <button onClick={handleBackToHome} className="action-btn" style={{ flex: 1, height: '48px', borderRadius: '8px', cursor: 'pointer' }}>
+                  Back
+                </button>
+                <button 
+                  onClick={() => {
+                    navigator.clipboard.writeText(generatedMnemonic);
+                    alert("Mnemonic copied to clipboard!");
+                  }} 
+                  className="action-btn" 
+                  style={{ flex: 1, height: '48px', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>content_copy</span>
+                  Copy Seed
+                </button>
+                <button onClick={() => setOnboardingStep('verify-seed')} className="auth-btn" style={{ flex: 1, height: '48px', borderRadius: '8px', background: 'var(--accent-indigo)', color: '#ffffff', fontWeight: 'bold', border: 'none', cursor: 'pointer' }}>
+                  Saved It
+                </button>
+              </div>
+            </div>
+          )}
+
+          {onboardingStep === 'verify-seed' && (
+            <div className="glass-panel animate-fade-in" style={{ width: '100%', maxWidth: '440px', borderRadius: '16px', padding: '32px', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 50px rgba(0,0,0,0.5)', backgroundColor: 'rgba(29, 32, 33, 0.7)', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <h2 style={{ fontSize: '20px', fontWeight: 'bold', color: 'var(--text-primary)', marginBottom: '8px', textAlign: 'center' }}>Verify Mnemonic Phrase</h2>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.5', marginBottom: '20px', textAlign: 'center' }}>
+                To confirm you have stored the phrase safely, please type or paste your 12 words here exactly as they were shown.
+              </p>
+
+              <div className="auth-input-group">
+                <textarea
+                  className="textarea-field"
+                  value={mnemonicInput}
+                  onChange={(e) => {
+                    setMnemonicInput(e.target.value);
+                    setMnemonicError('');
                   }}
+                  placeholder="Enter 12 words separated by spaces"
+                  style={{ minHeight: '100px', width: '100%', borderRadius: '8px', padding: '12px', background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.1)', color: 'var(--text-primary)', fontSize: '14px', lineHeight: '1.5' }}
+                  required
                 />
               </div>
-              <div style={{ position: 'absolute', bottom: '-2px', right: '-2px', backgroundColor: 'var(--accent-indigo)', width: '24px', height: '24px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '3px solid var(--bg-primary)' }}>
-                <span className="material-symbols-outlined text-sm" style={{ fontVariationSettings: "'FILL' 1", fontSize: '12px', color: '#ffffff' }}>verified</span>
-              </div>
-            </div>
 
-            <div style={{ textAlign: 'center', marginBottom: '16px' }}>
-              <h1 style={{ fontSize: '24px', fontWeight: 'bold', color: 'var(--text-primary)', fontFamily: 'Manrope, sans-serif' }}>Connect Your Wallet</h1>
-              <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginTop: '8px', maxWidth: '320px', lineHeight: '1.5' }}>
-                Access your encrypted messages and secure contacts through your Web3 identity.
-              </p>
-            </div>
+              {mnemonicError && (
+                <div style={{ color: 'var(--accent-rose)', fontSize: '13px', marginTop: '8px', textAlign: 'center' }}>
+                  {mnemonicError}
+                </div>
+              )}
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', width: '100%' }}>
-              <button 
-                type="button" 
-                onClick={connectWalletAction}
-                style={{ border: 'none', background: 'var(--accent-indigo)', color: '#ffffff', fontSize: '16px', fontWeight: 'bold', gap: '8px', height: '56px', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', width: '100%' }}
-              >
-                <span className="material-symbols-outlined" style={{ fontVariationSettings: "'FILL' 1" }}>account_balance_wallet</span>
-                Connect MetaMask
-              </button>
-
-              <div style={{ display: 'flex', alignItems: 'center', margin: '8px 0', width: '100%' }}>
-                <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.1)' }}></div>
-                <span style={{ fontSize: '11px', color: 'var(--text-secondary)', letterSpacing: '1px', padding: '0 8px' }}>OTHER OPTIONS</span>
-                <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.1)' }}></div>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', width: '100%' }}>
-                <button type="button" className="action-btn" style={{ padding: '12px', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', background: 'rgba(255,255,255,0.02)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }} onClick={() => alert("WalletConnect: Scan QR code.")}>
-                  <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>qr_code_scanner</span>
-                  WalletConnect
+              <div style={{ display: 'flex', gap: '12px', marginTop: '24px' }}>
+                <button onClick={() => setOnboardingStep('show-seed')} className="action-btn" style={{ flex: 1, height: '48px', borderRadius: '8px', cursor: 'pointer' }}>
+                  Back
                 </button>
-                <button type="button" className="action-btn" style={{ padding: '12px', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', background: 'rgba(255,255,255,0.02)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }} onClick={() => alert("Private Key: Enter seed phrase to restore.")}>
-                  <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>key</span>
-                  Private Key
+                <button onClick={handleVerifySeed} className="auth-btn" style={{ flex: 2, height: '48px', borderRadius: '8px', background: 'var(--accent-indigo)', color: '#ffffff', fontWeight: 'bold', border: 'none', cursor: 'pointer' }}>
+                  Verify & Continue
                 </button>
               </div>
             </div>
+          )}
 
-            <div style={{ marginTop: '24px', background: 'rgba(76, 214, 251, 0.1)', border: '1px solid rgba(76, 214, 251, 0.2)', padding: '6px 12px', borderRadius: '20px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <div className="animate-pulse" style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: 'var(--accent-emerald)' }}></div>
-              <span style={{ fontSize: '11px', fontFamily: 'monospace', color: 'var(--accent-emerald)' }}>NETWORK: ETHEREUM MAINNET</span>
-            </div>
-          </div>
-
-          <div style={{ marginTop: '12px', display: 'flex', gap: '16px', padding: '16px', background: 'rgba(29, 32, 33, 0.4)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', maxWidth: '540px', width: '100%', alignItems: 'center' }}>
-            <div style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: 'rgba(255, 180, 171, 0.1)', color: 'var(--accent-rose)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-              <img src={logo} alt="Echo Logo" style={{ height: '20px', width: 'auto' }} />
-            </div>
-            <div style={{ flex: 1 }}>
-              <h4 style={{ fontSize: '14px', fontWeight: 'bold', color: 'var(--text-primary)' }}>Secure Connection Mandate</h4>
-              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px', lineHeight: '1.4' }}>
-                Echo never stores your private keys or seed phrases. All signing operations occur locally within your wallet extension.
+          {onboardingStep === 'restore' && (
+            <div className="glass-panel animate-fade-in" style={{ width: '100%', maxWidth: '440px', borderRadius: '16px', padding: '32px', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 50px rgba(0,0,0,0.5)', backgroundColor: 'rgba(29, 32, 33, 0.7)', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <h2 style={{ fontSize: '20px', fontWeight: 'bold', color: 'var(--text-primary)', marginBottom: '8px', textAlign: 'center' }}>Restore Account</h2>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.5', marginBottom: '20px', textAlign: 'center' }}>
+                Enter your 12-word recovery seed phrase to rebuild your identity and retrieve keys.
               </p>
+
+              <div className="auth-input-group">
+                <textarea
+                  className="textarea-field"
+                  value={mnemonicInput}
+                  onChange={(e) => {
+                    setMnemonicInput(e.target.value);
+                    setMnemonicError('');
+                  }}
+                  placeholder="Enter 12 words separated by spaces"
+                  style={{ minHeight: '100px', width: '100%', borderRadius: '8px', padding: '12px', background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.1)', color: 'var(--text-primary)', fontSize: '14px', lineHeight: '1.5' }}
+                  required
+                />
+              </div>
+
+              {mnemonicError && (
+                <div style={{ color: 'var(--accent-rose)', fontSize: '13px', marginTop: '8px', textAlign: 'center' }}>
+                  {mnemonicError}
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: '12px', marginTop: '24px' }}>
+                <button onClick={handleBackToHome} className="action-btn" style={{ flex: 1, height: '48px', borderRadius: '8px', cursor: 'pointer' }}>
+                  Cancel
+                </button>
+                <button onClick={handleRestoreMnemonic} className="auth-btn" style={{ flex: 2, height: '48px', borderRadius: '8px', background: 'var(--accent-indigo)', color: '#ffffff', fontWeight: 'bold', border: 'none', cursor: 'pointer' }}>
+                  Confirm Restore
+                </button>
+              </div>
             </div>
-          </div>
+          )}
+
+          {onboardingStep === 'choose-password' && (
+            <div className="glass-panel animate-fade-in" style={{ width: '100%', maxWidth: '440px', borderRadius: '16px', padding: '32px', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 50px rgba(0,0,0,0.5)', backgroundColor: 'rgba(29, 32, 33, 0.7)', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <h2 style={{ fontSize: '20px', fontWeight: 'bold', color: 'var(--text-primary)', marginBottom: '8px', textAlign: 'center' }}>Set Account Password</h2>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.5', marginBottom: '20px', textAlign: 'center' }}>
+                Choose a strong password to lock and encrypt your credentials locally. <span style={{ color: 'var(--text-primary)', fontWeight: 'bold' }}>Note: If you forget this password, you will need your 12-word recovery seed phrase to restore your account.</span>
+              </p>
+
+              <form onSubmit={handlePasswordSubmit} style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <div className="auth-input-group">
+                  <label className="auth-label">Password</label>
+                  <input
+                    type="password"
+                    className="auth-input"
+                    placeholder="Minimum 8 characters"
+                    value={localPassword}
+                    onChange={(e) => setLocalPassword(e.target.value)}
+                    required
+                  />
+                  <div style={{ fontSize: '11px', marginTop: '6px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                    <span style={{ color: localPassword.length >= 8 ? 'var(--accent-emerald)' : 'var(--text-secondary)' }}>✓ Min 8 chars</span>
+                    <span style={{ color: /[A-Z]/.test(localPassword) ? 'var(--accent-emerald)' : 'var(--text-secondary)' }}>✓ One Uppercase</span>
+                    <span style={{ color: /[a-z]/.test(localPassword) ? 'var(--accent-emerald)' : 'var(--text-secondary)' }}>✓ One Lowercase</span>
+                    <span style={{ color: /[0-9]/.test(localPassword) ? 'var(--accent-emerald)' : 'var(--text-secondary)' }}>✓ One Number</span>
+                  </div>
+                </div>
+
+                <div className="auth-input-group">
+                  <label className="auth-label">Confirm Password</label>
+                  <input
+                    type="password"
+                    className="auth-input"
+                    placeholder="Repeat password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    required
+                  />
+                  {confirmPassword && localPassword !== confirmPassword && (
+                    <span style={{ color: 'var(--accent-rose)', fontSize: '11px', marginTop: '4px' }}>Passwords do not match</span>
+                  )}
+                </div>
+
+                {/* Biometrics Toggle (Capacitor Native only) */}
+                {window.Capacitor?.isNativePlatform() && (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '8px', margin: '8px 0' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                      <span style={{ fontSize: '13px', fontWeight: 'bold' }}>Enable Biometric Login</span>
+                      <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Unlock app using FaceID or Fingerprint</span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={optInBiometrics}
+                      onChange={(e) => setOptInBiometrics(e.target.checked)}
+                      style={{ width: '20px', height: '20px', cursor: 'pointer', accentColor: 'var(--accent-indigo)' }}
+                    />
+                  </div>
+                )}
+
+                {isDerivingKey ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', margin: '12px 0' }}>
+                    <div className="animate-spin" style={{ width: '24px', height: '24px', borderRadius: '50%', border: '3px solid rgba(255,255,255,0.1)', borderTopColor: 'var(--accent-indigo)' }}></div>
+                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Running Argon2id key derivation...</span>
+                  </div>
+                ) : (
+                  <button 
+                    type="submit" 
+                    className="auth-btn" 
+                    disabled={!validatePassword(localPassword) || localPassword !== confirmPassword}
+                    style={{ width: '100%', height: '48px', borderRadius: '8px', background: 'var(--accent-indigo)', color: '#ffffff', border: 'none', fontWeight: 'bold', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                  >
+                    Generate Credentials & Unlock
+                  </button>
+                )}
+              </form>
+            </div>
+          )}
+
         </main>
-
-        <footer style={{ display: 'flex', justifyContent: 'space-between', padding: '16px 24px', fontSize: '11px', color: 'var(--text-secondary)', width: '100%' }}>
-          <div style={{ display: 'flex', gap: '16px' }}>
-            <a href="#" className="hover:text-primary transition-colors">PRIVACY POLICY</a>
-            <a href="#" className="hover:text-primary transition-colors">TERMS OF SERVICE</a>
-          </div>
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            <span>VERSION 4.0.1-STABLE</span>
-            <span style={{ width: '4px', height: '4px', borderRadius: '50%', backgroundColor: 'rgba(255,255,255,0.3)' }}></span>
-            <span>BUILD 9301</span>
-          </div>
+        
+        <footer style={{ padding: '16px 24px', display: 'flex', justifyContent: 'center', gap: '16px', fontSize: '11px', color: 'var(--text-secondary)', borderTop: '1px solid var(--border-light)' }}>
+          <span>PROTOCOL_V2.0.48_STABLE</span>
         </footer>
       </div>
     );
   }
 
-  // 2. Unregistered State: Username registration required or Login required
   if (!registered) {
     if (walletRegisteredOnServer) {
       return (
@@ -870,11 +968,11 @@ function App() {
               <span className="auth-logo-text">Echo</span>
             </div>
             <div className="auth-desc">
-              Your wallet is already registered on the Echo network. Sign the authentication challenge with your wallet to retrieve your secure session and access your inbox.
+              Your account is already registered on the Echo network. Click login below to retrieve your secure session and access your inbox.
             </div>
             
             <div className="profile-card" style={{ textAlign: 'left' }}>
-              <div className="profile-username">Wallet Address</div>
+              <div className="profile-username">Account Address</div>
               <div className="profile-address" title="Click to copy" onClick={() => {
                 navigator.clipboard.writeText(wallet.address);
                 alert("Address copied!");
@@ -893,8 +991,8 @@ function App() {
               <button className="action-btn" onClick={() => setShowImportModal(true)}>
                 Import Database Backup
               </button>
-              <button className="action-btn" style={{ borderColor: 'var(--accent-rose)', color: 'var(--accent-rose)' }} onClick={logout}>
-                Disconnect Wallet
+              <button className="action-btn" style={{ borderColor: 'var(--accent-rose)', color: 'var(--accent-rose)' }} onClick={resetWallet}>
+                Wipe Local Keys
               </button>
             </div>
 
@@ -953,11 +1051,11 @@ function App() {
              <span className="auth-logo-text">Echo</span>
            </div>
            <div className="auth-desc">
-             Your wallet is connected. Pick an immutable username to register your key bundles on the relay server.
+             Local account initialized. Pick an immutable username to register your key bundles on the relay server.
            </div>
            
            <div className="profile-card" style={{ textAlign: 'left' }}>
-             <div className="profile-username">Wallet Address</div>
+             <div className="profile-username">Account Address</div>
             <div className="profile-address" title="Click to copy" onClick={() => {
               navigator.clipboard.writeText(wallet.address);
               alert("Address copied!");
@@ -992,7 +1090,7 @@ function App() {
             {error && <div className="error-banner">{error}</div>}
             
             <button type="submit" className="auth-btn">
-              Register Web3 Identity
+              Register Username
             </button>
           </form>
 
@@ -1013,7 +1111,7 @@ function App() {
                 fontWeight: '500'
               }}
             >
-              Sign in with wallet signature
+              Sign in
             </button>
           </div>
 
@@ -1021,8 +1119,8 @@ function App() {
             <button className="action-btn" onClick={() => setShowImportModal(true)}>
               Import Database Backup
             </button>
-            <button className="action-btn" style={{ borderColor: 'var(--accent-rose)', color: 'var(--accent-rose)' }} onClick={logout}>
-              Disconnect Wallet
+            <button className="action-btn" style={{ borderColor: 'var(--accent-rose)', color: 'var(--accent-rose)' }} onClick={resetWallet}>
+              Wipe Local Keys
             </button>
           </div>
 

@@ -1,11 +1,22 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import * as DecentraChatClientModule from 'decentrachat-client-sdk';
-import { 
-  isWeb3Available, 
-  connectWallet, 
-  getConnectedAddress, 
-  signMessage 
-} from './blockchain/web3Provider';
+import {
+  generateMnemonic,
+  validateMnemonic,
+  deriveKeysFromMnemonic,
+  signMessageWithEd25519
+} from './keyDerivation';
+import {
+  getIDBValue,
+  setIDBValue,
+  removeIDBValue,
+  isBiometricsAvailable,
+  authenticateBiometrics,
+  savePasswordEncryptedMnemonic,
+  loadPasswordEncryptedMnemonic,
+  saveBiometricEncryptedMnemonic,
+  loadBiometricEncryptedMnemonic
+} from './secureStorage';
 
 const DecentraChatClient = DecentraChatClientModule.default || DecentraChatClientModule;
 
@@ -115,9 +126,21 @@ export const DecentraChatProvider = ({ children }) => {
     }
   }, [connected, client, stealthMode, hideWalletAddress]);
 
-  const serverUrl = typeof window !== 'undefined' && window.location && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
-    ? 'http://localhost:3009'
-    : (import.meta.env.VITE_RELAY_URL || 'https://decentrachat-singnalling.onrender.com');
+  const getLocalServerUrl = () => {
+    if (typeof window === 'undefined') return 'http://localhost:3009';
+    // Check if we are running in Capacitor Android environment
+    const isAndroid = window.Capacitor && window.Capacitor.getPlatform() === 'android';
+    if (isAndroid) {
+      return 'http://10.0.2.2:3009';
+    }
+    return 'http://localhost:3009';
+  };
+
+  const serverUrl = import.meta.env.VITE_RELAY_URL
+    ? import.meta.env.VITE_RELAY_URL
+    : (typeof window !== 'undefined' && window.location && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') && !import.meta.env.PROD)
+      ? getLocalServerUrl()
+      : 'https://decentrachat-singnalling.onrender.com';
 
   const wakeUpServer = useCallback(async (maxTries = 3) => {
     console.log(`[Server Wakeup] Pinging signalling server at ${serverUrl}/health...`);
@@ -149,27 +172,36 @@ export const DecentraChatProvider = ({ children }) => {
   }, [serverUrl]);
 
 
-  // Helper to initialize DecentraChatClient with a connected wallet address
-  const initializeClientForAddress = useCallback(async (walletAddress, checkCurrent = () => true) => {
+  const [biometricsSupported, setBiometricsSupported] = useState(false);
+
+  // Helper to initialize DecentraChatClient with derived keys
+  const initializeClientForKeys = useCallback(async (keys, checkCurrent = () => true) => {
     try {
       setBootPhase('loading_keys');
+      
       const activeWallet = {
-        address: walletAddress.toLowerCase(),
+        address: keys.address.toLowerCase(),
         signMessage: async (msg) => {
-          return await signMessage(msg);
-        }
+          return signMessageWithEd25519(msg, keys.identityKeyPair.privateKey);
+        },
+        identityPublic: keys.identityKeyPair.publicKey,
+        identityPrivate: keys.identityKeyPair.privateKey,
+        encryptionPublic: keys.encryptionKeyPair.publicKey,
+        encryptionPrivate: keys.encryptionKeyPair.privateKey
       };
+      
       if (!checkCurrent()) return;
       setWallet(activeWallet);
-
+      setConnected(true);
+      
       // Instantiate SDK Client (using a local database file name)
-      const dbName = `wallet_db_${walletAddress.substring(0, 10).toLowerCase()}`;
+      const dbName = `wallet_db_${keys.address.substring(0, 10).toLowerCase()}`;
       const newClient = new DecentraChatClient(serverUrl, activeWallet, dbName);
       await newClient.init(); // Initialize IndexedDB database
       
       if (!checkCurrent()) return;
       setClient(newClient);
-
+      
       // Check registration status from client database metadata
       const isReg = await newClient.getMetadata('registered') === 'true';
       if (!checkCurrent()) return;
@@ -192,10 +224,17 @@ export const DecentraChatProvider = ({ children }) => {
         const storedPfp = await newClient.getMetadata('pfp');
         if (!checkCurrent()) return;
         setPfp(storedPfp || null);
+        
+        setBootPhase('connecting');
+        try {
+          await connectClient(newClient);
+        } catch (e) {
+          console.error("Auto-connect failed during init:", e.message);
+        }
       } else {
         // Check if address is registered on the server
         try {
-          const checkUrl = `${serverUrl}/users/exists/${walletAddress}`;
+          const checkUrl = `${serverUrl}/users/exists/${keys.address}`;
           const res = await fetch(checkUrl);
           const data = await res.json();
           if (!checkCurrent()) return;
@@ -219,6 +258,65 @@ export const DecentraChatProvider = ({ children }) => {
       setLoading(false);
     }
   }, [serverUrl]);
+
+  // Action to unlock the local wallet with a password
+  const unlockWallet = async (password) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const mnemonic = await loadPasswordEncryptedMnemonic(password);
+      const keys = deriveKeysFromMnemonic(mnemonic);
+      await initializeClientForKeys(keys);
+      return true;
+    } catch (err) {
+      console.error("[Context] Unlock wallet failed:", err.message);
+      setError("Incorrect password or decryption error.");
+      setLoading(false);
+      throw err;
+    }
+  };
+
+  // Action to unlock the local wallet with biometrics
+  const unlockWithBiometrics = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const mnemonic = await loadBiometricEncryptedMnemonic();
+      const keys = deriveKeysFromMnemonic(mnemonic);
+      await initializeClientForKeys(keys);
+      return true;
+    } catch (err) {
+      console.error("[Context] Biometric unlock failed:", err.message);
+      setError("Biometric authentication failed: " + err.message);
+      setLoading(false);
+      throw err;
+    }
+  };
+
+  // Action to generate new credentials and register
+  const saveCredentialsAndRegister = async (mnemonic, password, useBiometrics) => {
+    setLoading(true);
+    setError(null);
+    try {
+      // 1. Derive keys from mnemonic
+      const keys = deriveKeysFromMnemonic(mnemonic);
+      
+      // 2. Save encrypted credentials locally
+      await savePasswordEncryptedMnemonic(mnemonic, password);
+      if (useBiometrics) {
+        await saveBiometricEncryptedMnemonic(mnemonic);
+      }
+      
+      // 3. Initialize the client SDK
+      await initializeClientForKeys(keys);
+      return keys;
+    } catch (err) {
+      console.error("[Context] saveCredentialsAndRegister error:", err.message);
+      setError("Key setup failed: " + err.message);
+      setLoading(false);
+      throw err;
+    }
+  };
 
   // Action to log in an already registered wallet address
   const loginUser = async () => {
@@ -275,36 +373,28 @@ export const DecentraChatProvider = ({ children }) => {
     }
   };
 
-  // Action to connect wallet manually
-  const connectWalletAction = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      localStorage.removeItem('decentrachat_explicit_disconnect');
-      const { address: walletAddress } = await connectWallet();
-      localStorage.setItem('decentrachat_last_wallet_address', walletAddress);
-      await initializeClientForAddress(walletAddress);
-    } catch (err) {
-      console.error("Wallet connection failed:", err);
-      setError(err.message);
-      setLoading(false);
-      throw err;
-    }
-  }, [initializeClientForAddress]);
-
   // Initial load check
   useEffect(() => {
     let isCurrent = true;
     const checkExistingConnection = async () => {
       try {
-        // Step 1: Verify Web Crypto APIs are available
         setBootPhase('checking_crypto');
         if (!window.crypto?.getRandomValues || !window.crypto?.subtle) {
           throw new Error('CRYPTO_UNAVAILABLE');
         }
 
         const isExplicitDisconnect = localStorage.getItem('decentrachat_explicit_disconnect') === 'true';
-        if (isExplicitDisconnect) {
+        const hasEncryptedMnemonic = await getIDBValue('password_encrypted_mnemonic');
+
+        // Check if biometrics is available and configured
+        const isBioAvailable = await isBiometricsAvailable();
+        const hasBiometricCreds = await getIDBValue('biometric_encrypted_mnemonic');
+        if (isCurrent) {
+          setBiometricsSupported(isBioAvailable && !!hasBiometricCreds);
+        }
+
+        if (!hasEncryptedMnemonic) {
+          // No keys at all, user is onboarding
           if (isCurrent) {
             setLoading(false);
             setBootPhase('ready');
@@ -312,31 +402,32 @@ export const DecentraChatProvider = ({ children }) => {
           return;
         }
 
-        const connectedAddr = await getConnectedAddress();
-        const lastUsedAddr = localStorage.getItem('decentrachat_last_wallet_address');
-        
-        // If wallet is connected or we have a last used address and Web3 is available
-        const targetAddr = connectedAddr || lastUsedAddr;
-        if (targetAddr && isWeb3Available()) {
-          setBootPhase('loading_keys');
-          const newClient = await initializeClientForAddress(targetAddr, () => isCurrent);
-          if (isCurrent && newClient) {
-            const isReg = await newClient.getMetadata('registered') === 'true';
-            if (isReg) {
-              setBootPhase('connecting');
-              try {
-                await connectClient(newClient);
-              } catch (e) {
-                console.error("Auto-connect failed during init:", e.message);
-              }
-            }
-            setBootPhase('ready');
-          }
-        } else {
+        if (isExplicitDisconnect) {
+          // Locked lockbox
           if (isCurrent) {
             setLoading(false);
-            setBootPhase('ready');
+            setBootPhase('lockbox_locked');
           }
+          return;
+        }
+
+        // Try automatic biometric login if available
+        if (isBioAvailable && hasBiometricCreds) {
+          setBootPhase('loading_keys');
+          try {
+            const mnemonic = await loadBiometricEncryptedMnemonic();
+            const keys = deriveKeysFromMnemonic(mnemonic);
+            await initializeClientForKeys(keys, () => isCurrent);
+            return;
+          } catch (e) {
+            console.warn("Auto biometric login bypassed:", e.message);
+          }
+        }
+
+        // Default to password lock screen
+        if (isCurrent) {
+          setLoading(false);
+          setBootPhase('lockbox_locked');
         }
       } catch (err) {
         console.error("Check existing connection failed:", err);
@@ -355,7 +446,7 @@ export const DecentraChatProvider = ({ children }) => {
     return () => {
       isCurrent = false;
     };
-  }, [initializeClientForAddress]);
+  }, [initializeClientForKeys]);
 
 
   // Sync data function
@@ -508,6 +599,17 @@ export const DecentraChatProvider = ({ children }) => {
       if (err.message.includes("refresh token") || err.message.includes("re-authenticate") || err.message.includes("session token") || err.message.includes("401") || err.message.includes("expired") || err.message.includes("Invalid session token")) {
         console.warn("[Context] Session credentials expired or invalid. Setting sessionExpired = true...");
         setSessionExpired(true);
+      } else if (err.message.includes("not registered")) {
+        console.warn("[Context] Address is not registered on the server. Clearing client registered status...");
+        try {
+          await targetClient.setMetadata('registered', 'false');
+          await targetClient.setMetadata('username', '');
+        } catch (metaErr) {
+          console.error("Failed to clear registration metadata:", metaErr);
+        }
+        setRegistered(false);
+        setUsername('');
+        setError(null);
       }
     }
   }, [client, refreshData, syncProfiles, wakeUpServer]);
@@ -762,11 +864,29 @@ export const DecentraChatProvider = ({ children }) => {
     }
   };
 
-  // 8. Wipe data for demo testing
+  // 8. Lock wallet (lock app session)
   const logout = async () => {
     setLoading(true);
     try {
       localStorage.setItem('decentrachat_explicit_disconnect', 'true');
+      if (client) {
+        try {
+          client.disconnect();
+        } catch (discErr) {
+          console.warn("Client disconnect warning:", discErr);
+        }
+      }
+    } catch (err) {
+      console.error("Lock error during client cleanup:", err);
+    } finally {
+      window.location.reload();
+    }
+  };
+
+  // Reset wallet credentials completely (wipe keys)
+  const resetWallet = async () => {
+    setLoading(true);
+    try {
       if (client) {
         try {
           client.disconnect();
@@ -780,11 +900,13 @@ export const DecentraChatProvider = ({ children }) => {
           console.warn("Database storage remove warning:", dbErr);
         }
       }
-    } catch (err) {
-      console.error("Logout error during client cleanup:", err);
+    } catch (e) {
+      console.error("Reset wallet error:", e);
     } finally {
-      localStorage.removeItem('decentrachat_wallet_private');
-      localStorage.removeItem('decentrachat_last_wallet_address');
+      localStorage.removeItem('decentrachat_explicit_disconnect');
+      await removeIDBValue('password_encrypted_mnemonic');
+      await removeIDBValue('biometric_encrypted_mnemonic');
+      await removeIDBValue('biometric_key');
       window.location.reload();
     }
   };
@@ -821,10 +943,7 @@ export const DecentraChatProvider = ({ children }) => {
   const deleteAccountAction = async () => {
     if (!client) throw new Error("Client not initialized.");
     await client.wipeAccountFromPeers();
-    localStorage.setItem('decentrachat_explicit_disconnect', 'true');
-    localStorage.removeItem('decentrachat_wallet_private');
-    localStorage.removeItem('decentrachat_last_wallet_address');
-    window.location.reload();
+    await resetWallet();
   };
 
   return (
@@ -854,8 +973,8 @@ export const DecentraChatProvider = ({ children }) => {
         logout,
         serverUrl,
         client,
-        connectWalletAction,
-        isWeb3Available,
+        connectWalletAction: () => { throw new Error('MetaMask has been removed.'); },
+        isWeb3Available: () => false,
         walletRegisteredOnServer,
         loginUser,
         sessionExpired,
@@ -873,7 +992,14 @@ export const DecentraChatProvider = ({ children }) => {
         groupMessageStatuses,
         updateProfile,
         deleteAccountAction,
-        refreshData
+        refreshData,
+        generateMnemonic,
+        validateMnemonic,
+        unlockWallet,
+        unlockWithBiometrics,
+        saveCredentialsAndRegister,
+        biometricsSupported,
+        resetWallet
       }}
     >
       {children}
