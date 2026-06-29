@@ -3,6 +3,8 @@ import { Buffer } from 'buffer';
 import { useDecentraChat } from './DecentraChatContext';
 import logo from './assets/logo.png';
 import SplashScreen from './SplashScreen';
+import { App as CapacitorApp } from '@capacitor/app';
+import QuickPinchZoom, { make3dTransformValue } from 'react-quick-pinch-zoom';
 
 const getMetaMaskLink = () => {
   if (typeof window !== 'undefined' && window.location) {
@@ -65,6 +67,9 @@ function App() {
     unlockWithBiometrics,
     saveCredentialsAndRegister,
     biometricsSupported,
+    deviceBiometricsAvailable,
+    enableBiometricLogin,
+    disableBiometricLogin,
     resetWallet
   } = useDecentraChat();
 
@@ -75,7 +80,54 @@ function App() {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.Capacitor?.isNativePlatform()) {
+      const handleBackButton = CapacitorApp.addListener('backButton', () => {
+        if (showInfoModal) setShowInfoModal(false);
+        else if (showGroupModal) setShowGroupModal(false);
+        else if (showDMModal) setShowDMModal(false);
+        else if (showProfileModal) setShowProfileModal(false);
+        else if (showExportModal) setShowExportModal(false);
+        else if (showImportModal) setShowImportModal(false);
+        else if (showEmojiPicker) setShowEmojiPicker(false);
+        else if (activeConversationId) setActiveConversationId(null);
+        else if (activeTab !== 'chats') setActiveTab('chats');
+        else CapacitorApp.minimizeApp();
+      });
+      return () => {
+        handleBackButton.then(h => h.remove());
+      };
+    }
+  }, [
+    activeConversationId,
+    activeTab,
+    showInfoModal,
+    showGroupModal,
+    showDMModal,
+    showProfileModal,
+    showExportModal,
+    showImportModal,
+    showEmojiPicker,
+    setActiveConversationId,
+    setActiveTab
+  ]);
+
+  // Auto-trigger biometrics on lock screen if supported
+  useEffect(() => {
+    if (bootPhase === 'lockbox_locked' && biometricsSupported) {
+      const timer = setTimeout(async () => {
+        try {
+          await unlockWithBiometrics();
+        } catch (e) {
+          // Silent fallback to password entry
+        }
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [bootPhase, biometricsSupported, unlockWithBiometrics]);
+
   const mediaUploadControllerRef = useRef(null);
+  const lightboxImgRef = useRef(null);
 
   const cancelMediaUpload = () => {
     if (mediaUploadControllerRef.current) {
@@ -518,8 +570,8 @@ function App() {
           address: c.id, 
           username: cached?.username || c.username,
           hide_wallet: cached ? cached.hideWallet : c.hide_wallet,
-          bio: c.bio || '',
-          pfp: c.pfp || null
+          bio: (cached && cached.bio !== undefined) ? cached.bio : (c.bio || ''),
+          pfp: (cached && cached.pfp !== undefined) ? cached.pfp : (c.pfp || null)
         });
       }
     });
@@ -2058,34 +2110,15 @@ function App() {
                                     const initials = (contact?.username || activeChat.username || 'U').substring(0, 2).toUpperCase();
 
                                     if (msg.status === 'sending') {
-                                      return <span className="seen-status hollow-circle loading" style={{ display: 'inline-block', width: '10px', height: '10px', borderRadius: '50%', border: '1.5px dashed var(--accent-indigo)', animation: 'spin 2s linear infinite' }}></span>;
+                                      return <span className="material-symbols-outlined animate-spin" style={{ fontSize: '13px', opacity: 0.5 }}>progress_activity</span>;
                                     }
                                     if (msg.status === 'sent') {
-                                      if (isMobile) {
-                                        return <span className="material-symbols-outlined" style={{ fontSize: '12px', color: 'rgba(255,255,255,0.4)' }}>done</span>;
-                                      }
-                                      return <span className="seen-status hollow-circle" style={{ display: 'inline-block', width: '10px', height: '10px', borderRadius: '50%', border: '1.5px solid var(--text-secondary)', opacity: 0.5 }}></span>;
+                                      return <span className="material-symbols-outlined" style={{ fontSize: '13px', opacity: 0.5, fontVariationSettings: "'FILL' 0" }}>check_circle</span>;
                                     }
                                     if (msg.status === 'delivered') {
-                                      if (isMobile) {
-                                        return <span className="material-symbols-outlined" style={{ fontSize: '12px', color: 'rgba(255,255,255,0.4)' }}>done_all</span>;
-                                      }
-                                      return (
-                                        <div className="seen-status-avatar-wrapper distorted-pfp" title="Delivered" style={{ width: '14px', height: '14px', borderRadius: '50%', overflow: 'hidden', border: '1px solid var(--border-light)', display: 'inline-block' }}>
-                                          {pfpUrl ? (
-                                            <img src={pfpUrl} alt="Delivered" style={{ width: '100%', height: '100%', objectFit: 'cover', filter: 'grayscale(100%) contrast(1.5) blur(0.5px)' }} />
-                                          ) : (
-                                            <div style={{ width: '100%', height: '100%', backgroundColor: '#6b7280', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '8px', fontWeight: 'bold', filter: 'contrast(1.2) blur(0.2px)' }}>
-                                              {initials}
-                                            </div>
-                                          )}
-                                        </div>
-                                      );
+                                      return <span className="material-symbols-outlined" style={{ fontSize: '13px', color: 'var(--accent-indigo)', opacity: 0.8, fontVariationSettings: "'FILL' 1" }}>check_circle</span>;
                                     }
                                     if (msg.status === 'read') {
-                                      if (isMobile) {
-                                        return <span className="material-symbols-outlined" style={{ fontSize: '12px', color: 'var(--accent-indigo)' }}>done_all</span>;
-                                      }
                                       return (
                                         <div className="seen-status-avatar-wrapper" title="Seen" style={{ width: '14px', height: '14px', borderRadius: '50%', overflow: 'hidden', border: '1px solid var(--border-light)', display: 'inline-block' }}>
                                           {pfpUrl ? (
@@ -2412,7 +2445,7 @@ function App() {
               <button 
                 type="button" 
                 className="action-btn" 
-                style={{ background: 'var(--accent-indigo)', color: 'white', border: 'none', padding: '6px 16px', borderRadius: '20px', fontWeight: 'bold', fontSize: '13px' }}
+                style={{ flex: 'none', background: 'var(--accent-indigo)', color: 'white', border: 'none', padding: '6px 16px', borderRadius: '20px', fontWeight: 'bold', fontSize: '13px' }}
                 onClick={() => alert("Settings saved locally!")}
               >
                 Save
@@ -2428,7 +2461,7 @@ function App() {
                 <button 
                   type="button" 
                   className="action-btn" 
-                  style={{ background: 'var(--accent-indigo)', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '20px', fontWeight: 'bold' }}
+                  style={{ flex: 'none', background: 'var(--accent-indigo)', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '20px', fontWeight: 'bold' }}
                   onClick={() => alert("Settings saved locally!")}
                 >
                   <span className="material-symbols-outlined" style={{ fontVariationSettings: "'FILL' 1" }}>save</span>
@@ -2534,6 +2567,41 @@ function App() {
                   </div>
                   <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Hides your Web3 wallet address from your profile in others' views.</p>
                 </div>
+                {deviceBiometricsAvailable && (
+                  <div style={{ padding: '16px', background: 'rgba(255,255,255,0.03)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                      <span style={{ fontWeight: 'bold', fontSize: '14px' }}>Biometric Login</span>
+                      <label className="switch">
+                        <input 
+                          type="checkbox" 
+                          checked={biometricsSupported} 
+                          onChange={async (e) => {
+                            if (e.target.checked) {
+                              const password = prompt("Enter your account password to enable biometric login:");
+                              if (password) {
+                                try {
+                                  await enableBiometricLogin(password);
+                                  alert("Biometric login enabled successfully!");
+                                } catch (err) {
+                                  alert(err.message);
+                                }
+                              }
+                            } else {
+                              try {
+                                await disableBiometricLogin();
+                                alert("Biometric login disabled.");
+                              } catch (err) {
+                                alert(err.message);
+                              }
+                            }
+                          }} 
+                        />
+                        <span className="slider"></span>
+                      </label>
+                    </div>
+                    <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Unlock the application using fingerprint or FaceID.</p>
+                  </div>
+                )}
               </div>
               
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '16px', marginTop: '8px' }}>
@@ -2701,7 +2769,18 @@ function App() {
       {showDMModal && (
         <div className="modal-overlay">
           <div className="modal-card">
-            <div className="modal-header">Start a Direct Message</div>
+            <div className="modal-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>Start a Direct Message</span>
+              {isMobile && (
+                <button 
+                  type="button" 
+                  onClick={() => { setShowDMModal(false); setShowGroupModal(true); setNewChatAddress(''); }} 
+                  style={{ background: 'none', border: 'none', color: 'var(--accent-indigo)', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer' }}
+                >
+                  Create Group
+                </button>
+              )}
+            </div>
             <div className="auth-input-group">
               <label className="auth-label">Recipient Username</label>
               <input
@@ -2772,7 +2851,18 @@ function App() {
       {showGroupModal && (
         <div className="modal-overlay">
           <div className="modal-card">
-            <div className="modal-header">Create E2EE Group Chat</div>
+            <div className="modal-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>Create E2EE Group Chat</span>
+              {isMobile && (
+                <button 
+                  type="button" 
+                  onClick={() => { setShowGroupModal(false); setShowDMModal(true); setNewGroupName(''); setSelectedGroupMembers([]); }} 
+                  style={{ background: 'none', border: 'none', color: 'var(--accent-indigo)', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer' }}
+                >
+                  Start DM
+                </button>
+              )}
+            </div>
             <div className="auth-input-group">
               <label className="auth-label">Group Name</label>
               <input
@@ -3444,7 +3534,7 @@ function App() {
                     setIsSavingProfile(false);
                   }
                 }}
-                style={{ background: 'var(--accent-indigo)', color: 'white', border: 'none', padding: '6px 16px', borderRadius: '20px', fontWeight: 'bold', fontSize: '13px' }}
+                style={{ flex: 'none', background: 'var(--accent-indigo)', color: 'white', border: 'none', padding: '6px 16px', borderRadius: '20px', fontWeight: 'bold', fontSize: '13px' }}
               >
                 {isSavingProfile ? 'Saving...' : 'Save'}
               </button>
@@ -3589,17 +3679,29 @@ function App() {
           }}
           onClick={() => setActiveLightboxUrl(null)}
         >
-          <img 
-            src={activeLightboxUrl} 
-            alt="Enlarged Media" 
-            style={{ 
-              maxWidth: '90%', 
-              maxHeight: '90%', 
-              objectFit: 'contain',
-              borderRadius: '12px',
-              boxShadow: '0 20px 50px rgba(0,0,0,0.5)'
-            }}
-          />
+          <div onClick={(e) => e.stopPropagation()} style={{ width: '90vw', height: '90vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <QuickPinchZoom
+              onUpdate={({ x, y, scale }) => {
+                if (lightboxImgRef.current) {
+                  lightboxImgRef.current.style.transform = make3dTransformValue({ x, y, scale });
+                }
+              }}
+              tapZoomFactor={2}
+            >
+              <img 
+                ref={lightboxImgRef}
+                src={activeLightboxUrl} 
+                alt="Enlarged Media" 
+                style={{ 
+                  maxWidth: '100%', 
+                  maxHeight: '100%', 
+                  objectFit: 'contain',
+                  borderRadius: '12px',
+                  boxShadow: '0 20px 50px rgba(0,0,0,0.5)'
+                }}
+              />
+            </QuickPinchZoom>
+          </div>
           <button 
             style={{
               position: 'absolute',
@@ -3616,6 +3718,7 @@ function App() {
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
+              zIndex: 10000,
               boxShadow: '0 4px 12px rgba(0,0,0,0.2)'
             }}
             onClick={(e) => {

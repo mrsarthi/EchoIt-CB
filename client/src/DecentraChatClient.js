@@ -731,6 +731,14 @@ class DecentraChatClient extends EventEmitter {
       let bodyText = decryptedPlaintext;
       let signatureVerified = true;
 
+      let resolvedFromAddress = fromAddress.toLowerCase();
+      if (!resolvedFromAddress.startsWith('0x')) {
+        const row = db.prepare('SELECT id FROM conversations WHERE LOWER(username) = ? AND is_group = 0').get(resolvedFromAddress);
+        if (row) {
+          resolvedFromAddress = row.id.toLowerCase();
+        }
+      }
+
       try {
         const payloadObj = JSON.parse(decryptedPlaintext);
         if (payloadObj && payloadObj.plaintext && payloadObj.signature) {
@@ -740,7 +748,7 @@ class DecentraChatClient extends EventEmitter {
             if (payloadObj.sessionIdentityKey) {
               const rawPubBytes = Buffer.from(payloadObj.sessionIdentityKey, 'hex').slice(-32);
               const derivedAddr = '0x' + keccak256(rawPubBytes).slice(-40).toLowerCase();
-              if (derivedAddr === fromAddress.toLowerCase()) {
+              if (derivedAddr === resolvedFromAddress) {
                 isDelegationValid = verifyEd25519Signature(
                   `Authorize Echo Session Key: ${payloadObj.sessionSigner}`,
                   payloadObj.sessionDelegation,
@@ -751,7 +759,7 @@ class DecentraChatClient extends EventEmitter {
               // Legacy secp256k1 fallback
               try {
                 const recoveredMain = verifyMessage(`Authorize Echo Session Key: ${payloadObj.sessionSigner}`, payloadObj.sessionDelegation);
-                isDelegationValid = recoveredMain.toLowerCase() === fromAddress.toLowerCase();
+                isDelegationValid = recoveredMain.toLowerCase() === resolvedFromAddress;
               } catch (e) {
                 isDelegationValid = false;
               }
@@ -771,13 +779,13 @@ class DecentraChatClient extends EventEmitter {
             if (payloadObj.sessionIdentityKey) {
               const rawPubBytes = Buffer.from(payloadObj.sessionIdentityKey, 'hex').slice(-32);
               const derivedAddr = '0x' + keccak256(rawPubBytes).slice(-40).toLowerCase();
-              if (derivedAddr === fromAddress.toLowerCase()) {
+              if (derivedAddr === resolvedFromAddress) {
                 isDirectSigValid = verifyEd25519Signature(payloadObj.plaintext, payloadObj.signature, payloadObj.sessionIdentityKey);
               }
             } else {
               try {
                 const recovered = verifyMessage(payloadObj.plaintext, payloadObj.signature);
-                isDirectSigValid = recovered.toLowerCase() === fromAddress.toLowerCase();
+                isDirectSigValid = recovered.toLowerCase() === resolvedFromAddress;
               } catch (e) {
                 isDirectSigValid = false;
               }
@@ -1132,7 +1140,8 @@ class DecentraChatClient extends EventEmitter {
         const signingKey = bundleResult.identitySigningKey || bundleResult.identityKey;
         const rawPubBytes = Buffer.from(signingKey, 'hex').slice(-32);
         const derivedAddr = '0x' + keccak256(rawPubBytes).slice(-40).toLowerCase();
-        if (derivedAddr !== toAddress.toLowerCase()) {
+        const isWalletAddress = toAddress.startsWith('0x') && toAddress.length === 42;
+        if (isWalletAddress && derivedAddr !== toAddress.toLowerCase()) {
           throw new Error('Identity key does not hash to recipient address.');
         }
         const isPreKeySigValid = verifyEd25519Signature(bundleResult.signedPreKey, bundleResult.preKeySignature, signingKey);
