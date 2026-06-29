@@ -15,7 +15,8 @@ import {
   savePasswordEncryptedMnemonic,
   loadPasswordEncryptedMnemonic,
   saveBiometricEncryptedMnemonic,
-  loadBiometricEncryptedMnemonic
+  loadBiometricEncryptedMnemonic,
+  deleteBiometricCredentials
 } from './secureStorage';
 
 const DecentraChatClient = DecentraChatClientModule.default || DecentraChatClientModule;
@@ -173,6 +174,7 @@ export const DecentraChatProvider = ({ children }) => {
 
 
   const [biometricsSupported, setBiometricsSupported] = useState(false);
+  const [deviceBiometricsAvailable, setDeviceBiometricsAvailable] = useState(false);
 
   // Helper to initialize DecentraChatClient with derived keys
   const initializeClientForKeys = useCallback(async (keys, checkCurrent = () => true) => {
@@ -318,6 +320,29 @@ export const DecentraChatProvider = ({ children }) => {
     }
   };
 
+  const enableBiometricLogin = async (password) => {
+    try {
+      const mnemonic = await loadPasswordEncryptedMnemonic(password);
+      await saveBiometricEncryptedMnemonic(mnemonic);
+      setBiometricsSupported(true);
+      return true;
+    } catch (err) {
+      console.error("[Context] Failed to enable biometric login:", err.message);
+      throw new Error("Failed to enable biometrics: " + err.message);
+    }
+  };
+
+  const disableBiometricLogin = async () => {
+    try {
+      await deleteBiometricCredentials();
+      setBiometricsSupported(false);
+      return true;
+    } catch (err) {
+      console.error("[Context] Failed to disable biometric login:", err.message);
+      throw new Error("Failed to disable biometrics: " + err.message);
+    }
+  };
+
   // Action to log in an already registered wallet address
   const loginUser = async () => {
     if (!client) throw new Error("Client not initialized.");
@@ -390,6 +415,7 @@ export const DecentraChatProvider = ({ children }) => {
         const isBioAvailable = await isBiometricsAvailable();
         const hasBiometricCreds = await getIDBValue('biometric_encrypted_mnemonic');
         if (isCurrent) {
+          setDeviceBiometricsAvailable(isBioAvailable);
           setBiometricsSupported(isBioAvailable && !!hasBiometricCreds);
         }
 
@@ -999,6 +1025,9 @@ export const DecentraChatProvider = ({ children }) => {
         unlockWithBiometrics,
         saveCredentialsAndRegister,
         biometricsSupported,
+        deviceBiometricsAvailable,
+        enableBiometricLogin,
+        disableBiometricLogin,
         resetWallet
       }}
     >

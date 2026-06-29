@@ -992,6 +992,8 @@ io.on('connection', (socket) => {
         socket.join(newUsername.toLowerCase());
       }
       
+      socket.bio = bio !== undefined ? bio : '';
+      socket.pfp = pfp !== undefined ? pfp : null;
       if (stealthMode !== undefined) socket.stealthMode = !!stealthMode;
       if (hideWallet !== undefined) socket.hideWallet = !!hideWallet;
 

@@ -247,3 +247,13 @@ export async function loadBiometricEncryptedMnemonic() {
   decipher.setAuthTag(Buffer.from(tag, 'hex'));
   return Buffer.concat([decipher.update(Buffer.from(ciphertext, 'hex')), decipher.final()]).toString('utf8');
 }
+
+export async function deleteBiometricCredentials() {
+  await removeIDBValue('biometric_encrypted_mnemonic');
+  if (window.Capacitor && window.Capacitor.isNativePlatform()) {
+    const { Preferences } = await import('@capacitor/preferences');
+    await Preferences.remove({ key: 'biometric_key' });
+  } else {
+    await removeIDBValue('biometric_key');
+  }
+}
