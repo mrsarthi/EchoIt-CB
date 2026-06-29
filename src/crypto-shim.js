@@ -1,23 +1,26 @@
-const nacl = require('tweetnacl');
-const forge = require('node-forge');
-const CryptoJS = require('crypto-js');
-const { Buffer } = require('buffer');
+import nacl from 'tweetnacl';
+import forge from 'node-forge';
+import CryptoJS from 'crypto-js';
+import { Buffer } from 'buffer';
 
-// Key Object representation for X25519
+// Key Object representation for Ed25519 and X25519
 class KeyObject {
-  constructor(rawKey, type) {
+  constructor(rawKey, type, algorithm = 'x25519') {
     this.rawKey = rawKey; // Buffer (32 bytes)
     this.type = type; // 'private' or 'public'
+    this.algorithm = algorithm; // 'ed25519' or 'x25519'
   }
 
   export({ type, format }) {
     if (this.type === 'private') {
       // Return PKCS#8 DER representation (48 bytes: 16 bytes header + 32 bytes raw)
-      const header = Buffer.from('302e020100300506032b656e04220420', 'hex');
+      const oidHex = this.algorithm === 'ed25519' ? '2b6570' : '2b656e';
+      const header = Buffer.from(`302e02010030050603${oidHex}04220420`, 'hex');
       return Buffer.concat([header, this.rawKey]);
     } else {
       // Return SPKI DER representation (44 bytes: 12 bytes header + 32 bytes raw)
-      const header = Buffer.from('302a300506032b656e032100', 'hex');
+      const oidHex = this.algorithm === 'ed25519' ? '2b6570' : '2b656e';
+      const header = Buffer.from(`302a30050603${oidHex}032100`, 'hex');
       return Buffer.concat([header, this.rawKey]);
     }
   }
@@ -28,25 +31,37 @@ function generateKeyPairSync(algorithm) {
   if (algorithm !== 'x25519') throw new Error('Unsupported algorithm in shim: ' + algorithm);
   const pair = nacl.box.keyPair();
   return {
-    publicKey: new KeyObject(Buffer.from(pair.publicKey), 'public'),
-    privateKey: new KeyObject(Buffer.from(pair.secretKey), 'private')
+    publicKey: new KeyObject(Buffer.from(pair.publicKey), 'public', 'x25519'),
+    privateKey: new KeyObject(Buffer.from(pair.secretKey), 'private', 'x25519')
   };
+}
+
+function hasEd25519Oid(key) {
+  if (!key) return false;
+  const bytes = key.subarray ? key : Buffer.from(key);
+  for (let i = 0; i < bytes.length - 2; i++) {
+    if (bytes[i] === 0x2b && bytes[i+1] === 0x65 && bytes[i+2] === 0x70) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // 2. createPrivateKey
 function createPrivateKey({ key, format, type }) {
-  // Extract raw 32 bytes from PKCS#8 DER (the last 32 bytes)
   const rawKey = key.subarray(key.length - 32);
-  return new KeyObject(rawKey, 'private');
+  const algorithm = hasEd25519Oid(key) ? 'ed25519' : 'x25519';
+  return new KeyObject(rawKey, 'private', algorithm);
 }
 
 // 3. createPublicKey
 function createPublicKey(source) {
   if (source instanceof KeyObject) {
     if (source.type === 'private') {
-      // Derive public key from private key
-      const pubKeyBytes = nacl.scalarMult.base(source.rawKey);
-      return new KeyObject(Buffer.from(pubKeyBytes), 'public');
+      const pubKeyBytes = source.algorithm === 'ed25519'
+        ? nacl.sign.keyPair.fromSeed(source.rawKey).publicKey
+        : nacl.scalarMult.base(source.rawKey);
+      return new KeyObject(Buffer.from(pubKeyBytes), 'public', source.algorithm);
     }
     return source;
   }
@@ -54,7 +69,8 @@ function createPublicKey(source) {
   // Direct public key DER buffer
   const key = source.key || source;
   const rawKey = key.subarray(key.length - 32);
-  return new KeyObject(rawKey, 'public');
+  const algorithm = hasEd25519Oid(key) ? 'ed25519' : 'x25519';
+  return new KeyObject(rawKey, 'public', algorithm);
 }
 
 // 4. diffieHellman
@@ -153,6 +169,21 @@ function scryptSync(passphrase, salt, keylen) {
   return Buffer.from(derivedBytes, 'binary');
 }
 
+// 9b. pbkdf2Sync
+function pbkdf2Sync(password, salt, iterations, keylen, digest) {
+  const passStr = Buffer.isBuffer(password) ? password.toString() : password;
+  const saltStr = Buffer.isBuffer(salt) ? salt.toString('hex') : Buffer.from(salt).toString('hex');
+  
+  const derivedBytes = forge.pkcs5.pbkdf2(
+    passStr,
+    forge.util.hexToBytes(saltStr),
+    iterations,
+    keylen,
+    digest
+  );
+  return Buffer.from(derivedBytes, 'binary');
+}
+
 function bufferToBinaryString(buf) {
   if (typeof buf === 'string') {
     buf = Buffer.from(buf, 'utf8');
@@ -215,7 +246,7 @@ function createDecipheriv(algorithm, key, iv) {
   const decipher = forge.cipher.createDecipher('AES-GCM', keyBytes);
   let tagBuf = null;
   let inputBuf = Buffer.alloc(0);
-
+ 
   return {
     setAuthTag(tag) {
       tagBuf = tag;
@@ -270,7 +301,19 @@ async function scryptAsync(passphrase, salt, keylen) {
   return scryptSync(passphrase, salt, keylen);
 }
 
-module.exports = {
+// 11. sign
+function sign(algorithm, message, privateKey) {
+  const pair = nacl.sign.keyPair.fromSeed(privateKey.rawKey);
+  const signature = nacl.sign.detached(message, pair.secretKey);
+  return Buffer.from(signature);
+}
+
+// 12. verify
+function verify(algorithm, message, publicKey, signature) {
+  return nacl.sign.detached.verify(message, signature, publicKey.rawKey);
+}
+
+const _exports = {
   generateKeyPairSync,
   createPrivateKey,
   createPublicKey,
@@ -282,5 +325,32 @@ module.exports = {
   scryptSync,
   scryptAsync,
   createCipheriv,
-  createDecipheriv
+  createDecipheriv,
+  pbkdf2Sync,
+  sign,
+  verify
 };
+
+export {
+  generateKeyPairSync,
+  createPrivateKey,
+  createPublicKey,
+  diffieHellman,
+  randomBytes,
+  randomUUID,
+  hkdfSync,
+  createHmac,
+  scryptSync,
+  scryptAsync,
+  createCipheriv,
+  createDecipheriv,
+  pbkdf2Sync,
+  sign,
+  verify
+};
+
+export default _exports;
+
+if (typeof module !== 'undefined') {
+  module.exports = _exports;
+}

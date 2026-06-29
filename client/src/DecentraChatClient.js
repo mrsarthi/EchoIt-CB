@@ -1,5 +1,5 @@
 const io = require('socket.io-client');
-const { Wallet, verifyMessage } = require('ethers');
+const { Wallet, verifyMessage, keccak256 } = require('ethers');
 const crypto = require('crypto');
 const EventEmitter = require('events');
 const http = require('http');
@@ -13,6 +13,46 @@ const {
   encryptAES_GCM,
   decryptAES_GCM
 } = require('./cryptography');
+
+function verifyEd25519Signature(message, signatureHex, publicKeyHex) {
+  try {
+    const publicKey = crypto.createPublicKey({
+      key: Buffer.from(publicKeyHex, 'hex'),
+      format: 'der',
+      type: 'spki'
+    });
+    return crypto.verify(null, Buffer.from(message), publicKey, Buffer.from(signatureHex, 'hex'));
+  } catch (e) {
+    console.error("[SDK verifyEd25519Signature] error:", e.message);
+    return false;
+  }
+}
+
+const { argon2id } = require('hash-wasm');
+
+async function solvePuzzle(challenge, targetHash) {
+  const saltBytes = Buffer.from(challenge, 'hex');
+  
+  for (let i = 1; i <= 100; i++) {
+    const password = `${challenge}:${i}`;
+    const hashBytes = await argon2id({
+      password: password,
+      salt: saltBytes,
+      iterations: 2,
+      memorySize: 16384, // 16MB
+      parallelism: 1,
+      hashLength: 32,
+      outputType: 'hex'
+    });
+    
+    if (hashBytes === targetHash) {
+      return i;
+    }
+  }
+  
+  throw new Error("Failed to solve puzzle: target hash match not found.");
+}
+
 
 // Helper to make JSON POST requests using native node HTTP modules or browser fetch
 function postJSON(urlStr, data) {
@@ -124,7 +164,9 @@ class DecentraChatClient extends EventEmitter {
     }
 
     // 1. Generate local pre-key bundle
-    const identityKeypair = generateX25519();
+    const identityKeypair = (this.wallet.encryptionPrivate && this.wallet.encryptionPublic) 
+      ? { privateKey: this.wallet.encryptionPrivate, publicKey: this.wallet.encryptionPublic }
+      : generateX25519();
     const signedPreKeypair = generateX25519();
     const preKeySignature = await this.wallet.signMessage(signedPreKeypair.publicKey);
 
@@ -143,10 +185,21 @@ class DecentraChatClient extends EventEmitter {
     
     const registrationResult = await new Promise((resolve, reject) => {
       tempSocket.on('connect', () => {
-        tempSocket.emit('requestChallenge', async (challenge) => {
-          if (!challenge) {
+        tempSocket.emit('requestChallenge', async (puzzle) => {
+          if (!puzzle || !puzzle.challenge || !puzzle.targetHash || !puzzle.proofToken) {
             tempSocket.close();
-            return reject(new Error("Relay server returned an empty challenge."));
+            return reject(new Error("Relay server returned an empty or invalid challenge puzzle."));
+          }
+
+          const { challenge, targetHash, proofToken } = puzzle;
+
+          // Solve the puzzle to find the secret number
+          let secretNumber;
+          try {
+            secretNumber = await solvePuzzle(challenge, targetHash);
+          } catch (err) {
+            tempSocket.close();
+            return reject(new Error("Failed to solve cryptographic puzzle: " + err.message));
           }
 
           // Sign the registration authorization challenge
@@ -159,7 +212,10 @@ class DecentraChatClient extends EventEmitter {
             signedPreKey: signedPreKeypair.publicKey,
             preKeySignature,
             challenge,
-            signature
+            signature,
+            publicKey: this.wallet.identityPublic,
+            secretNumber,
+            proofToken
           }, async (res) => {
             tempSocket.close();
             if (res.success) {
@@ -204,10 +260,21 @@ class DecentraChatClient extends EventEmitter {
 
     const loginResult = await new Promise((resolve, reject) => {
       tempSocket.on('connect', () => {
-        tempSocket.emit('requestChallenge', async (challenge) => {
-          if (!challenge) {
+        tempSocket.emit('requestChallenge', async (puzzle) => {
+          if (!puzzle || !puzzle.challenge || !puzzle.targetHash || !puzzle.proofToken) {
             tempSocket.close();
-            return reject(new Error("Relay server returned an empty challenge."));
+            return reject(new Error("Relay server returned an empty or invalid challenge puzzle."));
+          }
+
+          const { challenge, targetHash, proofToken } = puzzle;
+
+          // Solve the puzzle to find the secret number
+          let secretNumber;
+          try {
+            secretNumber = await solvePuzzle(challenge, targetHash);
+          } catch (err) {
+            tempSocket.close();
+            return reject(new Error("Failed to solve cryptographic puzzle: " + err.message));
           }
 
           // Sign the login challenge using session prefix
@@ -216,7 +283,10 @@ class DecentraChatClient extends EventEmitter {
           tempSocket.emit('loginWithSignature', {
             address: this.address,
             challenge,
-            signature
+            signature,
+            publicKey: this.wallet.identityPublic,
+            secretNumber,
+            proofToken
           }, async (res) => {
             tempSocket.close();
             if (res.success) {
@@ -280,10 +350,21 @@ class DecentraChatClient extends EventEmitter {
 
     const loginResult = await new Promise((resolve, reject) => {
       tempSocket.on('connect', () => {
-        tempSocket.emit('requestChallenge', async (challenge) => {
-          if (!challenge) {
+        tempSocket.emit('requestChallenge', async (puzzle) => {
+          if (!puzzle || !puzzle.challenge || !puzzle.targetHash || !puzzle.proofToken) {
             tempSocket.close();
-            return reject(new Error("Relay server returned an empty challenge."));
+            return reject(new Error("Relay server returned an empty or invalid challenge puzzle."));
+          }
+
+          const { challenge, targetHash, proofToken } = puzzle;
+
+          // Solve the puzzle to find the secret number
+          let secretNumber;
+          try {
+            secretNumber = await solvePuzzle(challenge, targetHash);
+          } catch (err) {
+            tempSocket.close();
+            return reject(new Error("Failed to solve cryptographic puzzle: " + err.message));
           }
 
           // Sign the login challenge using session prefix
@@ -292,7 +373,10 @@ class DecentraChatClient extends EventEmitter {
           tempSocket.emit('loginWithSignature', {
             address: this.address,
             challenge,
-            signature
+            signature,
+            publicKey: this.wallet.identityPublic,
+            secretNumber,
+            proofToken
           }, async (res) => {
             tempSocket.close();
             if (res.success) {
@@ -652,18 +736,53 @@ class DecentraChatClient extends EventEmitter {
         if (payloadObj && payloadObj.plaintext && payloadObj.signature) {
           if (payloadObj.sessionSigner && payloadObj.sessionDelegation) {
             // Verify delegated session key signature (1. Check delegation, 2. Check message)
-            const recoveredMain = verifyMessage(`Authorize Echo Session Key: ${payloadObj.sessionSigner}`, payloadObj.sessionDelegation);
+            let isDelegationValid = false;
+            if (payloadObj.sessionIdentityKey) {
+              const rawPubBytes = Buffer.from(payloadObj.sessionIdentityKey, 'hex').slice(-32);
+              const derivedAddr = '0x' + keccak256(rawPubBytes).slice(-40).toLowerCase();
+              if (derivedAddr === fromAddress.toLowerCase()) {
+                isDelegationValid = verifyEd25519Signature(
+                  `Authorize Echo Session Key: ${payloadObj.sessionSigner}`,
+                  payloadObj.sessionDelegation,
+                  payloadObj.sessionIdentityKey
+                );
+              }
+            } else {
+              // Legacy secp256k1 fallback
+              try {
+                const recoveredMain = verifyMessage(`Authorize Echo Session Key: ${payloadObj.sessionSigner}`, payloadObj.sessionDelegation);
+                isDelegationValid = recoveredMain.toLowerCase() === fromAddress.toLowerCase();
+              } catch (e) {
+                isDelegationValid = false;
+              }
+            }
+
             const recoveredMsg = verifyMessage(payloadObj.plaintext, payloadObj.signature);
             if (
-              recoveredMain.toLowerCase() !== fromAddress.toLowerCase() ||
+              !isDelegationValid ||
               recoveredMsg.toLowerCase() !== payloadObj.sessionSigner.toLowerCase()
             ) {
               signatureVerified = false;
             }
           } else {
-            // Standard direct signature (legacy format)
-            const recovered = verifyMessage(payloadObj.plaintext, payloadObj.signature);
-            if (recovered.toLowerCase() !== fromAddress.toLowerCase()) {
+            // Standard direct signature (legacy/direct format)
+            let isDirectSigValid = false;
+            // Try Ed25519 first if identity key is provided in a field
+            if (payloadObj.sessionIdentityKey) {
+              const rawPubBytes = Buffer.from(payloadObj.sessionIdentityKey, 'hex').slice(-32);
+              const derivedAddr = '0x' + keccak256(rawPubBytes).slice(-40).toLowerCase();
+              if (derivedAddr === fromAddress.toLowerCase()) {
+                isDirectSigValid = verifyEd25519Signature(payloadObj.plaintext, payloadObj.signature, payloadObj.sessionIdentityKey);
+              }
+            } else {
+              try {
+                const recovered = verifyMessage(payloadObj.plaintext, payloadObj.signature);
+                isDirectSigValid = recovered.toLowerCase() === fromAddress.toLowerCase();
+              } catch (e) {
+                isDirectSigValid = false;
+              }
+            }
+            if (!isDirectSigValid) {
               signatureVerified = false;
             }
           }
@@ -1010,8 +1129,14 @@ class DecentraChatClient extends EventEmitter {
       }
 
       try {
-        const recoveredAddress = verifyMessage(bundleResult.signedPreKey, bundleResult.preKeySignature);
-        if (recoveredAddress.toLowerCase() !== toAddress.toLowerCase()) {
+        const signingKey = bundleResult.identitySigningKey || bundleResult.identityKey;
+        const rawPubBytes = Buffer.from(signingKey, 'hex').slice(-32);
+        const derivedAddr = '0x' + keccak256(rawPubBytes).slice(-40).toLowerCase();
+        if (derivedAddr !== toAddress.toLowerCase()) {
+          throw new Error('Identity key does not hash to recipient address.');
+        }
+        const isPreKeySigValid = verifyEd25519Signature(bundleResult.signedPreKey, bundleResult.preKeySignature, signingKey);
+        if (!isPreKeySigValid) {
           throw new Error('Pre-key signature verification failed.');
         }
       } catch (err) {
@@ -1191,11 +1316,13 @@ class DecentraChatClient extends EventEmitter {
       const { privateKey, delegationSignature } = await this.getOrCreateSessionSigningKey();
       const localWallet = new Wallet(privateKey);
       const signature = await localWallet.signMessage(plaintext);
+      const identityPublic = this.wallet.identityPublic || await this.getMetadata('identity_public');
       authenticatedPayload = JSON.stringify({
         plaintext,
         signature,
         sessionSigner: localWallet.address,
-        sessionDelegation: delegationSignature
+        sessionDelegation: delegationSignature,
+        sessionIdentityKey: identityPublic
       });
     } catch (err) {
       console.warn("[Security] Delegated signing failed, falling back to plaintext:", err.message);

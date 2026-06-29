@@ -129,3 +129,17 @@ landing-page/
 # Temporary Git Dumps
 gitdiff.txt
 gitlog.txt
+
+# Privacy Policy Points
+privacy_policy_points.txt
+
+# Generated WASM Binaries
+public/*.wasm
+
+# Local Database Wipe Utility
+server/wipe_db.js
+
+# Playwright Tests & Config
+tests/
+playwright.config.js
+
