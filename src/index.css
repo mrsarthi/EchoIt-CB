@@ -1130,6 +1130,14 @@ input:checked + .slider:before {
   padding: 12px 16px 8px 16px !important;
   gap: 8px !important;
 }
+@media (max-width: 768px) {
+  .compact-view .middle-pane header {
+    padding-top: calc(env(safe-area-inset-top, 0px) + 28px) !important;
+    padding-bottom: 16px !important;
+    padding-left: 20px !important;
+    padding-right: 20px !important;
+  }
+}
 .compact-view .middle-pane h2 {
   font-size: 16px !important;
 }
