@@ -1035,6 +1035,8 @@ input:checked + .slider:before {
   }
   .mobile-bottom-nav {
     display: flex !important;
+    height: calc(60px + env(safe-area-inset-bottom, 0px) + 7px) !important;
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 7px) !important;
   }
   .settings-pane {
     padding: 20px;
@@ -1240,17 +1242,17 @@ input:checked + .slider:before {
   padding-top: calc(max(env(safe-area-inset-top, 0px), 28px) + 12px) !important;
 }
 .safe-footer {
-  padding-bottom: calc(max(env(safe-area-inset-bottom, 0px), 24px) + 12px) !important;
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 7px) !important;
 }
 .safe-bottom-nav {
-  height: calc(64px + max(env(safe-area-inset-bottom, 0px), 24px)) !important;
-  padding-bottom: max(env(safe-area-inset-bottom, 0px), 24px) !important;
+  height: calc(60px + env(safe-area-inset-bottom, 0px) + 7px) !important;
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 7px) !important;
 }
 .safe-pt {
   padding-top: max(env(safe-area-inset-top, 0px), 28px);
 }
 .safe-pb {
-  padding-bottom: max(env(safe-area-inset-bottom, 0px), 24px);
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 7px);
 }
 
 /* Animations */
