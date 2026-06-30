@@ -1229,7 +1229,7 @@ input:checked + .slider:before {
 
 /* Safe area padding utilities */
 .safe-header {
-  padding-top: calc(max(env(safe-area-inset-top, 0px), 16px) + 12px) !important;
+  padding-top: calc(max(env(safe-area-inset-top, 0px), 28px) + 12px) !important;
 }
 .safe-footer {
   padding-bottom: calc(max(env(safe-area-inset-bottom, 0px), 24px) + 12px) !important;
@@ -1239,7 +1239,7 @@ input:checked + .slider:before {
   padding-bottom: max(env(safe-area-inset-bottom, 0px), 24px) !important;
 }
 .safe-pt {
-  padding-top: max(env(safe-area-inset-top, 0px), 16px);
+  padding-top: max(env(safe-area-inset-top, 0px), 28px);
 }
 .safe-pb {
   padding-bottom: max(env(safe-area-inset-bottom, 0px), 24px);
