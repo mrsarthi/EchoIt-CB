@@ -5,6 +5,89 @@ import logo from './assets/logo.png';
 import SplashScreen from './SplashScreen';
 import { App as CapacitorApp } from '@capacitor/app';
 import QuickPinchZoom, { make3dTransformValue } from 'react-quick-pinch-zoom';
+import { Filesystem, Directory } from '@capacitor/filesystem';
+
+// --- Standard IndexedDB Media Cache Helper ---
+const initMediaDB = () => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('DecentraChatMediaCache', 1);
+    request.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains('media')) {
+        db.createObjectStore('media');
+      }
+    };
+    request.onsuccess = (e) => resolve(e.target.result);
+    request.onerror = (e) => reject(e.target.error);
+  });
+};
+
+const getCachedMedia = async (mediaId) => {
+  try {
+    const db = await initMediaDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction('media', 'readonly');
+      const store = transaction.objectStore('media');
+      const request = store.get(mediaId);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  } catch (err) {
+    console.error("IndexedDB get error:", err);
+    return null;
+  }
+};
+
+const setCachedMedia = async (mediaId, blob) => {
+  try {
+    const db = await initMediaDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction('media', 'readwrite');
+      const store = transaction.objectStore('media');
+      const request = store.put(blob, mediaId);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  } catch (err) {
+    console.error("IndexedDB put error:", err);
+  }
+};
+
+// --- Multi-platform file download/save helper ---
+const saveMediaToDevice = async (blob, filename) => {
+  if (window.Capacitor?.isNativePlatform()) {
+    try {
+      const reader = new FileReader();
+      reader.readAsDataURL(blob);
+      reader.onloadend = async () => {
+        try {
+          const base64Data = reader.result.split(',')[1];
+          const result = await Filesystem.writeFile({
+            path: filename,
+            data: base64Data,
+            directory: Directory.Documents,
+          });
+          alert(`Saved successfully to Documents: ${filename}`);
+        } catch (err) {
+          console.error("Filesystem save error:", err);
+          alert("Error saving file: " + err.message);
+        }
+      };
+    } catch (err) {
+      console.error("Capacitor save error:", err);
+      alert("Error saving file: " + err.message);
+    }
+  } else {
+    // Browser download
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+};
 
 const getMetaMaskLink = () => {
   if (typeof window !== 'undefined' && window.location) {
@@ -85,6 +168,39 @@ function App() {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  useEffect(() => {
+    const loadCachedMedia = async () => {
+      const mediaToLoad = [];
+      messages.forEach(msg => {
+        if (msg.media_metadata) {
+          try {
+            const mediaObj = typeof msg.media_metadata === 'string' 
+              ? JSON.parse(msg.media_metadata) 
+              : msg.media_metadata;
+            if (mediaObj && mediaObj.mediaId && !mediaCache[mediaObj.mediaId]) {
+              mediaToLoad.push(mediaObj);
+            }
+          } catch (e) {}
+        }
+      });
+      
+      if (mediaToLoad.length === 0) return;
+      
+      for (const mediaObj of mediaToLoad) {
+        const cachedBlob = await getCachedMedia(mediaObj.mediaId);
+        if (cachedBlob) {
+          const url = URL.createObjectURL(cachedBlob);
+          setMediaCache(prev => ({ 
+            ...prev, 
+            [mediaObj.mediaId]: { url, name: mediaObj.mediaId } 
+          }));
+        }
+      }
+    };
+    
+    loadCachedMedia();
+  }, [messages]);
+
 
 
   const mediaUploadControllerRef = useRef(null);
@@ -110,6 +226,9 @@ function App() {
   const [backupPassphrase, setBackupPassphrase] = useState('');
   const [backupJSON, setBackupJSON] = useState('');
   const [activeLightboxUrl, setActiveLightboxUrl] = useState(null);
+  const [activeLightboxMimeType, setActiveLightboxMimeType] = useState(null);
+  const [activeLightboxName, setActiveLightboxName] = useState(null);
+  const [activeLightboxId, setActiveLightboxId] = useState(null);
   const [isDerivingKey, setIsDerivingKey] = useState(false);
 
   // Profile Hub States
@@ -541,13 +660,11 @@ function App() {
 
       setMediaCache(prev => ({ ...prev, [mediaId]: { url, name: mediaId } }));
 
-      if (!mimeType.startsWith('image/')) {
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `file_${mediaId.substring(6, 12)}.${mimeType.split('/')[1] || 'bin'}`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+      // Cache the blob locally in IndexedDB
+      await setCachedMedia(mediaId, blob);
+
+      if (!mimeType.startsWith('image/') && !mimeType.startsWith('video/')) {
+        await saveMediaToDevice(blob, `file_${mediaId.substring(6, 12)}.${mimeType.split('/')[1] || 'bin'}`);
       }
     } catch (err) {
       console.error("Media download failed:", err);
@@ -1978,8 +2095,31 @@ function App() {
                                     src={mediaCache[mediaObj.mediaId].url} 
                                     alt="Attachment" 
                                     style={{ maxWidth: '100%', maxHeight: '240px', display: 'block', cursor: 'zoom-in' }} 
-                                    onClick={() => setActiveLightboxUrl(mediaCache[mediaObj.mediaId].url)}
+                                    onClick={() => {
+                                      setActiveLightboxUrl(mediaCache[mediaObj.mediaId].url);
+                                      setActiveLightboxMimeType(mediaObj.mimeType);
+                                      setActiveLightboxName(`file_${mediaObj.mediaId.substring(6, 12)}.${mediaObj.mimeType.split('/')[1] || 'bin'}`);
+                                      setActiveLightboxId(mediaObj.mediaId);
+                                    }}
                                   />
+                                </div>
+                              ) : mediaObj.mimeType.startsWith('video/') ? (
+                                <div style={{ marginTop: '4px', borderRadius: '12px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)', position: 'relative' }}>
+                                  <video 
+                                    src={mediaCache[mediaObj.mediaId].url} 
+                                    style={{ maxWidth: '100%', maxHeight: '240px', display: 'block', cursor: 'zoom-in' }} 
+                                    onClick={() => {
+                                      setActiveLightboxUrl(mediaCache[mediaObj.mediaId].url);
+                                      setActiveLightboxMimeType(mediaObj.mimeType);
+                                      setActiveLightboxName(`file_${mediaObj.mediaId.substring(6, 12)}.${mediaObj.mimeType.split('/')[1] || 'bin'}`);
+                                      setActiveLightboxId(mediaObj.mediaId);
+                                    }}
+                                  />
+                                  <div 
+                                    style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.3)', pointerEvents: 'none' }}
+                                  >
+                                    <span className="material-symbols-outlined" style={{ fontSize: '48px', color: '#ffffff' }}>play_circle</span>
+                                  </div>
                                 </div>
                               ) : (
                                 <div style={{
@@ -1992,13 +2132,11 @@ function App() {
                                   borderRadius: '12px',
                                   padding: '12px 16px',
                                   cursor: 'pointer'
-                                }} onClick={() => {
-                                  const a = document.createElement('a');
-                                  a.href = mediaCache[mediaObj.mediaId].url;
-                                  a.download = `file_${mediaObj.mediaId.substring(6, 12)}.${mediaObj.mimeType.split('/')[1] || 'bin'}`;
-                                  document.body.appendChild(a);
-                                  a.click();
-                                  document.body.removeChild(a);
+                                }} onClick={async () => {
+                                  const dbBlob = await getCachedMedia(mediaObj.mediaId) || await fetch(mediaCache[mediaObj.mediaId].url).then(r => r.blob());
+                                  if (dbBlob) {
+                                    await saveMediaToDevice(dbBlob, `file_${mediaObj.mediaId.substring(6, 12)}.${mediaObj.mimeType.split('/')[1] || 'bin'}`);
+                                  }
                                 }}>
                                   <span className="material-symbols-outlined" style={{ fontSize: '32px', color: 'var(--accent-indigo)' }}>description</span>
                                   <div style={{ flex: 1, overflow: 'hidden', textAlign: 'left' }}>
@@ -3269,7 +3407,7 @@ function App() {
                 attachments.forEach(msg => {
                   const mediaObj = typeof msg.media_metadata === 'string' ? JSON.parse(msg.media_metadata) : msg.media_metadata;
                   const isCached = mediaCache[mediaObj.mediaId] !== undefined;
-                  const isImage = mediaObj.mimeType.startsWith('image/');
+                  const isImage = mediaObj.mimeType.startsWith('image/') || mediaObj.mimeType.startsWith('video/');
                   const item = {
                     msgId: msg.id,
                     mediaObj,
@@ -3291,7 +3429,7 @@ function App() {
                     {images.length > 0 && (
                       <div>
                         <div style={{ fontSize: '11px', color: 'var(--text-secondary)', textTransform: 'uppercase', tracking: '0.05em', fontWeight: 'bold', marginBottom: '10px', textAlign: 'left' }}>
-                          Images ({images.length})
+                          Media ({images.length})
                         </div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
                           {images.map(item => {
@@ -3311,15 +3449,34 @@ function App() {
                                   justifyContent: 'center',
                                   cursor: isCached ? 'pointer' : 'default'
                                 }}
-                                onClick={() => isCached && setActiveLightboxUrl(mediaCache[mediaObj.mediaId].url)}
-                                title={isCached ? 'Open Image' : 'Download to Decrypt'}
+                                onClick={() => {
+                                  if (isCached) {
+                                    setActiveLightboxUrl(mediaCache[mediaObj.mediaId].url);
+                                    setActiveLightboxMimeType(mediaObj.mimeType);
+                                    setActiveLightboxName(`file_${mediaObj.mediaId.substring(6, 12)}.${mediaObj.mimeType.split('/')[1] || 'bin'}`);
+                                    setActiveLightboxId(mediaObj.mediaId);
+                                  }
+                                }}
+                                title={isCached ? 'Open Media' : 'Download to Decrypt'}
                               >
                                 {isCached ? (
-                                  <img 
-                                    src={mediaCache[mediaObj.mediaId].url} 
-                                    alt="" 
-                                    style={{ width: '100%', height: '100%', objectFit: 'cover' }} 
-                                  />
+                                  mediaObj.mimeType.startsWith('video/') ? (
+                                    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+                                      <video 
+                                        src={mediaCache[mediaObj.mediaId].url} 
+                                        style={{ width: '100%', height: '100%', objectFit: 'cover' }} 
+                                      />
+                                      <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.2)' }}>
+                                        <span className="material-symbols-outlined" style={{ fontSize: '20px', color: '#ffffff' }}>play_circle</span>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <img 
+                                      src={mediaCache[mediaObj.mediaId].url} 
+                                      alt="" 
+                                      style={{ width: '100%', height: '100%', objectFit: 'cover' }} 
+                                    />
+                                  )
                                 ) : (
                                   <div 
                                     style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', padding: '8px', width: '100%', height: '100%', justifyContent: 'center' }}
@@ -3714,7 +3871,7 @@ function App() {
         </div>
       )}
 
-      {/* Lightbox Modal */}
+      {/* Redesigned Fullscreen WhatsApp-style Media Viewer */}
       {activeLightboxUrl && (
         <div 
           style={{
@@ -3723,65 +3880,96 @@ function App() {
             left: 0,
             right: 0,
             bottom: 0,
-            backgroundColor: 'rgba(0, 0, 0, 0.92)',
-            backdropFilter: 'blur(8px)',
+            backgroundColor: '#000000',
             zIndex: 9999,
             display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: 'zoom-out'
+            flexDirection: 'column',
           }}
-          onClick={() => setActiveLightboxUrl(null)}
         >
-          <div onClick={(e) => e.stopPropagation()} style={{ width: '90vw', height: '90vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <QuickPinchZoom
-              onUpdate={({ x, y, scale }) => {
-                if (lightboxImgRef.current) {
-                  lightboxImgRef.current.style.transform = make3dTransformValue({ x, y, scale });
+          {/* Header Overlay Bar */}
+          <div style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            height: '60px',
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: `calc(env(safe-area-inset-top, 0px) + 8px) 16px 8px 16px`,
+            zIndex: 10000
+          }}>
+            <button 
+              type="button" 
+              onClick={() => {
+                setActiveLightboxUrl(null);
+                setActiveLightboxMimeType(null);
+                setActiveLightboxName(null);
+                setActiveLightboxId(null);
+              }}
+              style={{ background: 'none', border: 'none', color: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '8px' }}
+            >
+              <span className="material-symbols-outlined">arrow_back</span>
+            </button>
+            <div style={{ color: '#ffffff', fontSize: '15px', fontWeight: 'bold', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap', flex: 1, marginLeft: '12px', textAlign: 'left' }}>
+              {activeLightboxName || 'Media Viewer'}
+            </div>
+            <button 
+              type="button" 
+              onClick={async (e) => {
+                e.stopPropagation();
+                try {
+                  const dbBlob = await getCachedMedia(activeLightboxId) || await fetch(activeLightboxUrl).then(r => r.blob());
+                  if (dbBlob) {
+                    await saveMediaToDevice(dbBlob, activeLightboxName || 'downloaded_file');
+                  } else {
+                    alert("Media file not found.");
+                  }
+                } catch (err) {
+                  alert("Download failed: " + err.message);
                 }
               }}
-              tapZoomFactor={2}
+              style={{ background: 'none', border: 'none', color: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '8px' }}
             >
-              <img 
-                ref={lightboxImgRef}
-                src={activeLightboxUrl} 
-                alt="Enlarged Media" 
-                style={{ 
-                  maxWidth: '100%', 
-                  maxHeight: '100%', 
-                  objectFit: 'contain',
-                  borderRadius: '12px',
-                  boxShadow: '0 20px 50px rgba(0,0,0,0.5)'
-                }}
-              />
-            </QuickPinchZoom>
+              <span className="material-symbols-outlined">download</span>
+            </button>
           </div>
-          <button 
-            style={{
-              position: 'absolute',
-              top: '24px',
-              right: '24px',
-              background: 'rgba(255,255,255,0.1)',
-              border: 'none',
-              borderRadius: '50%',
-              width: '40px',
-              height: '40px',
-              color: 'white',
-              fontSize: '18px',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              zIndex: 10000,
-              boxShadow: '0 4px 12px rgba(0,0,0,0.2)'
-            }}
-            onClick={(e) => {
-              e.stopPropagation();
-              setActiveLightboxUrl(null);
-            }}
-          >
-            ✕
-          </button>
+
+          {/* Media Viewport */}
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }}>
+            {activeLightboxMimeType?.startsWith('video/') ? (
+              <video 
+                src={activeLightboxUrl} 
+                controls 
+                autoPlay 
+                style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} 
+              />
+            ) : (
+              <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <QuickPinchZoom
+                  onUpdate={({ x, y, scale }) => {
+                    if (lightboxImgRef.current) {
+                      lightboxImgRef.current.style.transform = make3dTransformValue({ x, y, scale });
+                    }
+                  }}
+                  tapZoomFactor={2}
+                  style={{ width: '100%', height: '100%' }}
+                >
+                  <img 
+                    ref={lightboxImgRef}
+                    src={activeLightboxUrl} 
+                    alt="Enlarged Media" 
+                    style={{ 
+                      maxWidth: '100%', 
+                      maxHeight: '100%', 
+                      objectFit: 'contain'
+                    }}
+                  />
+                </QuickPinchZoom>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
