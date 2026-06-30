@@ -794,6 +794,19 @@ export const DecentraChatProvider = ({ children }) => {
     }
   };
 
+  // Delete a contact and its E2EE session data locally
+  const deleteContact = async (conversationId) => {
+    if (!client) throw new Error("Client is offline or uninitialized.");
+    try {
+      await client.deleteConversation(conversationId);
+      await refreshData(client);
+    } catch (err) {
+      console.error("[Context] Delete contact error:", err.message);
+      setError("Failed to delete contact: " + err.message);
+      throw err;
+    }
+  };
+
   // Send media file message
   const sendMediaMessage = async (recipientAddress, fileBuffer, mimeType, onProgress = null) => {
     if (!client) throw new Error("Client is offline or uninitialized.");
@@ -989,6 +1002,7 @@ export const DecentraChatProvider = ({ children }) => {
         setActiveConversationId,
         registerUser,
         sendDirectMessage,
+        deleteContact,
         sendMediaMessage,
         downloadMedia,
         sendGroupMessage,

@@ -116,6 +116,7 @@ function App() {
     setActiveConversationId,
     registerUser,
     sendDirectMessage,
+    deleteContact,
     sendMediaMessage,
     downloadMedia,
     sendGroupMessage,
@@ -679,23 +680,33 @@ function App() {
   };
 
 
-  // Mock contacts list to match the Stitch Contacts view
-  const mockContacts = [
-    { address: '0x446662f42ad4f3cc86fd25764970644744ded851', username: 'crypto_sentinel' },
-    { address: '0x8a92f0367a941ac9da783606853c85da03a202b5', username: 'aria_vance' },
-    { address: '0x2bfd3ede922f3bd3c6b837f21f7e7b9e41daa943', username: 'alex_rivera' }
-  ];
+  // Mock contacts list is cleared to remove testing contacts (crypto_sentinel, etc.)
+  const mockContacts = [];
 
   const getCombinedContacts = () => {
     const list = [];
+    const seenAddresses = new Set();
+    const seenUsernames = new Set();
+
+    const addUnique = (item) => {
+      const addrKey = item.address.toLowerCase();
+      const userKey = item.username?.toLowerCase() || '';
+
+      if (seenAddresses.has(addrKey)) return;
+      if (userKey && seenUsernames.has(userKey)) return;
+
+      list.push(item);
+      seenAddresses.add(addrKey);
+      if (userKey) seenUsernames.add(userKey);
+    };
     
     // Add real DM conversation contacts
     conversations.forEach(c => {
       if (c.is_group !== 1) {
         const cached = usernameCache[c.id.toLowerCase()];
-        list.push({ 
+        addUnique({ 
           address: c.id, 
-          username: cached?.username || c.username,
+          username: cached?.username || c.username || c.id,
           hide_wallet: cached ? cached.hideWallet : c.hide_wallet,
           bio: (cached && cached.bio !== undefined) ? cached.bio : (c.bio || ''),
           pfp: (cached && cached.pfp !== undefined) ? cached.pfp : (c.pfp || null)
@@ -703,30 +714,15 @@ function App() {
       }
     });
 
-    // Add mock contacts if not already present
-    mockContacts.forEach(mc => {
-      if (!list.some(item => item.address.toLowerCase() === mc.address.toLowerCase())) {
-        list.push({
-          address: mc.address,
-          username: mc.username,
-          hide_wallet: false,
-          bio: 'Crypto enthusiast',
-          pfp: null
-        });
-      }
-    });
-
     // Add any other cached entries not yet in the list
     Object.keys(usernameCache).forEach(addr => {
-      if (!list.some(item => item.address.toLowerCase() === addr.toLowerCase())) {
-        list.push({
-          address: addr,
-          username: usernameCache[addr].username,
-          hide_wallet: usernameCache[addr].hideWallet,
-          bio: '',
-          pfp: null
-        });
-      }
+      addUnique({
+        address: addr,
+        username: usernameCache[addr].username,
+        hide_wallet: usernameCache[addr].hideWallet,
+        bio: usernameCache[addr].bio || '',
+        pfp: usernameCache[addr].pfp || null
+      });
     });
 
     return list;
@@ -1785,7 +1781,7 @@ function App() {
                             contact.username.substring(0, 2).toUpperCase()
                           )}
                         </div>
-                        <div className="conv-details">
+                        <div className="conv-details" style={{ flex: 1 }}>
                           <div className="conv-top">
                             <span className="conv-name" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                               @{contact.username}
@@ -1796,6 +1792,36 @@ function App() {
                             {contact.bio || (contact.hide_wallet ? 'Address Hidden' : truncateAddress(contact.address))}
                           </div>
                         </div>
+                        <button
+                          type="button"
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            color: 'var(--accent-rose)',
+                            cursor: 'pointer',
+                            padding: '8px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            borderRadius: '50%'
+                          }}
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            if (window.confirm(`Are you sure you want to delete @${contact.username} from your contacts? This will permanently delete the conversation and all message history.`)) {
+                              try {
+                                await deleteContact(contact.address);
+                                if (activeConversationId?.toLowerCase() === contact.address.toLowerCase() || 
+                                    activeConversationId?.toLowerCase() === contact.username.toLowerCase()) {
+                                  setActiveConversationId(null);
+                                }
+                              } catch (err) {
+                                alert("Failed to delete contact: " + err.message);
+                              }
+                            }
+                          }}
+                        >
+                          <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>delete</span>
+                        </button>
                       </div>
                     ))}
                   </div>
@@ -1826,7 +1852,7 @@ function App() {
                       contact.username.substring(0, 2).toUpperCase()
                     )}
                   </div>
-                  <div className="conv-details">
+                  <div className="conv-details" style={{ flex: 1 }}>
                     <div className="conv-top">
                       <span className="conv-name">@{contact.username}</span>
                     </div>
@@ -1834,6 +1860,36 @@ function App() {
                       {contact.bio || (contact.hide_wallet ? 'Address Hidden' : truncateAddress(contact.address))}
                     </div>
                   </div>
+                  <button
+                    type="button"
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--accent-rose)',
+                      cursor: 'pointer',
+                      padding: '8px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      borderRadius: '50%'
+                    }}
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      if (window.confirm(`Are you sure you want to delete @${contact.username} from your contacts? This will permanently delete the conversation and all message history.`)) {
+                        try {
+                          await deleteContact(contact.address);
+                          if (activeConversationId?.toLowerCase() === contact.address.toLowerCase() || 
+                              activeConversationId?.toLowerCase() === contact.username.toLowerCase()) {
+                            setActiveConversationId(null);
+                          }
+                        } catch (err) {
+                          alert("Failed to delete contact: " + err.message);
+                        }
+                      }
+                    }}
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>delete</span>
+                  </button>
                 </div>
               ))
             )}

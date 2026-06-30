@@ -361,11 +361,27 @@ try {
           else if (cleanSql.includes('DELETE FROM key_metadata')) {
             self.tables.key_metadata = [];
           }
+          else if (cleanSql.includes('DELETE FROM conversations WHERE id = ?')) {
+            const [id] = args;
+            self.tables.conversations = self.tables.conversations.filter(r => r.id !== id);
+          }
           else if (cleanSql.includes('DELETE FROM conversations')) {
             self.tables.conversations = [];
           }
+          else if (cleanSql.includes('DELETE FROM messages WHERE conversation_id = ?')) {
+            const [conversation_id] = args;
+            self.tables.messages = self.tables.messages.filter(r => r.conversation_id !== conversation_id);
+          }
           else if (cleanSql.includes('DELETE FROM messages')) {
             self.tables.messages = [];
+          }
+          else if (cleanSql.includes('DELETE FROM ratchet_sessions WHERE peer_address = ?')) {
+            const [peer_address] = args;
+            self.tables.ratchet_sessions = self.tables.ratchet_sessions.filter(r => r.peer_address !== peer_address);
+          }
+          else if (cleanSql.includes('DELETE FROM skipped_message_keys WHERE peer_address = ?') && args.length === 1) {
+            const [peer_address] = args;
+            self.tables.skipped_message_keys = self.tables.skipped_message_keys.filter(r => r.peer_address !== peer_address);
           }
           else if (cleanSql.includes('DELETE FROM groups')) {
             self.tables.groups = [];

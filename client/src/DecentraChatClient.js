@@ -1661,6 +1661,15 @@ class DecentraChatClient extends EventEmitter {
     };
   }
 
+  async deleteConversation(conversationId) {
+    await this.db.write(db => {
+      db.prepare('DELETE FROM conversations WHERE id = ?').run(conversationId);
+      db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(conversationId);
+      db.prepare('DELETE FROM ratchet_sessions WHERE peer_address = ?').run(conversationId);
+      db.prepare('DELETE FROM skipped_message_keys WHERE peer_address = ?').run(conversationId);
+    });
+  }
+
   // Close databases and disconnect sockets
   async disconnect() {
     if (this.socket) {
