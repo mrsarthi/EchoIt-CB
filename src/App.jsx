@@ -73,9 +73,14 @@ function App() {
     resetWallet
   } = useDecentraChat();
 
-  const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
+  const [isMobile, setIsMobile] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return window.innerWidth <= 768 || !!window.Capacitor?.isNativePlatform();
+    }
+    return false;
+  });
   useEffect(() => {
-    const handleResize = () => setIsMobile(window.innerWidth <= 768);
+    const handleResize = () => setIsMobile(window.innerWidth <= 768 || !!window.Capacitor?.isNativePlatform());
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
@@ -154,6 +159,7 @@ function App() {
   // Modal visibility states
   const [showDMModal, setShowDMModal] = useState(false);
   const [showGroupModal, setShowGroupModal] = useState(false);
+  const [showNewChatMenu, setShowNewChatMenu] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showInfoModal, setShowInfoModal] = useState(false);
@@ -243,6 +249,7 @@ function App() {
         if (showInfoModal) setShowInfoModal(false);
         else if (showGroupModal) setShowGroupModal(false);
         else if (showDMModal) setShowDMModal(false);
+        else if (showNewChatMenu) setShowNewChatMenu(false);
         else if (showProfileModal) setShowProfileModal(false);
         else if (showExportModal) setShowExportModal(false);
         else if (showImportModal) setShowImportModal(false);
@@ -261,6 +268,7 @@ function App() {
     showInfoModal,
     showGroupModal,
     showDMModal,
+    showNewChatMenu,
     showProfileModal,
     showExportModal,
     showImportModal,
@@ -1530,9 +1538,9 @@ function App() {
             <button 
               className="fixed shadow-lg flex items-center justify-center hover:scale-105 active:scale-95 duration-100"
               style={{ position: 'fixed', right: '24px', bottom: '80px', width: '56px', height: '56px', backgroundColor: 'var(--accent-indigo)', color: '#ffffff', borderRadius: '50%', border: 'none', cursor: 'pointer', zIndex: 40 }}
-              onClick={() => setShowDMModal(true)}
+              onClick={() => setShowNewChatMenu(true)}
             >
-              <span className="material-symbols-outlined" style={{ fontSize: '28px' }}>chat</span>
+              <span className="material-symbols-outlined" style={{ fontSize: '28px' }}>add</span>
             </button>
           )}
         </section>
@@ -2768,6 +2776,49 @@ function App() {
       </div>
 
       {/* Modals Implementations */}
+      {/* Start Conversation Choice Modal */}
+      {showNewChatMenu && (
+        <div className="modal-overlay" onClick={() => setShowNewChatMenu(false)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '340px', padding: '24px' }}>
+            <div className="modal-header" style={{ marginBottom: '16px', textAlign: 'center' }}>Start Conversation</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <button 
+                type="button"
+                className="confirm-btn"
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', padding: '14px', fontSize: '15px' }}
+                onClick={() => {
+                  setShowNewChatMenu(false);
+                  setShowDMModal(true);
+                }}
+              >
+                <span className="material-symbols-outlined">chat</span>
+                Direct Message
+              </button>
+              <button 
+                type="button"
+                className="confirm-btn"
+                style={{ background: 'var(--accent-emerald)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', padding: '14px', fontSize: '15px' }}
+                onClick={() => {
+                  setShowNewChatMenu(false);
+                  setShowGroupModal(true);
+                }}
+              >
+                <span className="material-symbols-outlined">group</span>
+                Create Group Chat
+              </button>
+              <button 
+                type="button"
+                className="cancel-btn"
+                style={{ marginTop: '4px', padding: '12px' }}
+                onClick={() => setShowNewChatMenu(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showDMModal && (
         <div className="modal-overlay">
           <div className="modal-card">
