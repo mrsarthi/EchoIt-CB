@@ -2240,10 +2240,10 @@ function App() {
                   )}
 
                   {isMobile ? (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', width: '100%' }}>
                       <button 
                         type="button" 
-                        style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: 'var(--bg-elevated)', border: '1px solid var(--border-light)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
+                        style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: 'var(--bg-elevated)', border: '1px solid var(--border-light)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
                         onClick={() => document.getElementById('mobile-file-input').click()}
                         disabled={!connected}
                       >
@@ -2256,7 +2256,7 @@ function App() {
                         onChange={handleFileChange}
                         disabled={!connected}
                       />
-                      <div style={{ flex: 1, position: 'relative', display: 'flex', alignItems: 'center', backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-light)', borderRadius: '24px', padding: '0 16px' }}>
+                      <div style={{ flex: 1, minWidth: 0, position: 'relative', display: 'flex', alignItems: 'center', backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-light)', borderRadius: '24px', padding: '0 16px' }}>
                         <input 
                           type="text"
                           className="chat-input-field"
@@ -2264,11 +2264,11 @@ function App() {
                           value={inputText}
                           onChange={(e) => setInputText(e.target.value)}
                           disabled={!connected}
-                          style={{ flex: 1, background: 'none', border: 'none', outline: 'none', color: 'var(--text-primary)', fontSize: '15px', padding: '12px 0' }}
+                          style={{ flex: 1, minWidth: 0, background: 'none', border: 'none', outline: 'none', color: 'var(--text-primary)', fontSize: '15px', padding: '12px 0' }}
                         />
                         <button 
                           type="button" 
-                          style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', paddingLeft: '8px' }}
+                          style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', paddingLeft: '8px', flexShrink: 0 }}
                           onClick={() => setShowEmojiPicker(!showEmojiPicker)}
                         >
                           <span className="material-symbols-outlined">sentiment_satisfied</span>
@@ -2305,7 +2305,8 @@ function App() {
                           alignItems: 'center',
                           justifyContent: 'center',
                           cursor: 'pointer',
-                          boxShadow: '0 4px 12px rgba(129, 140, 248, 0.3)'
+                          boxShadow: '0 4px 12px rgba(129, 140, 248, 0.3)',
+                          flexShrink: 0
                         }}
                       >
                         <span className="material-symbols-outlined" style={{ fontVariationSettings: "'FILL' 1" }}>

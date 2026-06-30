@@ -1226,20 +1226,20 @@ input:checked + .slider:before {
 
 /* Safe area padding utilities */
 .safe-header {
-  padding-top: calc(env(safe-area-inset-top, 0px) + 12px) !important;
+  padding-top: calc(max(env(safe-area-inset-top, 0px), 36px) + 12px) !important;
 }
 .safe-footer {
-  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 12px) !important;
+  padding-bottom: calc(max(env(safe-area-inset-bottom, 0px), 24px) + 12px) !important;
 }
 .safe-bottom-nav {
-  height: calc(64px + env(safe-area-inset-bottom, 0px)) !important;
-  padding-bottom: env(safe-area-inset-bottom, 0px) !important;
+  height: calc(64px + max(env(safe-area-inset-bottom, 0px), 24px)) !important;
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 24px) !important;
 }
 .safe-pt {
-  padding-top: env(safe-area-inset-top, 0px);
+  padding-top: max(env(safe-area-inset-top, 0px), 36px);
 }
 .safe-pb {
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 24px);
 }
 
 /* Animations */
