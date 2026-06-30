@@ -80,51 +80,7 @@ function App() {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  useEffect(() => {
-    if (typeof window !== 'undefined' && window.Capacitor?.isNativePlatform()) {
-      const handleBackButton = CapacitorApp.addListener('backButton', () => {
-        if (showInfoModal) setShowInfoModal(false);
-        else if (showGroupModal) setShowGroupModal(false);
-        else if (showDMModal) setShowDMModal(false);
-        else if (showProfileModal) setShowProfileModal(false);
-        else if (showExportModal) setShowExportModal(false);
-        else if (showImportModal) setShowImportModal(false);
-        else if (showEmojiPicker) setShowEmojiPicker(false);
-        else if (activeConversationId) setActiveConversationId(null);
-        else if (activeTab !== 'chats') setActiveTab('chats');
-        else CapacitorApp.minimizeApp();
-      });
-      return () => {
-        handleBackButton.then(h => h.remove());
-      };
-    }
-  }, [
-    activeConversationId,
-    activeTab,
-    showInfoModal,
-    showGroupModal,
-    showDMModal,
-    showProfileModal,
-    showExportModal,
-    showImportModal,
-    showEmojiPicker,
-    setActiveConversationId,
-    setActiveTab
-  ]);
 
-  // Auto-trigger biometrics on lock screen if supported
-  useEffect(() => {
-    if (bootPhase === 'lockbox_locked' && biometricsSupported) {
-      const timer = setTimeout(async () => {
-        try {
-          await unlockWithBiometrics();
-        } catch (e) {
-          // Silent fallback to password entry
-        }
-      }, 300);
-      return () => clearTimeout(timer);
-    }
-  }, [bootPhase, biometricsSupported, unlockWithBiometrics]);
 
   const mediaUploadControllerRef = useRef(null);
   const lightboxImgRef = useRef(null);
@@ -280,6 +236,52 @@ function App() {
   useEffect(() => {
     localStorage.setItem('echo_compact_view', compactView ? 'true' : 'false');
   }, [compactView]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.Capacitor?.isNativePlatform()) {
+      const handleBackButton = CapacitorApp.addListener('backButton', () => {
+        if (showInfoModal) setShowInfoModal(false);
+        else if (showGroupModal) setShowGroupModal(false);
+        else if (showDMModal) setShowDMModal(false);
+        else if (showProfileModal) setShowProfileModal(false);
+        else if (showExportModal) setShowExportModal(false);
+        else if (showImportModal) setShowImportModal(false);
+        else if (showEmojiPicker) setShowEmojiPicker(false);
+        else if (activeConversationId) setActiveConversationId(null);
+        else if (activeTab !== 'chats') setActiveTab('chats');
+        else CapacitorApp.minimizeApp();
+      });
+      return () => {
+        handleBackButton.then(h => h.remove());
+      };
+    }
+  }, [
+    activeConversationId,
+    activeTab,
+    showInfoModal,
+    showGroupModal,
+    showDMModal,
+    showProfileModal,
+    showExportModal,
+    showImportModal,
+    showEmojiPicker,
+    setActiveConversationId,
+    setActiveTab
+  ]);
+
+  // Auto-trigger biometrics on lock screen if supported
+  useEffect(() => {
+    if (bootPhase === 'lockbox_locked' && biometricsSupported) {
+      const timer = setTimeout(async () => {
+        try {
+          await unlockWithBiometrics();
+        } catch (e) {
+          // Silent fallback to password entry
+        }
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [bootPhase, biometricsSupported, unlockWithBiometrics]);
 
   useEffect(() => {
     localStorage.setItem('echo_auto_connect', autoConnect ? 'true' : 'false');
