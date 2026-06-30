@@ -1374,7 +1374,7 @@ function App() {
         <section className={`middle-pane ${isMobile ? 'safe-pb' : ''}`}>
           {isMobile ? (
             /* Mobile Recent Chats Header */
-            <header style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 36px)', paddingBottom: '16px', paddingLeft: '20px', paddingRight: '20px', borderBottom: '1px solid var(--border-light)', display: 'flex', flexDirection: 'column', gap: '12px', backgroundColor: 'var(--bg-secondary)', zIndex: 40 }}>
+            <header style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 16px)', paddingBottom: '16px', paddingLeft: '20px', paddingRight: '20px', borderBottom: '1px solid var(--border-light)', display: 'flex', flexDirection: 'column', gap: '12px', backgroundColor: 'var(--bg-secondary)', zIndex: 40 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <h1 className="font-headline-sm text-headline-sm font-bold" style={{ color: 'var(--accent-indigo)', fontSize: '20px' }}>Echo</h1>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -1550,7 +1550,7 @@ function App() {
         <section className={`middle-pane ${isMobile ? 'safe-pb' : ''}`}>
           {isMobile ? (
             /* Mobile Contacts Header */
-            <header style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 36px)', paddingBottom: '16px', paddingLeft: '20px', paddingRight: '20px', borderBottom: '1px solid var(--border-light)', display: 'flex', flexDirection: 'column', gap: '12px', backgroundColor: 'var(--bg-secondary)' }}>
+            <header style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 16px)', paddingBottom: '16px', paddingLeft: '20px', paddingRight: '20px', borderBottom: '1px solid var(--border-light)', display: 'flex', flexDirection: 'column', gap: '12px', backgroundColor: 'var(--bg-secondary)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <h1 className="font-headline-sm text-headline-sm font-bold" style={{ color: 'var(--accent-indigo)', fontSize: '20px' }}>Contacts</h1>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -1731,7 +1731,7 @@ function App() {
             <>
               {/* Active Chat Header */}
               {isMobile ? (
-                <header style={{ height: 'auto', paddingTop: 'calc(env(safe-area-inset-top, 0px) + 36px)', paddingBottom: '12px', paddingLeft: '16px', paddingRight: '16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-light)' }}>
+                <header style={{ height: 'auto', paddingTop: 'calc(env(safe-area-inset-top, 0px) + 16px)', paddingBottom: '16px', paddingLeft: '16px', paddingRight: '16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-light)' }}>
                   <div className="chat-header-info" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <button type="button" className="back-btn" onClick={() => setActiveConversationId(null)} style={{ background: 'none', border: 'none', color: 'var(--text-primary)', padding: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
                       <span className="material-symbols-outlined">arrow_back</span>
@@ -2449,7 +2449,7 @@ function App() {
         <div className={`settings-pane ${isMobile ? 'safe-pb' : ''}`} style={isMobile ? { paddingBottom: '90px' } : {}}>
           {isMobile ? (
             /* Mobile Settings Header */
-            <header style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 36px)', paddingBottom: '16px', paddingLeft: '20px', paddingRight: '20px', borderBottom: '1px solid var(--border-light)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: 'var(--bg-secondary)', marginBottom: '16px' }}>
+            <header style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 16px)', paddingBottom: '16px', paddingLeft: '20px', paddingRight: '20px', borderBottom: '1px solid var(--border-light)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: 'var(--bg-secondary)', marginBottom: '16px' }}>
               <div>
                 <h1 className="font-headline-sm text-headline-sm font-bold" style={{ color: 'var(--accent-indigo)', fontSize: '20px' }}>Settings</h1>
               </div>
