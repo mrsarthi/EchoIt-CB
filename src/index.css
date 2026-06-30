@@ -1033,6 +1033,9 @@ input:checked + .slider:before {
     width: 100% !important;
     min-width: 100% !important;
   }
+  .conversations-section {
+    padding-bottom: 80px !important;
+  }
   .mobile-bottom-nav {
     display: flex !important;
     height: calc(60px + env(safe-area-inset-bottom, 0px) + 7px) !important;
@@ -1134,7 +1137,7 @@ input:checked + .slider:before {
 }
 @media (max-width: 768px) {
   .compact-view .middle-pane header {
-    padding-top: calc(env(safe-area-inset-top, 0px) + 28px) !important;
+    padding-top: calc(env(safe-area-inset-top, 0px) + 18px) !important;
     padding-bottom: 16px !important;
     padding-left: 20px !important;
     padding-right: 20px !important;
@@ -1239,7 +1242,7 @@ input:checked + .slider:before {
 
 /* Safe area padding utilities */
 .safe-header {
-  padding-top: calc(max(env(safe-area-inset-top, 0px), 28px) + 12px) !important;
+  padding-top: calc(max(env(safe-area-inset-top, 0px), 18px) + 12px) !important;
 }
 .safe-footer {
   padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 7px) !important;
@@ -1249,7 +1252,7 @@ input:checked + .slider:before {
   padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 7px) !important;
 }
 .safe-pt {
-  padding-top: max(env(safe-area-inset-top, 0px), 28px);
+  padding-top: max(env(safe-area-inset-top, 0px), 18px);
 }
 .safe-pb {
   padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 7px);
