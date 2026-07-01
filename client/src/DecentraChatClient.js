@@ -593,6 +593,72 @@ class DecentraChatClient extends EventEmitter {
         });
       });
 
+      this.socket.on('getMissingMessage', async (data) => {
+        const { conversationId, counter, requestedBy } = data;
+        console.log(`[SDK] Received getMissingMessage request from ${requestedBy} for counter ${counter} in ${conversationId}`);
+        
+        const msg = await this.db.read(db => {
+          return db.prepare(`
+            SELECT * FROM messages 
+            WHERE conversation_id = ? AND LOWER(sender_address) = ? AND sender_counter = ?
+            LIMIT 1
+          `).get(conversationId, this.address.toLowerCase(), counter);
+        });
+
+        if (msg) {
+          console.log(`[SDK] Found missing message locally, re-encrypting for ${requestedBy}...`);
+          try {
+            const toAddress = requestedBy.toLowerCase();
+            let session = await DoubleRatchetSession.load(this.db, toAddress);
+            if (!session || !session.sending_chain_key) {
+              console.warn("[SDK] No active E2EE session to re-encrypt missing message.");
+              return;
+            }
+
+            let originalPlaintext = msg.body_text;
+            if (msg.media_metadata) {
+              originalPlaintext = `__MEDIA__:${msg.media_metadata}`;
+            }
+            const vectorClock = msg.vector_clock ? JSON.parse(msg.vector_clock) : {};
+            const plaintext = JSON.stringify({ body: originalPlaintext, vectorClock });
+
+            const encResult = await session.encrypt(this.db, plaintext);
+
+            this.socket.emit('deliverMissingMessage', {
+              toAddress: requestedBy,
+              message: {
+                id: msg.id,
+                from: this.address,
+                ciphertext: encResult.ciphertext,
+                iv: encResult.iv,
+                dhPublic: encResult.dhPublic,
+                sequenceNumber: encResult.sequenceNumber,
+                timestamp: msg.timestamp,
+                x3dhInfo: null,
+                groupId: msg.conversation_id === requestedBy ? null : msg.conversation_id,
+                vectorClock,
+                senderCounter: msg.sender_counter
+              }
+            });
+          } catch (err) {
+            console.error("[SDK] Failed to re-encrypt missing message:", err.message);
+          }
+        } else {
+          console.warn(`[SDK] Requested missing message counter ${counter} not found in database.`);
+        }
+      });
+
+      this.socket.on('missingMessageDelivered', async (data) => {
+        const { message } = data;
+        console.log(`[SDK] Received missingMessageDelivered for message ${message.id}, counter ${message.senderCounter}`);
+        try {
+          const decrypted = await this.decryptAndStoreMessage(message);
+          this.emit('message', decrypted);
+        } catch (err) {
+          console.error("[SDK] Failed to decrypt delivered missing message:", err.message);
+        }
+      });
+
       this.socket.on('connect_error', (err) => {
         this.connected = false;
         this.emit('status', 'disconnected');
@@ -729,6 +795,19 @@ class DecentraChatClient extends EventEmitter {
       const decryptedPlaintext = decryptAES_GCM(payload.ciphertext, group.group_key, payload.iv);
 
       let bodyText = decryptedPlaintext;
+      let vectorClockObj = payload.vectorClock || null;
+      let senderCounterVal = payload.senderCounter || 0;
+
+      try {
+        const parsed = JSON.parse(decryptedPlaintext);
+        if (parsed && parsed.body !== undefined && parsed.vectorClock !== undefined) {
+          bodyText = parsed.body;
+          vectorClockObj = parsed.vectorClock;
+        }
+      } catch (e) {
+        // legacy
+      }
+
       let signatureVerified = true;
 
       let resolvedFromAddress = fromAddress.toLowerCase();
@@ -740,7 +819,7 @@ class DecentraChatClient extends EventEmitter {
       }
 
       try {
-        const payloadObj = JSON.parse(decryptedPlaintext);
+        const payloadObj = JSON.parse(bodyText);
         if (payloadObj && payloadObj.plaintext && payloadObj.signature) {
           if (payloadObj.sessionSigner && payloadObj.sessionDelegation) {
             // Verify delegated session key signature (1. Check delegation, 2. Check message)
@@ -858,8 +937,8 @@ class DecentraChatClient extends EventEmitter {
         `).run(payload.timestamp, payload.groupId);
 
         db.prepare(`
-          INSERT OR REPLACE INTO messages (id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT OR REPLACE INTO messages (id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status, vector_clock, sender_counter)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           payload.id,
           payload.groupId,
@@ -869,8 +948,14 @@ class DecentraChatClient extends EventEmitter {
           bodyText,
           mediaMetadata ? JSON.stringify(mediaMetadata) : null,
           payload.timestamp,
-          'unread'
+          'unread',
+          vectorClockObj ? JSON.stringify(vectorClockObj) : null,
+          senderCounterVal
         );
+      });
+
+      this.checkForHolesAndPull(payload.groupId, fromAddress, senderCounterVal).catch(err => {
+        console.error("checkForHolesAndPull group failed:", err.message);
       });
 
       return {
@@ -913,9 +998,23 @@ class DecentraChatClient extends EventEmitter {
     // Decrypt the ciphertext payload
     const plaintext = await session.decrypt(this.db, payload);
 
+    let decryptedBody = plaintext;
+    let vectorClockObj = payload.vectorClock || null;
+    let senderCounterVal = payload.senderCounter || 0;
+
+    try {
+      const parsed = JSON.parse(plaintext);
+      if (parsed && parsed.body !== undefined && parsed.vectorClock !== undefined) {
+        decryptedBody = parsed.body;
+        vectorClockObj = parsed.vectorClock;
+      }
+    } catch (e) {
+      // Legacy
+    }
+
     // Check if this is a remote peer data wipe request
-    if (plaintext && plaintext.startsWith('__WIPE_USER_DATA__:')) {
-      const peerAddress = plaintext.substring(20).toLowerCase();
+    if (decryptedBody && decryptedBody.startsWith('__WIPE_USER_DATA__:')) {
+      const peerAddress = decryptedBody.substring(20).toLowerCase();
       if (peerAddress !== fromAddress.toLowerCase()) {
         console.error('[Security] Wipe command rejected: sender address mismatch');
         throw new Error('SECURITY: Wipe command address mismatch.');
@@ -939,9 +1038,9 @@ class DecentraChatClient extends EventEmitter {
     }
 
     // Check if this is a group key distribution system message
-    if (plaintext.startsWith('__GROUP_KEY__:')) {
+    if (decryptedBody.startsWith('__GROUP_KEY__:')) {
       try {
-        const parts = plaintext.substring(14);
+        const parts = decryptedBody.substring(14);
         const groupData = JSON.parse(parts);
 
         // Schema validation
@@ -1033,9 +1132,9 @@ class DecentraChatClient extends EventEmitter {
     }
 
     let mediaMetadata = null;
-    if (plaintext.startsWith('__MEDIA__:')) {
+    if (decryptedBody.startsWith('__MEDIA__:')) {
       try {
-        const parts = plaintext.substring(10);
+        const parts = decryptedBody.substring(10);
         mediaMetadata = JSON.parse(parts);
         bodyText = "[Attachment]";
       } catch (err) {
@@ -1076,8 +1175,8 @@ class DecentraChatClient extends EventEmitter {
 
       // Insert message into messages history
       db.prepare(`
-        INSERT OR REPLACE INTO messages (id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO messages (id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status, vector_clock, sender_counter)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         payload.id,
         fromAddress,
@@ -1087,8 +1186,14 @@ class DecentraChatClient extends EventEmitter {
         bodyText,
         mediaMetadata ? JSON.stringify(mediaMetadata) : null,
         payload.timestamp,
-        'unread'
+        'unread',
+        vectorClockObj ? JSON.stringify(vectorClockObj) : null,
+        senderCounterVal
       );
+    });
+
+    this.checkForHolesAndPull(fromAddress, fromAddress, senderCounterVal).catch(err => {
+      console.error("checkForHolesAndPull direct failed:", err.message);
     });
 
     return {
@@ -1102,6 +1207,74 @@ class DecentraChatClient extends EventEmitter {
       senderBio: payload.senderBio,
       senderPfp: payload.senderPfp
     };
+  }
+
+  async getConversationVectorClock(conversationId) {
+    const messages = await this.db.read(db => {
+      return db.prepare('SELECT vector_clock FROM messages WHERE conversation_id = ? ORDER BY timestamp DESC LIMIT 50').all(conversationId);
+    });
+
+    const mergedClock = {};
+    for (const msg of messages) {
+      if (msg.vector_clock) {
+        try {
+          const clock = JSON.parse(msg.vector_clock);
+          for (const [addr, val] of Object.entries(clock)) {
+            const numVal = parseInt(val, 10);
+            if (!mergedClock[addr] || numVal > mergedClock[addr]) {
+              mergedClock[addr] = numVal;
+            }
+          }
+        } catch (e) {}
+      }
+    }
+    return mergedClock;
+  }
+
+  async getLocalMaxCounter(conversationId, memberAddress) {
+    const res = await this.db.read(db => {
+      return db.prepare(`
+        SELECT MAX(sender_counter) as maxCounter FROM messages 
+        WHERE conversation_id = ? AND LOWER(sender_address) = ?
+      `).get(conversationId, memberAddress.toLowerCase());
+    });
+    return (res && res.maxCounter) ? parseInt(res.maxCounter, 10) : 0;
+  }
+
+  async checkForHolesAndPull(conversationId, senderAddress, senderCounterVal) {
+    if (!senderCounterVal || senderCounterVal <= 1) return;
+
+    const maxLocalCounter = await this.db.read(db => {
+      const res = db.prepare(`
+        SELECT MAX(sender_counter) as maxCounter FROM messages 
+        WHERE conversation_id = ? AND LOWER(sender_address) = ? AND sender_counter < ?
+      `).get(conversationId, senderAddress.toLowerCase(), senderCounterVal);
+      return (res && res.maxCounter) ? parseInt(res.maxCounter, 10) : 0;
+    });
+
+    if (senderCounterVal > maxLocalCounter + 1) {
+      console.log(`[SDK] Causality Hole Detected! Missing counter range: [${maxLocalCounter + 1}, ${senderCounterVal - 1}] from ${senderAddress} in ${conversationId}`);
+      
+      for (let c = maxLocalCounter + 1; c < senderCounterVal; c++) {
+        this.socket.emit('requestMissingMessage', {
+          conversationId,
+          senderAddress,
+          counter: c
+        }, async (res) => {
+          if (res.success && res.found && res.message) {
+            console.log(`[SDK] Successfully pulled missing message counter ${c} from server backup`);
+            try {
+              const decrypted = await this.decryptAndStoreMessage(res.message);
+              this.emit('message', decrypted);
+            } catch (err) {
+              console.error(`[SDK] Failed to decrypt pulled missing message ${c}:`, err.message);
+            }
+          } else {
+            console.log(`[SDK] Missing message counter ${c} not in server backup, waiting for online peer fulfillment.`);
+          }
+        });
+      }
+    }
   }
 
   // Encrypts and transmits a text message (or media metadata envelope) to a recipient
@@ -1178,13 +1351,28 @@ class DecentraChatClient extends EventEmitter {
       plaintext = `__MEDIA__:${JSON.stringify(mediaMetadata)}`;
     }
 
+    const isProtocolMessage = bodyText && (bodyText.startsWith('__GROUP_KEY__:') || bodyText.startsWith('__READ_RECEIPT__:') || bodyText.startsWith('__WIPE_USER_DATA__:'));
+
+    let vectorClock = null;
+    let senderCounter = 0;
+
+    if (!isProtocolMessage) {
+      const currentClock = await this.getConversationVectorClock(toAddress);
+      const myAddressLower = this.address.toLowerCase();
+      currentClock[myAddressLower] = (currentClock[myAddressLower] || 0) + 1;
+      vectorClock = currentClock;
+      senderCounter = currentClock[myAddressLower];
+
+      // Wrap plaintext in E2EE JSON payload carrying vector clock
+      plaintext = JSON.stringify({ body: plaintext, vectorClock });
+    }
+
     // Encrypt the plaintext using the session KDF chain
     const encResult = await session.encrypt(this.db, plaintext);
     const messageId = crypto.randomUUID();
     const timestamp = Date.now();
 
     // Store in local database as 'sending' (only if not a protocol message)
-    const isProtocolMessage = bodyText && (bodyText.startsWith('__GROUP_KEY__:') || bodyText.startsWith('__READ_RECEIPT__:') || bodyText.startsWith('__WIPE_USER_DATA__:'));
     if (!isProtocolMessage) {
       await this.db.write((db) => {
         db.prepare(`
@@ -1217,8 +1405,8 @@ class DecentraChatClient extends EventEmitter {
         `).run(timestamp, toAddress);
 
         db.prepare(`
-          INSERT OR REPLACE INTO messages (id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT OR REPLACE INTO messages (id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status, vector_clock, sender_counter)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           messageId,
           toAddress,
@@ -1228,7 +1416,9 @@ class DecentraChatClient extends EventEmitter {
           mediaMetadata ? "[Attachment]" : bodyText,
           mediaMetadata ? JSON.stringify(mediaMetadata) : null,
           timestamp,
-          'sending'
+          'sending',
+          vectorClock ? JSON.stringify(vectorClock) : null,
+          senderCounter
         );
       });
     }
@@ -1244,7 +1434,9 @@ class DecentraChatClient extends EventEmitter {
         sequenceNumber: encResult.sequenceNumber,
         timestamp,
         x3dhInfo,
-        groupId: null
+        groupId: null,
+        vectorClock,
+        senderCounter
       }, async (res) => {
         if (res.success) {
           const finalStatus = res.delivered ? 'delivered' : 'sent';

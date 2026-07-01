@@ -1,0 +1,83 @@
+config:
+  target: "http://localhost:3009"
+  phases:
+    - duration: 15
+      arrivalRate: 2
+      rampTo: 10
+      name: "Warm-up phase"
+    - duration: 25
+      arrivalRate: 10
+      name: "Sustained load phase"
+  engines:
+    socketio:
+      transports: ["websocket"]
+  processor: "./artillery-helper.js"
+
+scenarios:
+  - name: "Virtual User Lifecycle (Register -> Upload Keys -> Send Message -> Reconnect & Fetch Outbox)"
+    engine: socketio
+    flow:
+      # 1. Generate unique dynamic data (username, wallet address, keys, etc.)
+      - function: "generateTestData"
+
+      # 3. Register user (TEST_MODE allows bypassing challenge and signature verification)
+      - emit:
+          channel: "register"
+          data:
+            address: "{{ address }}"
+            username: "{{ username }}"
+            identityKey: "{{ identityKey }}"
+            signedPreKey: "{{ signedPreKey }}"
+            preKeySignature: "{{ preKeySignature }}"
+            challenge: "{{ challenge }}"
+            signature: "{{ signature }}"
+            publicKey: "{{ publicKey }}"
+            secretNumber: 42 # dummy
+            proofToken: "dummy"
+          acknowledge: true
+      - think: 1 # Wait for DB registration to complete and socket.address to be set
+
+      # 4. Upload one-time keys (Simulating key exchange setup)
+      - emit:
+          channel: "uploadOneTimeKeys"
+          data:
+            keys:
+              - keyId: 1
+                publicKey: "otk_pub_key_1"
+              - keyId: 2
+                publicKey: "otk_pub_key_2"
+          acknowledge: true
+      - think: 1
+
+      # 5. Retrieve key bundle for another virtual user (Database query stress)
+      - emit:
+          channel: "getKeyBundle"
+          data:
+            address: "{{ address }}"
+          acknowledge: true
+      - think: 1
+
+      # 6. Send a secure encrypted message (Inserts into outbox/message_backup tables)
+      - emit:
+          channel: "sendMessage"
+          data:
+            id: "{{ messageId }}"
+            to: "{{ address }}"
+            ciphertext: "encrypted_message_data_goes_here"
+            iv: "iv_parameters"
+            dhPublic: "dh_public_key"
+            sequenceNumber: 1
+            timestamp: 1782873600000 # static future/valid local timestamp
+            x3dhInfo: "x3dh_meta"
+            groupId: "lobby_chat"
+            vectorClock: "clock"
+            senderCounter: 1
+          acknowledge: true
+
+      # 7. Fetch offline queue (Simulating reconnect sync)
+      - emit:
+          channel: "fetchOfflineQueue"
+          acknowledge: true
+
+      # 8. Think/Idle briefly to simulate real connection time
+      - think: 2
