@@ -66,6 +66,7 @@ const saveMediaToDevice = async (blob, filename) => {
             path: filename,
             data: base64Data,
             directory: Directory.Documents,
+            recursive: true
           });
           alert(`Saved successfully to Documents: ${filename}`);
         } catch (err) {
@@ -109,6 +110,7 @@ function App() {
     conversations,
     activeConversationId,
     messages,
+    messagesLoading,
     loading,
     error,
     bootPhase,
@@ -154,7 +156,9 @@ function App() {
     deviceBiometricsAvailable,
     enableBiometricLogin,
     disableBiometricLogin,
-    resetWallet
+    resetWallet,
+    onlineUsers,
+    typingUsers
   } = useDecentraChat();
 
   const [isMobile, setIsMobile] = useState(() => {
@@ -202,7 +206,136 @@ function App() {
     loadCachedMedia();
   }, [messages]);
 
+  const [replyingToMessage, setReplyingToMessage] = useState(null); // holds array of messages (replies) or null
+  const [multiSelectMode, setMultiSelectMode] = useState(false);
+  const [selectedMessages, setSelectedMessages] = useState([]); // holds array of selected message objects
+  const [expandedAccordions, setExpandedAccordions] = useState(new Set());
 
+  const toggleAccordion = (msgId) => {
+    setExpandedAccordions(prev => {
+      const next = new Set(prev);
+      if (next.has(msgId)) {
+        next.delete(msgId);
+      } else {
+        next.add(msgId);
+      }
+      return next;
+    });
+  };
+
+  const longPressTimerRef = useRef(null);
+
+  const startLongPress = (msg) => {
+    longPressTimerRef.current = setTimeout(() => {
+      setMultiSelectMode(true);
+      setSelectedMessages([msg]);
+    }, 700);
+  };
+
+  const cancelLongPress = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+    }
+  };
+
+  const handleToggleMessageSelection = (msg) => {
+    setSelectedMessages(prev => {
+      const exists = prev.some(m => m.id === msg.id);
+      if (exists) {
+        return prev.filter(m => m.id !== msg.id);
+      } else {
+        return [...prev, msg];
+      }
+    });
+  };
+
+  const handleBubbleClick = (msg) => {
+    if (multiSelectMode) {
+      handleToggleMessageSelection(msg);
+    }
+  };
+
+  const handleAddReplyToChain = (msg) => {
+    setReplyingToMessage(prev => {
+      if (!prev) {
+        return [msg];
+      }
+      if (prev.some(m => m.id === msg.id)) {
+        return prev;
+      }
+      return [...prev, msg];
+    });
+  };
+  
+  // Touch swipe states
+  const [activeSwipeMsgId, setActiveSwipeMsgId] = useState(null);
+  const [swipeOffset, setSwipeOffset] = useState(0);
+  const touchStartRef = useRef(0);
+
+  const handleTouchStart = (e, msgId) => {
+    touchStartRef.current = e.touches[0].clientX;
+    setActiveSwipeMsgId(msgId);
+    setSwipeOffset(0);
+  };
+
+  const handleTouchMove = (e) => {
+    if (activeSwipeMsgId === null) return;
+    const currentX = e.touches[0].clientX;
+    const diffX = currentX - touchStartRef.current;
+    if (diffX > 0) {
+      setSwipeOffset(Math.min(diffX, 70));
+    }
+  };
+
+  const handleTouchEnd = (msg) => {
+    if (activeSwipeMsgId === msg.id && swipeOffset > 45) {
+      handleAddReplyToChain(msg);
+    }
+    setActiveSwipeMsgId(null);
+    setSwipeOffset(0);
+  };
+
+  const typingTimeoutRef = useRef(null);
+  const isTypingRef = useRef(false);
+
+  const handleInputChange = (val) => {
+    setInputText(val);
+
+    if (!client || !activeConversationId) return;
+
+    if (!isTypingRef.current) {
+      isTypingRef.current = true;
+      sendTypingToActiveChat(true);
+    }
+
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => {
+      isTypingRef.current = false;
+      sendTypingToActiveChat(false);
+    }, 2000);
+  };
+
+  const sendTypingToActiveChat = (isTyping) => {
+    if (!client || !activeConversationId) return;
+    const activeChat = conversations.find(c => c.id === activeConversationId);
+    if (!activeChat) return;
+
+    if (activeChat.is_group === 1) {
+      client.db.read(db => {
+        const group = db.prepare('SELECT members FROM groups WHERE id = ?').get(activeConversationId);
+        if (group) {
+          const members = JSON.parse(group.members || '[]');
+          members.forEach(member => {
+            if (member.toLowerCase() !== client.address.toLowerCase()) {
+              client.sendTypingStatus(member, activeConversationId, isTyping);
+            }
+          });
+        }
+      });
+    } else {
+      client.sendTypingStatus(activeConversationId, activeConversationId, isTyping);
+    }
+  };
 
   const mediaUploadControllerRef = useRef(null);
   const lightboxImgRef = useRef(null);
@@ -551,25 +684,33 @@ function App() {
     const media = pendingMedia;
     setPendingMedia(null);
 
+    const replyTo = replyingToMessage;
+    setReplyingToMessage(null);
+
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    isTypingRef.current = false;
+    sendTypingToActiveChat(false);
+
     try {
       const activeChat = conversations.find(c => c.id === activeConversationId);
       const isGroup = activeChat?.is_group === 1;
       
       if (media) {
         if (isGroup) {
-          await client.sendGroupMessage(activeConversationId, text || "[Attachment]", media.manifest);
+          await client.sendGroupMessage(activeConversationId, text || "[Attachment]", media.manifest, replyTo);
         } else {
           const contact = getCombinedContacts().find(item => item.address.toLowerCase() === activeConversationId.toLowerCase());
-          await client.sendMessage(activeConversationId, text || "[Attachment]", media.manifest, contact?.username, contact?.hide_wallet);
+          await client.sendMessage(activeConversationId, text || "[Attachment]", media.manifest, contact?.username, contact?.hide_wallet, contact?.bio, contact?.pfp, replyTo);
         }
       } else {
         if (isGroup) {
-          await sendGroupMessage(activeConversationId, text);
+          await sendGroupMessage(activeConversationId, text, replyTo);
         } else {
-          await sendDirectMessage(activeConversationId, text);
+          const contact = getCombinedContacts().find(item => item.address.toLowerCase() === activeConversationId.toLowerCase());
+          await sendDirectMessage(activeConversationId, text, contact?.username, contact?.hide_wallet, contact?.bio, contact?.pfp, replyTo);
         }
       }
-      await refreshData(client);
+      refreshData(client);
     } catch (err) {
       console.error("Message send failed:", err);
     }
@@ -1413,6 +1554,26 @@ function App() {
 
   return (
     <div className={`app-container ${activeConversationId ? 'chat-active' : ''} ${compactView ? 'compact-view' : ''}`}>
+      <style>{`
+        .message-bubble-container:hover .desktop-reply-btn {
+          display: flex !important;
+        }
+        .desktop-reply-btn::before {
+          content: '';
+          position: absolute;
+          top: -10px;
+          bottom: -10px;
+          left: -35px;
+          right: -35px;
+        }
+        @keyframes flash-highlight {
+          0% { background-color: rgba(99, 102, 241, 0.4); }
+          100% { background-color: transparent; }
+        }
+        .highlight-flash {
+          animation: flash-highlight 1.5s ease-out;
+        }
+      `}</style>
       
       {/* 1. Left Navigation Sidebar (mockup: Recent Chats / Settings Desktop aside) */}
       <aside className="desktop-sidebar">
@@ -1546,7 +1707,7 @@ function App() {
                 <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>My Status</span>
               </div>
               {/* Contact Statuses */}
-              {getCombinedContacts().slice(0, 5).map(contact => (
+              {getCombinedContacts().filter(contact => contact.bio && contact.bio.trim() !== '').slice(0, 5).map(contact => (
                 <div 
                   key={contact.address} 
                   style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: '6px', cursor: 'pointer', verticalAlign: 'top' }} 
@@ -1583,7 +1744,7 @@ function App() {
             ) : (
               filteredConversations.map((conv) => {
                 const contact = getCombinedContacts().find(item => item.address.toLowerCase() === conv.id.toLowerCase());
-                const isOnline = true; // Mock online status
+                const isOnline = onlineUsers.has(conv.id.toLowerCase());
                 return (
                   <div
                     key={conv.id}
@@ -1627,8 +1788,12 @@ function App() {
                           {new Date(conv.last_message_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                         </span>
                       </div>
-                      <div className="conv-last-msg" style={{ fontWeight: conv.unread_count > 0 ? '600' : '400', color: conv.unread_count > 0 ? 'var(--text-primary)' : 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {conv.last_message_text || (conv.is_group ? 'Group Chat' : 'Secure Channel')}
+                      <div className="conv-last-msg" style={{ fontWeight: conv.unread_count > 0 ? '600' : '400', color: (typingUsers[conv.id.toLowerCase()] || []).length > 0 ? 'var(--accent-emerald)' : (conv.unread_count > 0 ? 'var(--text-primary)' : 'var(--text-secondary)'), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {(typingUsers[conv.id.toLowerCase()] || []).length > 0 ? (
+                          <span style={{ fontStyle: 'italic' }}>typing...</span>
+                        ) : (
+                          conv.last_message_text || (conv.is_group ? 'Group Chat' : 'Secure Channel')
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1650,7 +1815,7 @@ function App() {
             /* Floating Action Button on mobile Chats */
             <button 
               className="fixed shadow-lg flex items-center justify-center hover:scale-105 active:scale-95 duration-100"
-              style={{ position: 'fixed', right: '24px', bottom: '80px', width: '56px', height: '56px', backgroundColor: 'var(--accent-indigo)', color: '#ffffff', borderRadius: '50%', border: 'none', cursor: 'pointer', zIndex: 40 }}
+              style={{ position: 'fixed', right: '24px', bottom: 'calc(60px + env(safe-area-inset-bottom, 0px) + 20px)', width: '56px', height: '56px', backgroundColor: 'var(--accent-indigo)', color: '#ffffff', borderRadius: '50%', border: 'none', cursor: 'pointer', zIndex: 40 }}
               onClick={() => setShowNewChatMenu(true)}
             >
               <span className="material-symbols-outlined" style={{ fontSize: '28px' }}>add</span>
@@ -1926,7 +2091,7 @@ function App() {
                             })()
                         }
                       </div>
-                      {!isGroupActive && (
+                      {!isGroupActive && onlineUsers.has(activeChat.id.toLowerCase()) && (
                         <div style={{ position: 'absolute', bottom: 0, right: 0, width: '10px', height: '10px', backgroundColor: 'var(--accent-emerald)', borderRadius: '50%', border: '2px solid var(--bg-secondary)' }}></div>
                       )}
                     </div>
@@ -1945,7 +2110,21 @@ function App() {
                         <span className="material-symbols-outlined" style={{ fontSize: '14px', color: 'var(--accent-indigo)', fontVariationSettings: "'FILL' 1" }}>verified</span>
                       </div>
                       <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
-                        Secure Enclave Active
+                        {(() => {
+                          const typingList = typingUsers[activeChat.id.toLowerCase()] || [];
+                          if (typingList.length > 0) {
+                            if (isGroupActive) {
+                              const names = typingList.map(addr => {
+                                const contact = getCombinedContacts().find(item => item.address.toLowerCase() === addr.toLowerCase());
+                                return contact ? `@${contact.username}` : addr.substring(0, 6);
+                              });
+                              return `${names.join(', ')} is typing...`;
+                            } else {
+                              return "typing...";
+                            }
+                          }
+                          return "Secure Enclave Active";
+                        })()}
                       </div>
                     </div>
                   </div>
@@ -2042,7 +2221,50 @@ function App() {
                   </div>
                 )}
 
-                {messages.length === 0 ? (
+                 {messagesLoading ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', padding: '16px' }}>
+                    <style>{`
+                      @keyframes skeleton-shimmer {
+                        0% { background-position: -200% 0; }
+                        100% { background-position: 200% 0; }
+                      }
+                      .skeleton-bubble {
+                        background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--border-light) 50%, var(--bg-tertiary) 75%);
+                        background-size: 200% 100%;
+                        animation: skeleton-shimmer 1.5s infinite;
+                        border-radius: 16px;
+                      }
+                    `}</style>
+                    {/* Skeleton Message 1 (received) */}
+                    <div style={{ display: 'flex', gap: '8px', maxWidth: '60%' }}>
+                      <div className="skeleton-bubble" style={{ width: '40px', height: '40px', borderRadius: '50%', flexShrink: 0 }}></div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flex: 1 }}>
+                        <div className="skeleton-bubble" style={{ width: '120px', height: '14px', borderRadius: '4px' }}></div>
+                        <div className="skeleton-bubble" style={{ width: '100%', height: '48px' }}></div>
+                      </div>
+                    </div>
+                    {/* Skeleton Message 2 (sent) */}
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginLeft: 'auto', maxWidth: '60%', width: '100%' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', alignItems: 'flex-end', width: '100%' }}>
+                        <div className="skeleton-bubble" style={{ width: '100%', height: '36px' }}></div>
+                      </div>
+                    </div>
+                    {/* Skeleton Message 3 (received) */}
+                    <div style={{ display: 'flex', gap: '8px', maxWidth: '60%', width: '100%' }}>
+                      <div className="skeleton-bubble" style={{ width: '40px', height: '40px', borderRadius: '50%', flexShrink: 0 }}></div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flex: 1 }}>
+                        <div className="skeleton-bubble" style={{ width: '80px', height: '14px', borderRadius: '4px' }}></div>
+                        <div className="skeleton-bubble" style={{ width: '85%', height: '40px' }}></div>
+                      </div>
+                    </div>
+                    {/* Skeleton Message 4 (sent) */}
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginLeft: 'auto', maxWidth: '60%', width: '100%' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', alignItems: 'flex-end', width: '100%' }}>
+                        <div className="skeleton-bubble" style={{ width: '70%', height: '56px' }}></div>
+                      </div>
+                    </div>
+                  </div>
+                ) : messages.length === 0 ? (
                   <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', fontSize: '13px', textAlign: 'center', padding: '40px' }}>
                     🔒 End-to-End Encrypted channel established. Messages are zero-knowledge and stored locally.
                   </div>
@@ -2068,20 +2290,68 @@ function App() {
                       }
                     }
 
+                    let replyArray = [];
+                    if (msg.reply_metadata) {
+                      try {
+                        const parsed = typeof msg.reply_metadata === 'string' ? JSON.parse(msg.reply_metadata) : msg.reply_metadata;
+                        replyArray = Array.isArray(parsed) ? parsed : [parsed];
+                      } catch (e) {
+                        console.error("Failed to parse reply metadata:", e);
+                      }
+                    }
+
                     return (
                       <div 
                         key={msg.id} 
+                        id={`msg-${msg.id}`}
                         className={`message-row ${isSentByMe ? 'sent' : 'received'}`}
+                        onTouchStart={(e) => isMobile && handleTouchStart(e, msg.id)}
+                        onTouchMove={(e) => isMobile && handleTouchMove(e)}
+                        onTouchEnd={() => isMobile && handleTouchEnd(msg)}
                         style={
                           isMobile 
                             ? (isSentByMe 
-                                ? { display: 'flex', flexDirection: 'column', alignItems: 'end', maxWidth: '85%', marginLeft: 'auto', marginBottom: '12px' } 
-                                : { display: 'flex', flexDirection: 'column', alignItems: 'start', maxWidth: '85%', marginRight: 'auto', marginBottom: '12px' })
+                                ? { display: 'flex', flexDirection: 'column', alignItems: 'end', maxWidth: '85%', marginLeft: 'auto', marginBottom: '12px', transform: activeSwipeMsgId === msg.id ? `translateX(${swipeOffset}px)` : 'translateX(0px)', transition: activeSwipeMsgId === msg.id ? 'none' : 'transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)', position: 'relative' } 
+                                : { display: 'flex', flexDirection: 'column', alignItems: 'start', maxWidth: '85%', marginRight: 'auto', marginBottom: '12px', transform: activeSwipeMsgId === msg.id ? `translateX(${swipeOffset}px)` : 'translateX(0px)', transition: activeSwipeMsgId === msg.id ? 'none' : 'transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)', position: 'relative' })
                             : (!isSentByMe && isGroupActive 
                                 ? { display: 'flex', gap: '8px', alignItems: 'flex-end', marginBottom: '8px', width: '100%', justifyContent: 'flex-start' } 
                                 : {})
                         }
                       >
+                        {isMobile && activeSwipeMsgId === msg.id && swipeOffset > 15 && (
+                          <div style={{ position: 'absolute', left: '-30px', top: '50%', transform: 'translateY(-50%)', display: 'flex', alignItems: 'center', color: 'var(--accent-indigo)', opacity: Math.min((swipeOffset - 15) / 30, 1) }}>
+                            <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>reply</span>
+                          </div>
+                        )}
+                        {multiSelectMode && (
+                          <div 
+                            style={{ 
+                              display: 'flex', 
+                              alignItems: 'center', 
+                              justifyContent: 'center', 
+                              marginRight: '12px',
+                              cursor: 'pointer',
+                              zIndex: 10
+                            }}
+                            onClick={() => handleToggleMessageSelection(msg)}
+                          >
+                            <div style={{
+                              width: '20px',
+                              height: '20px',
+                              borderRadius: '50%',
+                              border: '2px solid var(--accent-indigo)',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              background: selectedMessages.some(m => m.id === msg.id) ? 'var(--accent-indigo)' : 'transparent',
+                              transition: 'background 0.2s'
+                            }}>
+                              {selectedMessages.some(m => m.id === msg.id) && (
+                                <span className="material-symbols-outlined" style={{ fontSize: '14px', color: '#ffffff', fontWeight: 'bold' }}>check</span>
+                              )}
+                            </div>
+                          </div>
+                        )}
                         {!isMobile && !isSentByMe && isGroupActive && (
                           <div 
                             className="message-avatar-wrapper" 
@@ -2117,31 +2387,190 @@ function App() {
                           </div>
                         )}
                         <div 
-                          className="message-bubble"
-                          style={
-                            isMobile 
-                              ? (isSentByMe 
-                                  ? { background: 'linear-gradient(135deg, var(--accent-indigo) 0%, #4338ca 100%)', color: '#ffffff', borderRadius: '16px', borderBottomRightRadius: '4px', maxWidth: '100%', padding: '12px 16px', fontSize: '14px', lineHeight: '1.5' }
-                                  : { background: 'var(--bg-tertiary)', color: 'var(--text-primary)', borderRadius: '16px', borderBottomLeftRadius: '4px', border: '1px solid var(--border-light)', maxWidth: '100%', padding: '12px 16px', fontSize: '14px', lineHeight: '1.5' })
-                              : {}
-                          }
+                          className="message-bubble-container"
+                          style={{ position: 'relative', maxWidth: isMobile ? '100%' : '70%' }}
                         >
-                          {!isSentByMe && !isGroupActive && !isMobile && (
-                            <span className="message-sender">
-                              {(() => {
-                                const contact = getCombinedContacts().find(item => item.address.toLowerCase() === activeChat.id.toLowerCase());
-                                return contact ? `@${contact.username}` : `@${activeChat.username}`;
-                              })()}
-                            </span>
+                          {!isMobile && !multiSelectMode && (
+                            <button 
+                              type="button"
+                              className="desktop-reply-btn"
+                              style={{
+                                display: 'none',
+                                position: 'absolute',
+                                top: '50%',
+                                transform: 'translateY(-50%)',
+                                left: isSentByMe ? '-36px' : 'auto',
+                                right: !isSentByMe ? '-36px' : 'auto',
+                                background: 'var(--bg-secondary)',
+                                border: '1px solid var(--border-light)',
+                                borderRadius: '50%',
+                                width: '28px',
+                                height: '28px',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                cursor: 'pointer',
+                                color: 'var(--text-secondary)',
+                                boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+                                zIndex: 10
+                              }}
+                              onClick={() => handleAddReplyToChain(msg)}
+                              title="Reply"
+                            >
+                              <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>reply</span>
+                            </button>
                           )}
-                          {!isSentByMe && isGroupActive && !isMobile && (
-                            <span className="message-sender" style={{ color: 'var(--accent-indigo)', fontSize: '11px', fontWeight: '700', marginBottom: '2px', display: 'block' }}>
-                              {(() => {
-                                const contact = getCombinedContacts().find(item => item.address.toLowerCase() === msg.sender_address.toLowerCase());
-                                return contact ? `@${contact.username}` : `@${usernameCache[msg.sender_address.toLowerCase()]?.username || msg.sender_address.substring(0, 8)}`;
-                              })()}
-                            </span>
-                          )}
+                          <div 
+                            className="message-bubble"
+                            onMouseDown={() => !multiSelectMode && startLongPress(msg)}
+                            onMouseUp={cancelLongPress}
+                            onMouseLeave={cancelLongPress}
+                            onTouchStart={() => {
+                              if (!multiSelectMode) {
+                                startLongPress(msg);
+                              }
+                            }}
+                            onTouchEnd={cancelLongPress}
+                            onClick={() => handleBubbleClick(msg)}
+                            style={
+                              isMobile 
+                                ? (isSentByMe 
+                                    ? { background: 'linear-gradient(135deg, var(--accent-indigo) 0%, #4338ca 100%)', color: '#ffffff', borderRadius: '16px', borderBottomRightRadius: '4px', maxWidth: '100%', padding: '12px 16px', fontSize: '14px', lineHeight: '1.5', cursor: multiSelectMode ? 'pointer' : 'default' }
+                                    : { background: 'var(--bg-tertiary)', color: 'var(--text-primary)', borderRadius: '16px', borderBottomLeftRadius: '4px', border: '1px solid var(--border-light)', maxWidth: '100%', padding: '12px 16px', fontSize: '14px', lineHeight: '1.5', cursor: multiSelectMode ? 'pointer' : 'default' })
+                                : { cursor: multiSelectMode ? 'pointer' : 'default', maxWidth: '100%' }
+                            }
+                          >
+                            {!isSentByMe && !isGroupActive && !isMobile && (
+                              <span className="message-sender">
+                                {(() => {
+                                  const contact = getCombinedContacts().find(item => item.address.toLowerCase() === activeChat.id.toLowerCase());
+                                  return contact ? `@${contact.username}` : `@${activeChat.username}`;
+                                })()}
+                              </span>
+                            )}
+                            {!isSentByMe && isGroupActive && (
+                              <span className="message-sender" style={{ color: 'var(--accent-indigo)', fontSize: '11px', fontWeight: '700', marginBottom: '2px', display: 'block' }}>
+                                {(() => {
+                                  const contact = getCombinedContacts().find(item => item.address.toLowerCase() === msg.sender_address.toLowerCase());
+                                  return contact ? `@${contact.username}` : `@${usernameCache[msg.sender_address.toLowerCase()]?.username || msg.sender_address.substring(0, 8)}`;
+                                })()}
+                              </span>
+                            )}
+                            
+                            {replyArray && replyArray.length > 0 && (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '8px' }}>
+                                {/* Render the first quote card */}
+                                {(() => {
+                                  const firstReply = replyArray[0];
+                                  return (
+                                    <div 
+                                      style={{ 
+                                        background: 'rgba(0,0,0,0.12)', 
+                                        borderLeft: '3px solid var(--accent-indigo)', 
+                                        borderRadius: '4px', 
+                                        padding: '6px 10px', 
+                                        fontSize: '12px',
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        gap: '2px',
+                                        opacity: 0.95,
+                                        cursor: 'pointer',
+                                        textAlign: 'left'
+                                      }}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        const element = document.getElementById(`msg-${firstReply.id}`);
+                                        if (element) {
+                                          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                          element.classList.add('highlight-flash');
+                                          setTimeout(() => element.classList.remove('highlight-flash'), 1500);
+                                        }
+                                      }}
+                                    >
+                                      <span style={{ fontWeight: '700', color: isSentByMe ? '#cbd5e1' : 'var(--accent-indigo)' }}>
+                                        {firstReply.sender.toLowerCase() === wallet.address.toLowerCase() ? 'You' : (() => {
+                                          const contact = getCombinedContacts().find(item => item.address.toLowerCase() === firstReply.sender.toLowerCase());
+                                          return contact ? `@${contact.username}` : `@${usernameCache[firstReply.sender.toLowerCase()]?.username || firstReply.sender.substring(0, 8)}`;
+                                        })()}
+                                      </span>
+                                      <span style={{ color: isSentByMe ? '#e2e8f0' : 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                        {firstReply.text}
+                                      </span>
+                                    </div>
+                                  );
+                                })()}
+
+                                {/* Render collapsible details if more than 1 reply */}
+                                {replyArray.length > 1 && (
+                                  <>
+                                    <div 
+                                      style={{ 
+                                        display: 'flex', 
+                                        alignItems: 'center', 
+                                        gap: '4px', 
+                                        fontSize: '11px', 
+                                        color: isSentByMe ? '#cbd5e1' : 'var(--text-secondary)', 
+                                        cursor: 'pointer',
+                                        fontWeight: '600',
+                                        padding: '2px 4px',
+                                        alignSelf: 'flex-start',
+                                        userSelect: 'none'
+                                      }}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        toggleAccordion(msg.id);
+                                      }}
+                                    >
+                                      <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>
+                                        {expandedAccordions.has(msg.id) ? 'keyboard_arrow_up' : 'keyboard_arrow_down'}
+                                      </span>
+                                      <span>
+                                        {expandedAccordions.has(msg.id) 
+                                          ? 'Hide details' 
+                                          : `Show ${replyArray.length - 1} more repl${replyArray.length - 1 === 1 ? 'y' : 'ies'}`}
+                                      </span>
+                                    </div>
+
+                                    {expandedAccordions.has(msg.id) && replyArray.slice(1).map((replyItem) => (
+                                      <div 
+                                        key={replyItem.id}
+                                        style={{ 
+                                          background: 'rgba(0,0,0,0.12)', 
+                                          borderLeft: '3px solid var(--accent-indigo)', 
+                                          borderRadius: '4px', 
+                                          padding: '6px 10px', 
+                                          fontSize: '12px',
+                                          display: 'flex',
+                                          flexDirection: 'column',
+                                          gap: '2px',
+                                          opacity: 0.95,
+                                          cursor: 'pointer',
+                                          textAlign: 'left'
+                                        }}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          const element = document.getElementById(`msg-${replyItem.id}`);
+                                          if (element) {
+                                            element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                            element.classList.add('highlight-flash');
+                                            setTimeout(() => element.classList.remove('highlight-flash'), 1500);
+                                          }
+                                        }}
+                                      >
+                                        <span style={{ fontWeight: '700', color: isSentByMe ? '#cbd5e1' : 'var(--accent-indigo)' }}>
+                                          {replyItem.sender.toLowerCase() === wallet.address.toLowerCase() ? 'You' : (() => {
+                                            const contact = getCombinedContacts().find(item => item.address.toLowerCase() === replyItem.sender.toLowerCase());
+                                            return contact ? `@${contact.username}` : `@${usernameCache[replyItem.sender.toLowerCase()]?.username || replyItem.sender.substring(0, 8)}`;
+                                          })()}
+                                        </span>
+                                        <span style={{ color: isSentByMe ? '#e2e8f0' : 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                          {replyItem.text}
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </>
+                                )}
+                              </div>
+                            )}
                           
                           {mediaObj ? (
                             mediaCache[mediaObj.mediaId] ? (
@@ -2343,15 +2772,181 @@ function App() {
                           </div>
                         </div>
                       </div>
-                    );
+                    </div>
+                  );
                   })
                 )}
                 <div ref={messagesEndRef} />
               </div>
 
               {/* Message Input Footer */}
-              <footer className={isMobile ? 'safe-footer' : ''} style={{ padding: isMobile ? '12px 16px 24px 16px' : '20px 24px', background: 'rgba(16, 22, 42, 0.4)', borderTop: '1px solid var(--border-light)' }}>
-                <form onSubmit={handleSendMessage} style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxWidth: '800px', margin: '0 auto' }}>
+              <footer className={isMobile ? 'safe-footer' : ''} style={{ padding: isMobile ? '12px 16px 24px 16px' : '20px 24px', background: multiSelectMode ? 'var(--bg-elevated)' : 'rgba(16, 22, 42, 0.4)', borderTop: '1px solid var(--border-light)' }}>
+                {multiSelectMode ? (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', maxWidth: '800px', margin: '0 auto', width: '100%' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-primary)', fontSize: '14px', fontWeight: '600' }}>
+                      <span className="material-symbols-outlined" style={{ color: 'var(--accent-indigo)' }}>check_box</span>
+                      <span>{selectedMessages.length} selected</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <button 
+                        type="button"
+                        style={{
+                          background: 'none',
+                          border: '1px solid var(--border-light)',
+                          borderRadius: '12px',
+                          padding: '8px 16px',
+                          color: 'var(--text-secondary)',
+                          fontSize: '13px',
+                          fontWeight: '600',
+                          cursor: 'pointer',
+                          transition: 'background 0.2s'
+                        }}
+                        onClick={() => {
+                          setMultiSelectMode(false);
+                          setSelectedMessages([]);
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      <button 
+                        type="button"
+                        style={{
+                          background: 'none',
+                          border: '1px solid var(--border-light)',
+                          borderRadius: '12px',
+                          padding: '8px 16px',
+                          color: 'var(--text-primary)',
+                          fontSize: '13px',
+                          fontWeight: '600',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px'
+                        }}
+                        onClick={() => alert("Forwarding functionality is coming soon!")}
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>forward</span>
+                        Forward
+                      </button>
+                      <button 
+                        type="button"
+                        style={{
+                          background: 'var(--accent-indigo)',
+                          border: 'none',
+                          borderRadius: '12px',
+                          padding: '8px 20px',
+                          color: 'white',
+                          fontSize: '13px',
+                          fontWeight: '600',
+                          cursor: selectedMessages.length === 0 ? 'not-allowed' : 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          boxShadow: '0 4px 12px rgba(129, 140, 248, 0.3)',
+                          opacity: selectedMessages.length === 0 ? 0.5 : 1
+                        }}
+                        onClick={() => {
+                          setReplyingToMessage(selectedMessages);
+                          setMultiSelectMode(false);
+                          setSelectedMessages([]);
+                        }}
+                        disabled={selectedMessages.length === 0}
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>reply</span>
+                        Reply
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <form onSubmit={handleSendMessage} style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxWidth: '800px', margin: '0 auto' }}>
+                    {replyingToMessage && replyingToMessage.length > 0 && (
+                      <div 
+                        className="replying-to-preview-container" 
+                        style={{
+                          display: 'flex',
+                          gap: '8px',
+                          overflowX: 'auto',
+                          padding: '4px 0 8px 0',
+                          scrollbarWidth: 'none',
+                          msOverflowStyle: 'none'
+                        }}
+                      >
+                        <style>{`
+                          .replying-to-preview-container::-webkit-scrollbar {
+                            display: none;
+                          }
+                        `}</style>
+                        {replyingToMessage.map((replyMsg) => (
+                          <div 
+                            key={replyMsg.id}
+                            className="replying-to-preview-card" 
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '8px',
+                              background: 'rgba(99, 102, 241, 0.1)',
+                              borderLeft: '3px solid var(--accent-indigo)',
+                              borderTop: '1px solid var(--border-light)',
+                              borderRight: '1px solid var(--border-light)',
+                              borderBottom: '1px solid var(--border-light)',
+                              borderRadius: '8px',
+                              padding: '6px 12px',
+                              fontSize: '11px',
+                              color: 'var(--text-primary)',
+                              backdropFilter: 'blur(8px)',
+                              position: 'relative',
+                              textAlign: 'left',
+                              flexShrink: 0,
+                              maxWidth: '220px'
+                            }}
+                          >
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontWeight: 'bold', color: 'var(--accent-indigo)', marginBottom: '1px', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                                {(() => {
+                                  const senderAddr = replyMsg.sender_address || replyMsg.sender || '';
+                                  if (senderAddr.toLowerCase() === wallet.address.toLowerCase()) {
+                                    return 'You';
+                                  }
+                                  const contact = getCombinedContacts().find(item => item.address.toLowerCase() === senderAddr.toLowerCase());
+                                  return contact ? `@${contact.username}` : `@${usernameCache[senderAddr.toLowerCase()]?.username || senderAddr.substring(0, 8)}`;
+                                })()}
+                              </div>
+                              <div style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {(() => {
+                                  let displayText = replyMsg.body_text || replyMsg.text || '';
+                                  if (!displayText && replyMsg.media_metadata) {
+                                    try {
+                                      const m = typeof replyMsg.media_metadata === 'string' ? JSON.parse(replyMsg.media_metadata) : replyMsg.media_metadata;
+                                      if (m) {
+                                        const mime = m.mimeType || '';
+                                        if (mime.startsWith('image/')) displayText = '📷 Photo';
+                                        else if (mime.startsWith('video/')) displayText = '🎥 Video';
+                                        else if (mime.startsWith('audio/')) displayText = '🎵 Audio';
+                                        else displayText = '📄 File';
+                                      }
+                                    } catch (e) {}
+                                  }
+                                  return displayText;
+                                })()}
+                              </div>
+                            </div>
+                            <button 
+                              type="button" 
+                              style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '2px', marginLeft: '4px' }}
+                              onClick={() => {
+                                setReplyingToMessage(prev => {
+                                  const filtered = prev.filter(m => m.id !== replyMsg.id);
+                                  return filtered.length > 0 ? filtered : null;
+                                });
+                              }}
+                            >
+                              <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>close</span>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
                   {pendingMedia && (
                     <div className="pending-media-preview" style={{
                       display: 'flex',
@@ -2456,7 +3051,7 @@ function App() {
                           className="chat-input-field"
                           placeholder="Type a secure message..."
                           value={inputText}
-                          onChange={(e) => setInputText(e.target.value)}
+                          onChange={(e) => handleInputChange(e.target.value)}
                           disabled={!connected}
                           style={{ flex: 1, minWidth: 0, background: 'none', border: 'none', outline: 'none', color: 'var(--text-primary)', fontSize: '15px', padding: '12px 0' }}
                         />
@@ -2530,7 +3125,7 @@ function App() {
                         className="chat-input-field"
                         placeholder="Type a secure message..."
                         value={inputText}
-                        onChange={(e) => setInputText(e.target.value)}
+                        onChange={(e) => handleInputChange(e.target.value)}
                         disabled={!connected}
                         style={{ flex: 1, background: 'none', border: 'none', outline: 'none', color: 'var(--text-primary)', fontSize: '14px', padding: '8px 0' }}
                       />
@@ -2587,6 +3182,7 @@ function App() {
                     <span style={{ fontSize: '10px', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '1px', fontFamily: 'monospace' }}>End-to-End Encrypted</span>
                   </div>
                 </form>
+              )}
               </footer>
             </>
           ) : (

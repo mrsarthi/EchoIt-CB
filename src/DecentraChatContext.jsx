@@ -54,6 +54,7 @@ export const DecentraChatProvider = ({ children }) => {
   const [conversations, setConversations] = useState([]);
   const [activeConversationId, setActiveConversationId] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [messagesLoading, setMessagesLoading] = useState(false);
 
   const [bootPhase, setBootPhase] = useState('checking_crypto');
   const [bootError, setBootError] = useState(null);
@@ -79,6 +80,9 @@ export const DecentraChatProvider = ({ children }) => {
   const [usernameChangesCount, setUsernameChangesCount] = useState(0);
   const [lastUsernameChangeAt, setLastUsernameChangeAt] = useState(null);
   const [groupMessageStatuses, setGroupMessageStatuses] = useState([]);
+  const [onlineUsers, setOnlineUsers] = useState(new Set());
+  const [typingUsers, setTypingUsers] = useState({});
+  const typingTimeoutsRef = useRef({});
 
   // Privacy Settings States
   const [stealthMode, setStealthMode] = useState(() => {
@@ -660,6 +664,9 @@ export const DecentraChatProvider = ({ children }) => {
   useEffect(() => {
     if (!client) return;
 
+    // Set initial online users list
+    setOnlineUsers(new Set(client.onlineUsers));
+
     const handleMessage = async (msg) => {
       console.log("[Context] Received real-time message:", msg);
       if (msg.senderUsername) {
@@ -683,10 +690,53 @@ export const DecentraChatProvider = ({ children }) => {
       setConnected(status === 'connected');
     };
 
+    const handlePresenceUpdate = () => {
+      setOnlineUsers(new Set(client.onlineUsers));
+    };
+
+    const handleTypingStatus = (data) => {
+      const { senderAddress, conversationId, isTyping } = data;
+      const convId = conversationId.toLowerCase();
+      const sender = senderAddress.toLowerCase();
+
+      setTypingUsers(prev => {
+        const currentSet = new Set(prev[convId] || []);
+        if (isTyping) {
+          currentSet.add(sender);
+        } else {
+          currentSet.delete(sender);
+        }
+        return {
+          ...prev,
+          [convId]: Array.from(currentSet)
+        };
+      });
+
+      const timeoutKey = `${convId}_${sender}`;
+      if (typingTimeoutsRef.current[timeoutKey]) {
+        clearTimeout(typingTimeoutsRef.current[timeoutKey]);
+      }
+
+      if (isTyping) {
+        typingTimeoutsRef.current[timeoutKey] = setTimeout(() => {
+          setTypingUsers(prev => {
+            const currentSet = new Set(prev[convId] || []);
+            currentSet.delete(sender);
+            return {
+              ...prev,
+              [convId]: Array.from(currentSet)
+            };
+          });
+        }, 4000);
+      }
+    };
+
     client.on('message', handleMessage);
     client.on('readReceipt', handleReadReceipt);
     client.on('messageStatus', handleMessageStatus);
     client.on('status', handleStatus);
+    client.on('presenceUpdate', handlePresenceUpdate);
+    client.on('typingStatus', handleTypingStatus);
 
     // Auto-connect if already registered
     if (registeredRef.current) {
@@ -698,6 +748,9 @@ export const DecentraChatProvider = ({ children }) => {
       client.off('readReceipt', handleReadReceipt);
       client.off('messageStatus', handleMessageStatus);
       client.off('status', handleStatus);
+      client.off('presenceUpdate', handlePresenceUpdate);
+      client.off('typingStatus', handleTypingStatus);
+      Object.values(typingTimeoutsRef.current).forEach(clearTimeout);
       client.disconnect();
     };
   }, [client]);
@@ -705,7 +758,14 @@ export const DecentraChatProvider = ({ children }) => {
   // Refresh messages list when active chat changes
   useEffect(() => {
     if (client && activeConversationId) {
-      refreshData(client, activeConversationId);
+      setMessagesLoading(true);
+      setMessages([]); // clear previous messages
+      refreshData(client, activeConversationId).finally(() => {
+        setMessagesLoading(false);
+      });
+    } else {
+      setMessages([]);
+      setMessagesLoading(false);
     }
   }, [client, activeConversationId, refreshData]);
 
@@ -724,19 +784,19 @@ export const DecentraChatProvider = ({ children }) => {
         // Update local database status to 'read'
         await client.markConversationAsRead(activeId);
         
-        // Notify peer/group via read receipt
-        try {
-          const isGroup = conversations.find(c => c.id === activeId)?.is_group === 1;
-          if (isGroup) {
-            await client.sendGroupReadReceipt(activeId, unreadIds);
-          } else {
-            await client.sendReadReceipt(activeId, unreadIds);
-          }
-        } catch (receiptErr) {
-          console.warn("Failed to send read receipt to peer/group:", receiptErr.message);
+        // Notify peer/group via read receipt in the background
+        const isGroup = conversations.find(c => c.id === activeId)?.is_group === 1;
+        if (isGroup) {
+          client.sendGroupReadReceipt(activeId, unreadIds).catch(err => {
+            console.warn("Failed to send group read receipt to peer/group:", err.message);
+          });
+        } else {
+          client.sendReadReceipt(activeId, unreadIds).catch(err => {
+            console.warn("Failed to send read receipt to peer/group:", err.message);
+          });
         }
         
-        // Refresh conversations & messages
+        // Refresh conversations & messages immediately
         await refreshData(client, activeId);
       } else {
         // If DB has no unread messages but React state still has them, sync React state from DB to prevent loops
@@ -781,13 +841,33 @@ export const DecentraChatProvider = ({ children }) => {
   };
 
   // 2. Send E2EE Direct Message
-  const sendDirectMessage = async (recipientAddress, text, recipientUsername = null, recipientHideWallet = null, recipientBio = null, recipientPfp = null) => {
+  const sendDirectMessage = async (recipientAddress, text, recipientUsername = null, recipientHideWallet = null, recipientBio = null, recipientPfp = null, replyTo = null) => {
     if (!client) throw new Error("Client is offline or uninitialized.");
+    const tempId = 'temp-' + crypto.randomUUID();
+    const tempMsg = {
+      id: tempId,
+      conversation_id: recipientAddress,
+      sender_address: client.address,
+      recipient_address: recipientAddress,
+      body_text: text,
+      media_metadata: null,
+      timestamp: Date.now(),
+      status: 'sending',
+      reply_metadata: replyTo ? JSON.stringify(Array.isArray(replyTo) ? replyTo.map(r => ({ id: r.id, sender: r.sender_address || r.sender, text: r.body_text || r.text })) : [{ id: replyTo.id, sender: replyTo.sender_address || replyTo.sender, text: replyTo.body_text || replyTo.text }]) : null
+    };
+
+    if (activeConversationId === recipientAddress) {
+      setMessages(prev => [...prev, tempMsg]);
+    }
+
     try {
-      const res = await client.sendMessage(recipientAddress, text, null, recipientUsername, recipientHideWallet, recipientBio, recipientPfp);
-      await refreshData(client);
+      const res = await client.sendMessage(recipientAddress, text, null, recipientUsername, recipientHideWallet, recipientBio, recipientPfp, replyTo);
+      refreshData(client).then(() => {
+        setMessages(prev => prev.filter(m => m.id !== tempId));
+      });
       return res;
     } catch (err) {
+      setMessages(prev => prev.filter(m => m.id !== tempId));
       console.error("[Context] Send message error:", err.message);
       setError("Failed to send message: " + err.message);
       throw err;
@@ -797,9 +877,15 @@ export const DecentraChatProvider = ({ children }) => {
   // Delete a contact and its E2EE session data locally
   const deleteContact = async (conversationId) => {
     if (!client) throw new Error("Client is offline or uninitialized.");
+    // Optimistically remove from conversations list
+    setConversations(prev => prev.filter(c => c.id !== conversationId));
     try {
-      await client.deleteConversation(conversationId);
-      await refreshData(client);
+      client.deleteConversation(conversationId)
+        .then(() => refreshData(client))
+        .catch(err => {
+          console.error("Failed to delete contact in database:", err);
+          refreshData(client);
+        });
     } catch (err) {
       console.error("[Context] Delete contact error:", err.message);
       setError("Failed to delete contact: " + err.message);
@@ -810,11 +896,31 @@ export const DecentraChatProvider = ({ children }) => {
   // Send media file message
   const sendMediaMessage = async (recipientAddress, fileBuffer, mimeType, onProgress = null) => {
     if (!client) throw new Error("Client is offline or uninitialized.");
+    const tempId = 'temp-' + crypto.randomUUID();
+    const tempMsg = {
+      id: tempId,
+      conversation_id: recipientAddress,
+      sender_address: client.address,
+      recipient_address: recipientAddress,
+      body_text: "[Attachment]",
+      media_metadata: JSON.stringify({ mimeType }),
+      timestamp: Date.now(),
+      status: 'sending',
+      reply_metadata: null
+    };
+
+    if (activeConversationId === recipientAddress) {
+      setMessages(prev => [...prev, tempMsg]);
+    }
+
     try {
       const res = await client.sendMediaMessage(recipientAddress, fileBuffer, mimeType, onProgress);
-      await refreshData(client);
+      refreshData(client).then(() => {
+        setMessages(prev => prev.filter(m => m.id !== tempId));
+      });
       return res;
     } catch (err) {
+      setMessages(prev => prev.filter(m => m.id !== tempId));
       console.error("[Context] Send media message error:", err.message);
       setError("Failed to send media: " + err.message);
       throw err;
@@ -834,13 +940,33 @@ export const DecentraChatProvider = ({ children }) => {
   };
 
   // 3. Send E2EE Group Message (Multicast)
-  const sendGroupMessage = async (groupId, text) => {
+  const sendGroupMessage = async (groupId, text, replyTo = null) => {
     if (!client) throw new Error("Client is offline or uninitialized.");
+    const tempId = 'temp-' + crypto.randomUUID();
+    const tempMsg = {
+      id: tempId,
+      conversation_id: groupId,
+      sender_address: client.address,
+      recipient_address: groupId,
+      body_text: text,
+      media_metadata: null,
+      timestamp: Date.now(),
+      status: 'sent',
+      reply_metadata: replyTo ? JSON.stringify(Array.isArray(replyTo) ? replyTo.map(r => ({ id: r.id, sender: r.sender_address || r.sender, text: r.body_text || r.text })) : [{ id: replyTo.id, sender: replyTo.sender_address || replyTo.sender, text: replyTo.body_text || replyTo.text }]) : null
+    };
+
+    if (activeConversationId === groupId) {
+      setMessages(prev => [...prev, tempMsg]);
+    }
+
     try {
-      const res = await client.sendGroupMessage(groupId, text);
-      await refreshData(client);
+      const res = await client.sendGroupMessage(groupId, text, null, replyTo);
+      refreshData(client).then(() => {
+        setMessages(prev => prev.filter(m => m.id !== tempId));
+      });
       return res;
     } catch (err) {
+      setMessages(prev => prev.filter(m => m.id !== tempId));
       console.error("[Context] Send group message error:", err.message);
       setError("Failed to send group message: " + err.message);
       throw err;
@@ -995,6 +1121,7 @@ export const DecentraChatProvider = ({ children }) => {
         conversations,
         activeConversationId,
         messages,
+        messagesLoading,
         loading,
         error,
         bootPhase,
@@ -1042,7 +1169,9 @@ export const DecentraChatProvider = ({ children }) => {
         deviceBiometricsAvailable,
         enableBiometricLogin,
         disableBiometricLogin,
-        resetWallet
+        resetWallet,
+        onlineUsers,
+        typingUsers
       }}
     >
       {children}

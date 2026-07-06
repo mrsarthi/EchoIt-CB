@@ -342,6 +342,7 @@ io.on('connection', (socket) => {
 
       socket.address = address.toLowerCase();
       socket.join(socket.address);
+      socket.broadcast.emit('userConnected', { address: socket.address });
       console.log(`Socket ${socket.id} authenticated as ${socket.address}`);
 
       // Retrieve username and privacy settings
@@ -373,6 +374,10 @@ io.on('connection', (socket) => {
       const count = parseInt(opkRes.rows[0].count, 10);
       const newToken = generateAccessToken(socket.address);
 
+      // Fetch all online users
+      const activeSockets = await io.fetchSockets();
+      const onlineUsers = Array.from(new Set(activeSockets.map(s => s.address).filter(Boolean)));
+
       callback({
         success: true,
         opkCount: count,
@@ -383,7 +388,8 @@ io.on('connection', (socket) => {
         bio,
         pfp,
         usernameChangesCount,
-        lastUsernameChangeAt
+        lastUsernameChangeAt,
+        onlineUsers
       });
     } catch (err) {
       console.error("Login error:", err.stack || err);
@@ -450,6 +456,7 @@ io.on('connection', (socket) => {
       // Authenticate socket session
       socket.address = address.toLowerCase();
       socket.join(socket.address);
+      socket.broadcast.emit('userConnected', { address: socket.address });
       socket.username = user.username;
       socket.stealthMode = user.stealth_mode;
       socket.hideWallet = user.hide_wallet;
@@ -462,6 +469,10 @@ io.on('connection', (socket) => {
       const opkRes = await pool.query('SELECT COUNT(*) FROM one_time_keys WHERE address = $1', [socket.address]);
       const count = parseInt(opkRes.rows[0].count, 10);
 
+      // Fetch all online users
+      const activeSockets = await io.fetchSockets();
+      const onlineUsers = Array.from(new Set(activeSockets.map(s => s.address).filter(Boolean)));
+
       callback({
         success: true,
         token,
@@ -473,7 +484,8 @@ io.on('connection', (socket) => {
         bio: user.bio || '',
         pfp: user.pfp || null,
         usernameChangesCount: user.username_changes_count || 0,
-        lastUsernameChangeAt: user.last_username_change_at
+        lastUsernameChangeAt: user.last_username_change_at,
+        onlineUsers
       });
     } catch (err) {
       console.error("Login with signature error:", err.stack || err);
@@ -820,6 +832,9 @@ io.on('connection', (socket) => {
         if (row.senderHideWallet) {
           row.from = row.senderUsername;
         }
+        if (row.timestamp) {
+          row.timestamp = Number(row.timestamp);
+        }
         return row;
       });
 
@@ -853,6 +868,13 @@ io.on('connection', (socket) => {
       // Delete acknowledged messages from outbox
       await pool.query(
         `DELETE FROM outbox 
+         WHERE recipient_address = $1 AND id = ANY($2::uuid[])`,
+        [socket.address, messageIds]
+      );
+
+      // Delete acknowledged messages from message_backup
+      await pool.query(
+        `DELETE FROM message_backup 
          WHERE recipient_address = $1 AND id = ANY($2::uuid[])`,
         [socket.address, messageIds]
       );
@@ -1259,8 +1281,28 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => {
     console.log(`Socket disconnected: ${socket.id}`);
+    if (socket.address) {
+      // Check if this user has any other active connections before declaring offline
+      const userSockets = await io.in(socket.address).fetchSockets();
+      const stillOnline = userSockets.filter(s => s.id !== socket.id).length > 0;
+      if (!stillOnline) {
+        socket.broadcast.emit('userDisconnected', { address: socket.address });
+      }
+    }
+  });
+
+  socket.on('typing', (payload) => {
+    const { recipient, conversationId, isTyping } = payload;
+    if (!socket.address || !recipient || !conversationId) return;
+    
+    // Forward typing status to recipient
+    io.to(recipient.toLowerCase()).emit('typingStatus', {
+      senderAddress: socket.address,
+      conversationId: conversationId.toLowerCase(),
+      isTyping: !!isTyping
+    });
   });
 });
 

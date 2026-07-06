@@ -284,16 +284,18 @@ try {
             }
           }
           else if (cleanSql.includes('INSERT OR REPLACE INTO messages')) {
-            let id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata = null, timestamp, status, vector_clock = null, sender_counter = 0;
+            let id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata = null, timestamp, status, vector_clock = null, sender_counter = 0, reply_metadata = null;
             if (args.length === 8) {
               [id, conversation_id, sender_address, recipient_address, ciphertext, body_text, timestamp, status] = args;
             } else if (args.length === 9) {
               [id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status] = args;
-            } else {
+            } else if (args.length === 11) {
               [id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status, vector_clock, sender_counter] = args;
+            } else {
+              [id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status, vector_clock, sender_counter, reply_metadata] = args;
             }
             const idx = self.tables.messages.findIndex(r => r.id === id);
-            const row = { id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status, vector_clock, sender_counter };
+            const row = { id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status, vector_clock, sender_counter, reply_metadata };
             if (idx !== -1) self.tables.messages[idx] = row;
             else self.tables.messages.push(row);
           }
@@ -532,6 +534,7 @@ class DBClient {
         status TEXT NOT NULL,
         vector_clock TEXT,
         sender_counter INTEGER DEFAULT 0,
+        reply_metadata TEXT,
         FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
       );
 
@@ -602,6 +605,11 @@ class DBClient {
     }
     try {
       this.db.exec('ALTER TABLE messages ADD COLUMN sender_counter INTEGER DEFAULT 0');
+    } catch (e) {
+      // Ignore if column already exists
+    }
+    try {
+      this.db.exec('ALTER TABLE messages ADD COLUMN reply_metadata TEXT');
     } catch (e) {
       // Ignore if column already exists
     }
