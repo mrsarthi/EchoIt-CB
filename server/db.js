@@ -145,7 +145,23 @@ const migrations = [
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS pfp TEXT;`,
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS username_changes_count INT DEFAULT 0;`,
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS last_username_change_at BIGINT;`,
-  `ALTER TABLE users ADD COLUMN IF NOT EXISTS identity_signing_key TEXT;`
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS identity_signing_key TEXT;`,
+  `CREATE TABLE IF NOT EXISTS message_backup (
+      id UUID PRIMARY KEY,
+      sender_address VARCHAR(42) NOT NULL,
+      recipient_address VARCHAR(42) NOT NULL,
+      ciphertext TEXT NOT NULL,         
+      iv VARCHAR(24) NOT NULL,          
+      dh_public TEXT NOT NULL,          
+      sequence_number INT NOT NULL,     
+      timestamp BIGINT NOT NULL,
+      x3dh_info TEXT,
+      group_id TEXT,
+      vector_clock TEXT,
+      sender_counter INT NOT NULL
+  );`,
+  `CREATE INDEX IF NOT EXISTS idx_backup_query ON message_backup(recipient_address, sender_address, sender_counter);`,
+  `CREATE INDEX IF NOT EXISTS idx_backup_group ON message_backup(group_id, sender_address, sender_counter);`
 ];
 
 async function runMigrations() {

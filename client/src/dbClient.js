@@ -284,14 +284,18 @@ try {
             }
           }
           else if (cleanSql.includes('INSERT OR REPLACE INTO messages')) {
-            let id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata = null, timestamp, status;
+            let id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata = null, timestamp, status, vector_clock = null, sender_counter = 0, reply_metadata = null;
             if (args.length === 8) {
               [id, conversation_id, sender_address, recipient_address, ciphertext, body_text, timestamp, status] = args;
-            } else {
+            } else if (args.length === 9) {
               [id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status] = args;
+            } else if (args.length === 11) {
+              [id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status, vector_clock, sender_counter] = args;
+            } else {
+              [id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status, vector_clock, sender_counter, reply_metadata] = args;
             }
             const idx = self.tables.messages.findIndex(r => r.id === id);
-            const row = { id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status };
+            const row = { id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status, vector_clock, sender_counter, reply_metadata };
             if (idx !== -1) self.tables.messages[idx] = row;
             else self.tables.messages.push(row);
           }
@@ -361,11 +365,27 @@ try {
           else if (cleanSql.includes('DELETE FROM key_metadata')) {
             self.tables.key_metadata = [];
           }
+          else if (cleanSql.includes('DELETE FROM conversations WHERE id = ?')) {
+            const [id] = args;
+            self.tables.conversations = self.tables.conversations.filter(r => r.id !== id);
+          }
           else if (cleanSql.includes('DELETE FROM conversations')) {
             self.tables.conversations = [];
           }
+          else if (cleanSql.includes('DELETE FROM messages WHERE conversation_id = ?')) {
+            const [conversation_id] = args;
+            self.tables.messages = self.tables.messages.filter(r => r.conversation_id !== conversation_id);
+          }
           else if (cleanSql.includes('DELETE FROM messages')) {
             self.tables.messages = [];
+          }
+          else if (cleanSql.includes('DELETE FROM ratchet_sessions WHERE peer_address = ?')) {
+            const [peer_address] = args;
+            self.tables.ratchet_sessions = self.tables.ratchet_sessions.filter(r => r.peer_address !== peer_address);
+          }
+          else if (cleanSql.includes('DELETE FROM skipped_message_keys WHERE peer_address = ?') && args.length === 1) {
+            const [peer_address] = args;
+            self.tables.skipped_message_keys = self.tables.skipped_message_keys.filter(r => r.peer_address !== peer_address);
           }
           else if (cleanSql.includes('DELETE FROM groups')) {
             self.tables.groups = [];
@@ -512,6 +532,9 @@ class DBClient {
         media_metadata TEXT,
         timestamp INTEGER NOT NULL,
         status TEXT NOT NULL,
+        vector_clock TEXT,
+        sender_counter INTEGER DEFAULT 0,
+        reply_metadata TEXT,
         FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
       );
 
@@ -572,6 +595,21 @@ class DBClient {
     }
     try {
       this.db.exec('ALTER TABLE conversations ADD COLUMN pfp TEXT');
+    } catch (e) {
+      // Ignore if column already exists
+    }
+    try {
+      this.db.exec('ALTER TABLE messages ADD COLUMN vector_clock TEXT');
+    } catch (e) {
+      // Ignore if column already exists
+    }
+    try {
+      this.db.exec('ALTER TABLE messages ADD COLUMN sender_counter INTEGER DEFAULT 0');
+    } catch (e) {
+      // Ignore if column already exists
+    }
+    try {
+      this.db.exec('ALTER TABLE messages ADD COLUMN reply_metadata TEXT');
     } catch (e) {
       // Ignore if column already exists
     }

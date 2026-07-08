@@ -1,6 +1,6 @@
 {
   "name": "decentrachat-relay-server",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "description": "Zero-Knowledge Ephemeral Relay Server for DecentraChat V4",
   "main": "server.js",
   "scripts": {
@@ -19,6 +19,7 @@
     "socket.io": "^4.7.5"
   },
   "devDependencies": {
+    "artillery": "^2.0.33",
     "nodemon": "^3.1.4",
     "socket.io-client": "^4.7.5"
   }

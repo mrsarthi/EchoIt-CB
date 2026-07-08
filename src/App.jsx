@@ -5,6 +5,90 @@ import logo from './assets/logo.png';
 import SplashScreen from './SplashScreen';
 import { App as CapacitorApp } from '@capacitor/app';
 import QuickPinchZoom, { make3dTransformValue } from 'react-quick-pinch-zoom';
+import { Filesystem, Directory } from '@capacitor/filesystem';
+
+// --- Standard IndexedDB Media Cache Helper ---
+const initMediaDB = () => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('DecentraChatMediaCache', 1);
+    request.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains('media')) {
+        db.createObjectStore('media');
+      }
+    };
+    request.onsuccess = (e) => resolve(e.target.result);
+    request.onerror = (e) => reject(e.target.error);
+  });
+};
+
+const getCachedMedia = async (mediaId) => {
+  try {
+    const db = await initMediaDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction('media', 'readonly');
+      const store = transaction.objectStore('media');
+      const request = store.get(mediaId);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  } catch (err) {
+    console.error("IndexedDB get error:", err);
+    return null;
+  }
+};
+
+const setCachedMedia = async (mediaId, blob) => {
+  try {
+    const db = await initMediaDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction('media', 'readwrite');
+      const store = transaction.objectStore('media');
+      const request = store.put(blob, mediaId);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  } catch (err) {
+    console.error("IndexedDB put error:", err);
+  }
+};
+
+// --- Multi-platform file download/save helper ---
+const saveMediaToDevice = async (blob, filename) => {
+  if (window.Capacitor?.isNativePlatform()) {
+    try {
+      const reader = new FileReader();
+      reader.readAsDataURL(blob);
+      reader.onloadend = async () => {
+        try {
+          const base64Data = reader.result.split(',')[1];
+          const result = await Filesystem.writeFile({
+            path: filename,
+            data: base64Data,
+            directory: Directory.Documents,
+            recursive: true
+          });
+          alert(`Saved successfully to Documents: ${filename}`);
+        } catch (err) {
+          console.error("Filesystem save error:", err);
+          alert("Error saving file: " + err.message);
+        }
+      };
+    } catch (err) {
+      console.error("Capacitor save error:", err);
+      alert("Error saving file: " + err.message);
+    }
+  } else {
+    // Browser download
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+};
 
 const getMetaMaskLink = () => {
   if (typeof window !== 'undefined' && window.location) {
@@ -26,6 +110,7 @@ function App() {
     conversations,
     activeConversationId,
     messages,
+    messagesLoading,
     loading,
     error,
     bootPhase,
@@ -33,6 +118,7 @@ function App() {
     setActiveConversationId,
     registerUser,
     sendDirectMessage,
+    deleteContact,
     sendMediaMessage,
     downloadMedia,
     sendGroupMessage,
@@ -70,61 +156,186 @@ function App() {
     deviceBiometricsAvailable,
     enableBiometricLogin,
     disableBiometricLogin,
-    resetWallet
+    resetWallet,
+    onlineUsers,
+    typingUsers
   } = useDecentraChat();
 
-  const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
+  const [isMobile, setIsMobile] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return window.innerWidth <= 768 || !!window.Capacitor?.isNativePlatform();
+    }
+    return false;
+  });
   useEffect(() => {
-    const handleResize = () => setIsMobile(window.innerWidth <= 768);
+    const handleResize = () => setIsMobile(window.innerWidth <= 768 || !!window.Capacitor?.isNativePlatform());
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
   useEffect(() => {
-    if (typeof window !== 'undefined' && window.Capacitor?.isNativePlatform()) {
-      const handleBackButton = CapacitorApp.addListener('backButton', () => {
-        if (showInfoModal) setShowInfoModal(false);
-        else if (showGroupModal) setShowGroupModal(false);
-        else if (showDMModal) setShowDMModal(false);
-        else if (showProfileModal) setShowProfileModal(false);
-        else if (showExportModal) setShowExportModal(false);
-        else if (showImportModal) setShowImportModal(false);
-        else if (showEmojiPicker) setShowEmojiPicker(false);
-        else if (activeConversationId) setActiveConversationId(null);
-        else if (activeTab !== 'chats') setActiveTab('chats');
-        else CapacitorApp.minimizeApp();
-      });
-      return () => {
-        handleBackButton.then(h => h.remove());
-      };
-    }
-  }, [
-    activeConversationId,
-    activeTab,
-    showInfoModal,
-    showGroupModal,
-    showDMModal,
-    showProfileModal,
-    showExportModal,
-    showImportModal,
-    showEmojiPicker,
-    setActiveConversationId,
-    setActiveTab
-  ]);
-
-  // Auto-trigger biometrics on lock screen if supported
-  useEffect(() => {
-    if (bootPhase === 'lockbox_locked' && biometricsSupported) {
-      const timer = setTimeout(async () => {
-        try {
-          await unlockWithBiometrics();
-        } catch (e) {
-          // Silent fallback to password entry
+    const loadCachedMedia = async () => {
+      const mediaToLoad = [];
+      messages.forEach(msg => {
+        if (msg.media_metadata) {
+          try {
+            const mediaObj = typeof msg.media_metadata === 'string' 
+              ? JSON.parse(msg.media_metadata) 
+              : msg.media_metadata;
+            if (mediaObj && mediaObj.mediaId && !mediaCache[mediaObj.mediaId]) {
+              mediaToLoad.push(mediaObj);
+            }
+          } catch (e) {}
         }
-      }, 300);
-      return () => clearTimeout(timer);
+      });
+      
+      if (mediaToLoad.length === 0) return;
+      
+      for (const mediaObj of mediaToLoad) {
+        const cachedBlob = await getCachedMedia(mediaObj.mediaId);
+        if (cachedBlob) {
+          const url = URL.createObjectURL(cachedBlob);
+          setMediaCache(prev => ({ 
+            ...prev, 
+            [mediaObj.mediaId]: { url, name: mediaObj.mediaId } 
+          }));
+        }
+      }
+    };
+    
+    loadCachedMedia();
+  }, [messages]);
+
+  const [replyingToMessage, setReplyingToMessage] = useState(null); // holds array of messages (replies) or null
+  const [multiSelectMode, setMultiSelectMode] = useState(false);
+  const [selectedMessages, setSelectedMessages] = useState([]); // holds array of selected message objects
+  const [expandedAccordions, setExpandedAccordions] = useState(new Set());
+
+  const toggleAccordion = (msgId) => {
+    setExpandedAccordions(prev => {
+      const next = new Set(prev);
+      if (next.has(msgId)) {
+        next.delete(msgId);
+      } else {
+        next.add(msgId);
+      }
+      return next;
+    });
+  };
+
+  const longPressTimerRef = useRef(null);
+
+  const startLongPress = (msg) => {
+    longPressTimerRef.current = setTimeout(() => {
+      setMultiSelectMode(true);
+      setSelectedMessages([msg]);
+    }, 700);
+  };
+
+  const cancelLongPress = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
     }
-  }, [bootPhase, biometricsSupported, unlockWithBiometrics]);
+  };
+
+  const handleToggleMessageSelection = (msg) => {
+    setSelectedMessages(prev => {
+      const exists = prev.some(m => m.id === msg.id);
+      if (exists) {
+        return prev.filter(m => m.id !== msg.id);
+      } else {
+        return [...prev, msg];
+      }
+    });
+  };
+
+  const handleBubbleClick = (msg) => {
+    if (multiSelectMode) {
+      handleToggleMessageSelection(msg);
+    }
+  };
+
+  const handleAddReplyToChain = (msg) => {
+    setReplyingToMessage(prev => {
+      if (!prev) {
+        return [msg];
+      }
+      if (prev.some(m => m.id === msg.id)) {
+        return prev;
+      }
+      return [...prev, msg];
+    });
+  };
+  
+  // Touch swipe states
+  const [activeSwipeMsgId, setActiveSwipeMsgId] = useState(null);
+  const [swipeOffset, setSwipeOffset] = useState(0);
+  const touchStartRef = useRef(0);
+
+  const handleTouchStart = (e, msgId) => {
+    touchStartRef.current = e.touches[0].clientX;
+    setActiveSwipeMsgId(msgId);
+    setSwipeOffset(0);
+  };
+
+  const handleTouchMove = (e) => {
+    if (activeSwipeMsgId === null) return;
+    const currentX = e.touches[0].clientX;
+    const diffX = currentX - touchStartRef.current;
+    if (diffX > 0) {
+      setSwipeOffset(Math.min(diffX, 70));
+    }
+  };
+
+  const handleTouchEnd = (msg) => {
+    if (activeSwipeMsgId === msg.id && swipeOffset > 45) {
+      handleAddReplyToChain(msg);
+    }
+    setActiveSwipeMsgId(null);
+    setSwipeOffset(0);
+  };
+
+  const typingTimeoutRef = useRef(null);
+  const isTypingRef = useRef(false);
+
+  const handleInputChange = (val) => {
+    setInputText(val);
+
+    if (!client || !activeConversationId) return;
+
+    if (!isTypingRef.current) {
+      isTypingRef.current = true;
+      sendTypingToActiveChat(true);
+    }
+
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => {
+      isTypingRef.current = false;
+      sendTypingToActiveChat(false);
+    }, 2000);
+  };
+
+  const sendTypingToActiveChat = (isTyping) => {
+    if (!client || !activeConversationId) return;
+    const activeChat = conversations.find(c => c.id === activeConversationId);
+    if (!activeChat) return;
+
+    if (activeChat.is_group === 1) {
+      client.db.read(db => {
+        const group = db.prepare('SELECT members FROM groups WHERE id = ?').get(activeConversationId);
+        if (group) {
+          const members = JSON.parse(group.members || '[]');
+          members.forEach(member => {
+            if (member.toLowerCase() !== client.address.toLowerCase()) {
+              client.sendTypingStatus(member, activeConversationId, isTyping);
+            }
+          });
+        }
+      });
+    } else {
+      client.sendTypingStatus(activeConversationId, activeConversationId, isTyping);
+    }
+  };
 
   const mediaUploadControllerRef = useRef(null);
   const lightboxImgRef = useRef(null);
@@ -149,6 +360,9 @@ function App() {
   const [backupPassphrase, setBackupPassphrase] = useState('');
   const [backupJSON, setBackupJSON] = useState('');
   const [activeLightboxUrl, setActiveLightboxUrl] = useState(null);
+  const [activeLightboxMimeType, setActiveLightboxMimeType] = useState(null);
+  const [activeLightboxName, setActiveLightboxName] = useState(null);
+  const [activeLightboxId, setActiveLightboxId] = useState(null);
   const [isDerivingKey, setIsDerivingKey] = useState(false);
 
   // Profile Hub States
@@ -198,6 +412,7 @@ function App() {
   // Modal visibility states
   const [showDMModal, setShowDMModal] = useState(false);
   const [showGroupModal, setShowGroupModal] = useState(false);
+  const [showNewChatMenu, setShowNewChatMenu] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showInfoModal, setShowInfoModal] = useState(false);
@@ -280,6 +495,54 @@ function App() {
   useEffect(() => {
     localStorage.setItem('echo_compact_view', compactView ? 'true' : 'false');
   }, [compactView]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.Capacitor?.isNativePlatform()) {
+      const handleBackButton = CapacitorApp.addListener('backButton', () => {
+        if (showInfoModal) setShowInfoModal(false);
+        else if (showGroupModal) setShowGroupModal(false);
+        else if (showDMModal) setShowDMModal(false);
+        else if (showNewChatMenu) setShowNewChatMenu(false);
+        else if (showProfileModal) setShowProfileModal(false);
+        else if (showExportModal) setShowExportModal(false);
+        else if (showImportModal) setShowImportModal(false);
+        else if (showEmojiPicker) setShowEmojiPicker(false);
+        else if (activeConversationId) setActiveConversationId(null);
+        else if (activeTab !== 'chats') setActiveTab('chats');
+        else CapacitorApp.minimizeApp();
+      });
+      return () => {
+        handleBackButton.then(h => h.remove());
+      };
+    }
+  }, [
+    activeConversationId,
+    activeTab,
+    showInfoModal,
+    showGroupModal,
+    showDMModal,
+    showNewChatMenu,
+    showProfileModal,
+    showExportModal,
+    showImportModal,
+    showEmojiPicker,
+    setActiveConversationId,
+    setActiveTab
+  ]);
+
+  // Auto-trigger biometrics on lock screen if supported
+  useEffect(() => {
+    if (bootPhase === 'lockbox_locked' && biometricsSupported) {
+      const timer = setTimeout(async () => {
+        try {
+          await unlockWithBiometrics();
+        } catch (e) {
+          // Silent fallback to password entry
+        }
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [bootPhase, biometricsSupported, unlockWithBiometrics]);
 
   useEffect(() => {
     localStorage.setItem('echo_auto_connect', autoConnect ? 'true' : 'false');
@@ -421,25 +684,33 @@ function App() {
     const media = pendingMedia;
     setPendingMedia(null);
 
+    const replyTo = replyingToMessage;
+    setReplyingToMessage(null);
+
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    isTypingRef.current = false;
+    sendTypingToActiveChat(false);
+
     try {
       const activeChat = conversations.find(c => c.id === activeConversationId);
       const isGroup = activeChat?.is_group === 1;
       
       if (media) {
         if (isGroup) {
-          await client.sendGroupMessage(activeConversationId, text || "[Attachment]", media.manifest);
+          await client.sendGroupMessage(activeConversationId, text || "[Attachment]", media.manifest, replyTo);
         } else {
           const contact = getCombinedContacts().find(item => item.address.toLowerCase() === activeConversationId.toLowerCase());
-          await client.sendMessage(activeConversationId, text || "[Attachment]", media.manifest, contact?.username, contact?.hide_wallet);
+          await client.sendMessage(activeConversationId, text || "[Attachment]", media.manifest, contact?.username, contact?.hide_wallet, contact?.bio, contact?.pfp, replyTo);
         }
       } else {
         if (isGroup) {
-          await sendGroupMessage(activeConversationId, text);
+          await sendGroupMessage(activeConversationId, text, replyTo);
         } else {
-          await sendDirectMessage(activeConversationId, text);
+          const contact = getCombinedContacts().find(item => item.address.toLowerCase() === activeConversationId.toLowerCase());
+          await sendDirectMessage(activeConversationId, text, contact?.username, contact?.hide_wallet, contact?.bio, contact?.pfp, replyTo);
         }
       }
-      await refreshData(client);
+      refreshData(client);
     } catch (err) {
       console.error("Message send failed:", err);
     }
@@ -531,13 +802,11 @@ function App() {
 
       setMediaCache(prev => ({ ...prev, [mediaId]: { url, name: mediaId } }));
 
-      if (!mimeType.startsWith('image/')) {
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `file_${mediaId.substring(6, 12)}.${mimeType.split('/')[1] || 'bin'}`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+      // Cache the blob locally in IndexedDB
+      await setCachedMedia(mediaId, blob);
+
+      if (!mimeType.startsWith('image/') && !mimeType.startsWith('video/')) {
+        await saveMediaToDevice(blob, `file_${mediaId.substring(6, 12)}.${mimeType.split('/')[1] || 'bin'}`);
       }
     } catch (err) {
       console.error("Media download failed:", err);
@@ -552,23 +821,33 @@ function App() {
   };
 
 
-  // Mock contacts list to match the Stitch Contacts view
-  const mockContacts = [
-    { address: '0x446662f42ad4f3cc86fd25764970644744ded851', username: 'crypto_sentinel' },
-    { address: '0x8a92f0367a941ac9da783606853c85da03a202b5', username: 'aria_vance' },
-    { address: '0x2bfd3ede922f3bd3c6b837f21f7e7b9e41daa943', username: 'alex_rivera' }
-  ];
+  // Mock contacts list is cleared to remove testing contacts (crypto_sentinel, etc.)
+  const mockContacts = [];
 
   const getCombinedContacts = () => {
     const list = [];
+    const seenAddresses = new Set();
+    const seenUsernames = new Set();
+
+    const addUnique = (item) => {
+      const addrKey = item.address.toLowerCase();
+      const userKey = item.username?.toLowerCase() || '';
+
+      if (seenAddresses.has(addrKey)) return;
+      if (userKey && seenUsernames.has(userKey)) return;
+
+      list.push(item);
+      seenAddresses.add(addrKey);
+      if (userKey) seenUsernames.add(userKey);
+    };
     
     // Add real DM conversation contacts
     conversations.forEach(c => {
       if (c.is_group !== 1) {
         const cached = usernameCache[c.id.toLowerCase()];
-        list.push({ 
+        addUnique({ 
           address: c.id, 
-          username: cached?.username || c.username,
+          username: cached?.username || c.username || c.id,
           hide_wallet: cached ? cached.hideWallet : c.hide_wallet,
           bio: (cached && cached.bio !== undefined) ? cached.bio : (c.bio || ''),
           pfp: (cached && cached.pfp !== undefined) ? cached.pfp : (c.pfp || null)
@@ -576,30 +855,15 @@ function App() {
       }
     });
 
-    // Add mock contacts if not already present
-    mockContacts.forEach(mc => {
-      if (!list.some(item => item.address.toLowerCase() === mc.address.toLowerCase())) {
-        list.push({
-          address: mc.address,
-          username: mc.username,
-          hide_wallet: false,
-          bio: 'Crypto enthusiast',
-          pfp: null
-        });
-      }
-    });
-
     // Add any other cached entries not yet in the list
     Object.keys(usernameCache).forEach(addr => {
-      if (!list.some(item => item.address.toLowerCase() === addr.toLowerCase())) {
-        list.push({
-          address: addr,
-          username: usernameCache[addr].username,
-          hide_wallet: usernameCache[addr].hideWallet,
-          bio: '',
-          pfp: null
-        });
-      }
+      addUnique({
+        address: addr,
+        username: usernameCache[addr].username,
+        hide_wallet: usernameCache[addr].hideWallet,
+        bio: usernameCache[addr].bio || '',
+        pfp: usernameCache[addr].pfp || null
+      });
     });
 
     return list;
@@ -1290,6 +1554,26 @@ function App() {
 
   return (
     <div className={`app-container ${activeConversationId ? 'chat-active' : ''} ${compactView ? 'compact-view' : ''}`}>
+      <style>{`
+        .message-bubble-container:hover .desktop-reply-btn {
+          display: flex !important;
+        }
+        .desktop-reply-btn::before {
+          content: '';
+          position: absolute;
+          top: -10px;
+          bottom: -10px;
+          left: -35px;
+          right: -35px;
+        }
+        @keyframes flash-highlight {
+          0% { background-color: rgba(99, 102, 241, 0.4); }
+          100% { background-color: transparent; }
+        }
+        .highlight-flash {
+          animation: flash-highlight 1.5s ease-out;
+        }
+      `}</style>
       
       {/* 1. Left Navigation Sidebar (mockup: Recent Chats / Settings Desktop aside) */}
       <aside className="desktop-sidebar">
@@ -1364,7 +1648,7 @@ function App() {
         <section className={`middle-pane ${isMobile ? 'safe-pb' : ''}`}>
           {isMobile ? (
             /* Mobile Recent Chats Header */
-            <header className="safe-header" style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-light)', display: 'flex', flexDirection: 'column', gap: '12px', backgroundColor: 'var(--bg-secondary)', zIndex: 40 }}>
+            <header style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 18px)', paddingBottom: '16px', paddingLeft: '20px', paddingRight: '20px', borderBottom: '1px solid var(--border-light)', display: 'flex', flexDirection: 'column', gap: '12px', backgroundColor: 'var(--bg-secondary)', zIndex: 40 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <h1 className="font-headline-sm text-headline-sm font-bold" style={{ color: 'var(--accent-indigo)', fontSize: '20px' }}>Echo</h1>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -1423,7 +1707,7 @@ function App() {
                 <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>My Status</span>
               </div>
               {/* Contact Statuses */}
-              {getCombinedContacts().slice(0, 5).map(contact => (
+              {getCombinedContacts().filter(contact => contact.bio && contact.bio.trim() !== '').slice(0, 5).map(contact => (
                 <div 
                   key={contact.address} 
                   style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: '6px', cursor: 'pointer', verticalAlign: 'top' }} 
@@ -1460,7 +1744,7 @@ function App() {
             ) : (
               filteredConversations.map((conv) => {
                 const contact = getCombinedContacts().find(item => item.address.toLowerCase() === conv.id.toLowerCase());
-                const isOnline = true; // Mock online status
+                const isOnline = onlineUsers.has(conv.id.toLowerCase());
                 return (
                   <div
                     key={conv.id}
@@ -1504,8 +1788,12 @@ function App() {
                           {new Date(conv.last_message_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                         </span>
                       </div>
-                      <div className="conv-last-msg" style={{ fontWeight: conv.unread_count > 0 ? '600' : '400', color: conv.unread_count > 0 ? 'var(--text-primary)' : 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {conv.last_message_text || (conv.is_group ? 'Group Chat' : 'Secure Channel')}
+                      <div className="conv-last-msg" style={{ fontWeight: conv.unread_count > 0 ? '600' : '400', color: (typingUsers[conv.id.toLowerCase()] || []).length > 0 ? 'var(--accent-emerald)' : (conv.unread_count > 0 ? 'var(--text-primary)' : 'var(--text-secondary)'), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {(typingUsers[conv.id.toLowerCase()] || []).length > 0 ? (
+                          <span style={{ fontStyle: 'italic' }}>typing...</span>
+                        ) : (
+                          conv.last_message_text || (conv.is_group ? 'Group Chat' : 'Secure Channel')
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1527,10 +1815,10 @@ function App() {
             /* Floating Action Button on mobile Chats */
             <button 
               className="fixed shadow-lg flex items-center justify-center hover:scale-105 active:scale-95 duration-100"
-              style={{ position: 'fixed', right: '24px', bottom: '80px', width: '56px', height: '56px', backgroundColor: 'var(--accent-indigo)', color: '#ffffff', borderRadius: '50%', border: 'none', cursor: 'pointer', zIndex: 40 }}
-              onClick={() => setShowDMModal(true)}
+              style={{ position: 'fixed', right: '24px', bottom: 'calc(60px + env(safe-area-inset-bottom, 0px) + 20px)', width: '56px', height: '56px', backgroundColor: 'var(--accent-indigo)', color: '#ffffff', borderRadius: '50%', border: 'none', cursor: 'pointer', zIndex: 40 }}
+              onClick={() => setShowNewChatMenu(true)}
             >
-              <span className="material-symbols-outlined" style={{ fontSize: '28px' }}>chat</span>
+              <span className="material-symbols-outlined" style={{ fontSize: '28px' }}>add</span>
             </button>
           )}
         </section>
@@ -1540,7 +1828,7 @@ function App() {
         <section className={`middle-pane ${isMobile ? 'safe-pb' : ''}`}>
           {isMobile ? (
             /* Mobile Contacts Header */
-            <header className="safe-header" style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-light)', display: 'flex', flexDirection: 'column', gap: '12px', backgroundColor: 'var(--bg-secondary)' }}>
+            <header style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 18px)', paddingBottom: '16px', paddingLeft: '20px', paddingRight: '20px', borderBottom: '1px solid var(--border-light)', display: 'flex', flexDirection: 'column', gap: '12px', backgroundColor: 'var(--bg-secondary)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <h1 className="font-headline-sm text-headline-sm font-bold" style={{ color: 'var(--accent-indigo)', fontSize: '20px' }}>Contacts</h1>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -1658,7 +1946,7 @@ function App() {
                             contact.username.substring(0, 2).toUpperCase()
                           )}
                         </div>
-                        <div className="conv-details">
+                        <div className="conv-details" style={{ flex: 1 }}>
                           <div className="conv-top">
                             <span className="conv-name" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                               @{contact.username}
@@ -1669,6 +1957,36 @@ function App() {
                             {contact.bio || (contact.hide_wallet ? 'Address Hidden' : truncateAddress(contact.address))}
                           </div>
                         </div>
+                        <button
+                          type="button"
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            color: 'var(--accent-rose)',
+                            cursor: 'pointer',
+                            padding: '8px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            borderRadius: '50%'
+                          }}
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            if (window.confirm(`Are you sure you want to delete @${contact.username} from your contacts? This will permanently delete the conversation and all message history.`)) {
+                              try {
+                                await deleteContact(contact.address);
+                                if (activeConversationId?.toLowerCase() === contact.address.toLowerCase() || 
+                                    activeConversationId?.toLowerCase() === contact.username.toLowerCase()) {
+                                  setActiveConversationId(null);
+                                }
+                              } catch (err) {
+                                alert("Failed to delete contact: " + err.message);
+                              }
+                            }
+                          }}
+                        >
+                          <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>delete</span>
+                        </button>
                       </div>
                     ))}
                   </div>
@@ -1699,7 +2017,7 @@ function App() {
                       contact.username.substring(0, 2).toUpperCase()
                     )}
                   </div>
-                  <div className="conv-details">
+                  <div className="conv-details" style={{ flex: 1 }}>
                     <div className="conv-top">
                       <span className="conv-name">@{contact.username}</span>
                     </div>
@@ -1707,6 +2025,36 @@ function App() {
                       {contact.bio || (contact.hide_wallet ? 'Address Hidden' : truncateAddress(contact.address))}
                     </div>
                   </div>
+                  <button
+                    type="button"
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--accent-rose)',
+                      cursor: 'pointer',
+                      padding: '8px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      borderRadius: '50%'
+                    }}
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      if (window.confirm(`Are you sure you want to delete @${contact.username} from your contacts? This will permanently delete the conversation and all message history.`)) {
+                        try {
+                          await deleteContact(contact.address);
+                          if (activeConversationId?.toLowerCase() === contact.address.toLowerCase() || 
+                              activeConversationId?.toLowerCase() === contact.username.toLowerCase()) {
+                            setActiveConversationId(null);
+                          }
+                        } catch (err) {
+                          alert("Failed to delete contact: " + err.message);
+                        }
+                      }
+                    }}
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>delete</span>
+                  </button>
                 </div>
               ))
             )}
@@ -1721,7 +2069,7 @@ function App() {
             <>
               {/* Active Chat Header */}
               {isMobile ? (
-                <header className="chat-header safe-header" style={{ height: 'auto', padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-light)' }}>
+                <header style={{ height: 'auto', paddingTop: 'calc(env(safe-area-inset-top, 0px) + 18px)', paddingBottom: '16px', paddingLeft: '16px', paddingRight: '16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-light)' }}>
                   <div className="chat-header-info" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <button type="button" className="back-btn" onClick={() => setActiveConversationId(null)} style={{ background: 'none', border: 'none', color: 'var(--text-primary)', padding: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
                       <span className="material-symbols-outlined">arrow_back</span>
@@ -1743,7 +2091,7 @@ function App() {
                             })()
                         }
                       </div>
-                      {!isGroupActive && (
+                      {!isGroupActive && onlineUsers.has(activeChat.id.toLowerCase()) && (
                         <div style={{ position: 'absolute', bottom: 0, right: 0, width: '10px', height: '10px', backgroundColor: 'var(--accent-emerald)', borderRadius: '50%', border: '2px solid var(--bg-secondary)' }}></div>
                       )}
                     </div>
@@ -1762,7 +2110,21 @@ function App() {
                         <span className="material-symbols-outlined" style={{ fontSize: '14px', color: 'var(--accent-indigo)', fontVariationSettings: "'FILL' 1" }}>verified</span>
                       </div>
                       <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
-                        Secure Enclave Active
+                        {(() => {
+                          const typingList = typingUsers[activeChat.id.toLowerCase()] || [];
+                          if (typingList.length > 0) {
+                            if (isGroupActive) {
+                              const names = typingList.map(addr => {
+                                const contact = getCombinedContacts().find(item => item.address.toLowerCase() === addr.toLowerCase());
+                                return contact ? `@${contact.username}` : addr.substring(0, 6);
+                              });
+                              return `${names.join(', ')} is typing...`;
+                            } else {
+                              return "typing...";
+                            }
+                          }
+                          return "Secure Enclave Active";
+                        })()}
                       </div>
                     </div>
                   </div>
@@ -1859,7 +2221,50 @@ function App() {
                   </div>
                 )}
 
-                {messages.length === 0 ? (
+                 {messagesLoading ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', padding: '16px' }}>
+                    <style>{`
+                      @keyframes skeleton-shimmer {
+                        0% { background-position: -200% 0; }
+                        100% { background-position: 200% 0; }
+                      }
+                      .skeleton-bubble {
+                        background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--border-light) 50%, var(--bg-tertiary) 75%);
+                        background-size: 200% 100%;
+                        animation: skeleton-shimmer 1.5s infinite;
+                        border-radius: 16px;
+                      }
+                    `}</style>
+                    {/* Skeleton Message 1 (received) */}
+                    <div style={{ display: 'flex', gap: '8px', maxWidth: '60%' }}>
+                      <div className="skeleton-bubble" style={{ width: '40px', height: '40px', borderRadius: '50%', flexShrink: 0 }}></div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flex: 1 }}>
+                        <div className="skeleton-bubble" style={{ width: '120px', height: '14px', borderRadius: '4px' }}></div>
+                        <div className="skeleton-bubble" style={{ width: '100%', height: '48px' }}></div>
+                      </div>
+                    </div>
+                    {/* Skeleton Message 2 (sent) */}
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginLeft: 'auto', maxWidth: '60%', width: '100%' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', alignItems: 'flex-end', width: '100%' }}>
+                        <div className="skeleton-bubble" style={{ width: '100%', height: '36px' }}></div>
+                      </div>
+                    </div>
+                    {/* Skeleton Message 3 (received) */}
+                    <div style={{ display: 'flex', gap: '8px', maxWidth: '60%', width: '100%' }}>
+                      <div className="skeleton-bubble" style={{ width: '40px', height: '40px', borderRadius: '50%', flexShrink: 0 }}></div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flex: 1 }}>
+                        <div className="skeleton-bubble" style={{ width: '80px', height: '14px', borderRadius: '4px' }}></div>
+                        <div className="skeleton-bubble" style={{ width: '85%', height: '40px' }}></div>
+                      </div>
+                    </div>
+                    {/* Skeleton Message 4 (sent) */}
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginLeft: 'auto', maxWidth: '60%', width: '100%' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', alignItems: 'flex-end', width: '100%' }}>
+                        <div className="skeleton-bubble" style={{ width: '70%', height: '56px' }}></div>
+                      </div>
+                    </div>
+                  </div>
+                ) : messages.length === 0 ? (
                   <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', fontSize: '13px', textAlign: 'center', padding: '40px' }}>
                     🔒 End-to-End Encrypted channel established. Messages are zero-knowledge and stored locally.
                   </div>
@@ -1885,20 +2290,68 @@ function App() {
                       }
                     }
 
+                    let replyArray = [];
+                    if (msg.reply_metadata) {
+                      try {
+                        const parsed = typeof msg.reply_metadata === 'string' ? JSON.parse(msg.reply_metadata) : msg.reply_metadata;
+                        replyArray = Array.isArray(parsed) ? parsed : [parsed];
+                      } catch (e) {
+                        console.error("Failed to parse reply metadata:", e);
+                      }
+                    }
+
                     return (
                       <div 
                         key={msg.id} 
+                        id={`msg-${msg.id}`}
                         className={`message-row ${isSentByMe ? 'sent' : 'received'}`}
+                        onTouchStart={(e) => isMobile && handleTouchStart(e, msg.id)}
+                        onTouchMove={(e) => isMobile && handleTouchMove(e)}
+                        onTouchEnd={() => isMobile && handleTouchEnd(msg)}
                         style={
                           isMobile 
                             ? (isSentByMe 
-                                ? { display: 'flex', flexDirection: 'column', alignItems: 'end', maxWidth: '85%', marginLeft: 'auto', marginBottom: '12px' } 
-                                : { display: 'flex', flexDirection: 'column', alignItems: 'start', maxWidth: '85%', marginRight: 'auto', marginBottom: '12px' })
+                                ? { display: 'flex', flexDirection: 'column', alignItems: 'end', maxWidth: '85%', marginLeft: 'auto', marginBottom: '12px', transform: activeSwipeMsgId === msg.id ? `translateX(${swipeOffset}px)` : 'translateX(0px)', transition: activeSwipeMsgId === msg.id ? 'none' : 'transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)', position: 'relative' } 
+                                : { display: 'flex', flexDirection: 'column', alignItems: 'start', maxWidth: '85%', marginRight: 'auto', marginBottom: '12px', transform: activeSwipeMsgId === msg.id ? `translateX(${swipeOffset}px)` : 'translateX(0px)', transition: activeSwipeMsgId === msg.id ? 'none' : 'transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)', position: 'relative' })
                             : (!isSentByMe && isGroupActive 
                                 ? { display: 'flex', gap: '8px', alignItems: 'flex-end', marginBottom: '8px', width: '100%', justifyContent: 'flex-start' } 
                                 : {})
                         }
                       >
+                        {isMobile && activeSwipeMsgId === msg.id && swipeOffset > 15 && (
+                          <div style={{ position: 'absolute', left: '-30px', top: '50%', transform: 'translateY(-50%)', display: 'flex', alignItems: 'center', color: 'var(--accent-indigo)', opacity: Math.min((swipeOffset - 15) / 30, 1) }}>
+                            <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>reply</span>
+                          </div>
+                        )}
+                        {multiSelectMode && (
+                          <div 
+                            style={{ 
+                              display: 'flex', 
+                              alignItems: 'center', 
+                              justifyContent: 'center', 
+                              marginRight: '12px',
+                              cursor: 'pointer',
+                              zIndex: 10
+                            }}
+                            onClick={() => handleToggleMessageSelection(msg)}
+                          >
+                            <div style={{
+                              width: '20px',
+                              height: '20px',
+                              borderRadius: '50%',
+                              border: '2px solid var(--accent-indigo)',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              background: selectedMessages.some(m => m.id === msg.id) ? 'var(--accent-indigo)' : 'transparent',
+                              transition: 'background 0.2s'
+                            }}>
+                              {selectedMessages.some(m => m.id === msg.id) && (
+                                <span className="material-symbols-outlined" style={{ fontSize: '14px', color: '#ffffff', fontWeight: 'bold' }}>check</span>
+                              )}
+                            </div>
+                          </div>
+                        )}
                         {!isMobile && !isSentByMe && isGroupActive && (
                           <div 
                             className="message-avatar-wrapper" 
@@ -1934,31 +2387,190 @@ function App() {
                           </div>
                         )}
                         <div 
-                          className="message-bubble"
-                          style={
-                            isMobile 
-                              ? (isSentByMe 
-                                  ? { background: 'linear-gradient(135deg, var(--accent-indigo) 0%, #4338ca 100%)', color: '#ffffff', borderRadius: '16px', borderBottomRightRadius: '4px', maxWidth: '100%', padding: '12px 16px', fontSize: '14px', lineHeight: '1.5' }
-                                  : { background: 'var(--bg-tertiary)', color: 'var(--text-primary)', borderRadius: '16px', borderBottomLeftRadius: '4px', border: '1px solid var(--border-light)', maxWidth: '100%', padding: '12px 16px', fontSize: '14px', lineHeight: '1.5' })
-                              : {}
-                          }
+                          className="message-bubble-container"
+                          style={{ position: 'relative', maxWidth: isMobile ? '100%' : '70%' }}
                         >
-                          {!isSentByMe && !isGroupActive && !isMobile && (
-                            <span className="message-sender">
-                              {(() => {
-                                const contact = getCombinedContacts().find(item => item.address.toLowerCase() === activeChat.id.toLowerCase());
-                                return contact ? `@${contact.username}` : `@${activeChat.username}`;
-                              })()}
-                            </span>
+                          {!isMobile && !multiSelectMode && (
+                            <button 
+                              type="button"
+                              className="desktop-reply-btn"
+                              style={{
+                                display: 'none',
+                                position: 'absolute',
+                                top: '50%',
+                                transform: 'translateY(-50%)',
+                                left: isSentByMe ? '-36px' : 'auto',
+                                right: !isSentByMe ? '-36px' : 'auto',
+                                background: 'var(--bg-secondary)',
+                                border: '1px solid var(--border-light)',
+                                borderRadius: '50%',
+                                width: '28px',
+                                height: '28px',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                cursor: 'pointer',
+                                color: 'var(--text-secondary)',
+                                boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+                                zIndex: 10
+                              }}
+                              onClick={() => handleAddReplyToChain(msg)}
+                              title="Reply"
+                            >
+                              <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>reply</span>
+                            </button>
                           )}
-                          {!isSentByMe && isGroupActive && !isMobile && (
-                            <span className="message-sender" style={{ color: 'var(--accent-indigo)', fontSize: '11px', fontWeight: '700', marginBottom: '2px', display: 'block' }}>
-                              {(() => {
-                                const contact = getCombinedContacts().find(item => item.address.toLowerCase() === msg.sender_address.toLowerCase());
-                                return contact ? `@${contact.username}` : `@${usernameCache[msg.sender_address.toLowerCase()]?.username || msg.sender_address.substring(0, 8)}`;
-                              })()}
-                            </span>
-                          )}
+                          <div 
+                            className="message-bubble"
+                            onMouseDown={() => !multiSelectMode && startLongPress(msg)}
+                            onMouseUp={cancelLongPress}
+                            onMouseLeave={cancelLongPress}
+                            onTouchStart={() => {
+                              if (!multiSelectMode) {
+                                startLongPress(msg);
+                              }
+                            }}
+                            onTouchEnd={cancelLongPress}
+                            onClick={() => handleBubbleClick(msg)}
+                            style={
+                              isMobile 
+                                ? (isSentByMe 
+                                    ? { background: 'linear-gradient(135deg, var(--accent-indigo) 0%, #4338ca 100%)', color: '#ffffff', borderRadius: '16px', borderBottomRightRadius: '4px', maxWidth: '100%', padding: '12px 16px', fontSize: '14px', lineHeight: '1.5', cursor: multiSelectMode ? 'pointer' : 'default' }
+                                    : { background: 'var(--bg-tertiary)', color: 'var(--text-primary)', borderRadius: '16px', borderBottomLeftRadius: '4px', border: '1px solid var(--border-light)', maxWidth: '100%', padding: '12px 16px', fontSize: '14px', lineHeight: '1.5', cursor: multiSelectMode ? 'pointer' : 'default' })
+                                : { cursor: multiSelectMode ? 'pointer' : 'default', maxWidth: '100%' }
+                            }
+                          >
+                            {!isSentByMe && !isGroupActive && !isMobile && (
+                              <span className="message-sender">
+                                {(() => {
+                                  const contact = getCombinedContacts().find(item => item.address.toLowerCase() === activeChat.id.toLowerCase());
+                                  return contact ? `@${contact.username}` : `@${activeChat.username}`;
+                                })()}
+                              </span>
+                            )}
+                            {!isSentByMe && isGroupActive && (
+                              <span className="message-sender" style={{ color: 'var(--accent-indigo)', fontSize: '11px', fontWeight: '700', marginBottom: '2px', display: 'block' }}>
+                                {(() => {
+                                  const contact = getCombinedContacts().find(item => item.address.toLowerCase() === msg.sender_address.toLowerCase());
+                                  return contact ? `@${contact.username}` : `@${usernameCache[msg.sender_address.toLowerCase()]?.username || msg.sender_address.substring(0, 8)}`;
+                                })()}
+                              </span>
+                            )}
+                            
+                            {replyArray && replyArray.length > 0 && (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '8px' }}>
+                                {/* Render the first quote card */}
+                                {(() => {
+                                  const firstReply = replyArray[0];
+                                  return (
+                                    <div 
+                                      style={{ 
+                                        background: 'rgba(0,0,0,0.12)', 
+                                        borderLeft: '3px solid var(--accent-indigo)', 
+                                        borderRadius: '4px', 
+                                        padding: '6px 10px', 
+                                        fontSize: '12px',
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        gap: '2px',
+                                        opacity: 0.95,
+                                        cursor: 'pointer',
+                                        textAlign: 'left'
+                                      }}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        const element = document.getElementById(`msg-${firstReply.id}`);
+                                        if (element) {
+                                          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                          element.classList.add('highlight-flash');
+                                          setTimeout(() => element.classList.remove('highlight-flash'), 1500);
+                                        }
+                                      }}
+                                    >
+                                      <span style={{ fontWeight: '700', color: isSentByMe ? '#cbd5e1' : 'var(--accent-indigo)' }}>
+                                        {firstReply.sender.toLowerCase() === wallet.address.toLowerCase() ? 'You' : (() => {
+                                          const contact = getCombinedContacts().find(item => item.address.toLowerCase() === firstReply.sender.toLowerCase());
+                                          return contact ? `@${contact.username}` : `@${usernameCache[firstReply.sender.toLowerCase()]?.username || firstReply.sender.substring(0, 8)}`;
+                                        })()}
+                                      </span>
+                                      <span style={{ color: isSentByMe ? '#e2e8f0' : 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                        {firstReply.text}
+                                      </span>
+                                    </div>
+                                  );
+                                })()}
+
+                                {/* Render collapsible details if more than 1 reply */}
+                                {replyArray.length > 1 && (
+                                  <>
+                                    <div 
+                                      style={{ 
+                                        display: 'flex', 
+                                        alignItems: 'center', 
+                                        gap: '4px', 
+                                        fontSize: '11px', 
+                                        color: isSentByMe ? '#cbd5e1' : 'var(--text-secondary)', 
+                                        cursor: 'pointer',
+                                        fontWeight: '600',
+                                        padding: '2px 4px',
+                                        alignSelf: 'flex-start',
+                                        userSelect: 'none'
+                                      }}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        toggleAccordion(msg.id);
+                                      }}
+                                    >
+                                      <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>
+                                        {expandedAccordions.has(msg.id) ? 'keyboard_arrow_up' : 'keyboard_arrow_down'}
+                                      </span>
+                                      <span>
+                                        {expandedAccordions.has(msg.id) 
+                                          ? 'Hide details' 
+                                          : `Show ${replyArray.length - 1} more repl${replyArray.length - 1 === 1 ? 'y' : 'ies'}`}
+                                      </span>
+                                    </div>
+
+                                    {expandedAccordions.has(msg.id) && replyArray.slice(1).map((replyItem) => (
+                                      <div 
+                                        key={replyItem.id}
+                                        style={{ 
+                                          background: 'rgba(0,0,0,0.12)', 
+                                          borderLeft: '3px solid var(--accent-indigo)', 
+                                          borderRadius: '4px', 
+                                          padding: '6px 10px', 
+                                          fontSize: '12px',
+                                          display: 'flex',
+                                          flexDirection: 'column',
+                                          gap: '2px',
+                                          opacity: 0.95,
+                                          cursor: 'pointer',
+                                          textAlign: 'left'
+                                        }}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          const element = document.getElementById(`msg-${replyItem.id}`);
+                                          if (element) {
+                                            element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                            element.classList.add('highlight-flash');
+                                            setTimeout(() => element.classList.remove('highlight-flash'), 1500);
+                                          }
+                                        }}
+                                      >
+                                        <span style={{ fontWeight: '700', color: isSentByMe ? '#cbd5e1' : 'var(--accent-indigo)' }}>
+                                          {replyItem.sender.toLowerCase() === wallet.address.toLowerCase() ? 'You' : (() => {
+                                            const contact = getCombinedContacts().find(item => item.address.toLowerCase() === replyItem.sender.toLowerCase());
+                                            return contact ? `@${contact.username}` : `@${usernameCache[replyItem.sender.toLowerCase()]?.username || replyItem.sender.substring(0, 8)}`;
+                                          })()}
+                                        </span>
+                                        <span style={{ color: isSentByMe ? '#e2e8f0' : 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                          {replyItem.text}
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </>
+                                )}
+                              </div>
+                            )}
                           
                           {mediaObj ? (
                             mediaCache[mediaObj.mediaId] ? (
@@ -1968,8 +2580,31 @@ function App() {
                                     src={mediaCache[mediaObj.mediaId].url} 
                                     alt="Attachment" 
                                     style={{ maxWidth: '100%', maxHeight: '240px', display: 'block', cursor: 'zoom-in' }} 
-                                    onClick={() => setActiveLightboxUrl(mediaCache[mediaObj.mediaId].url)}
+                                    onClick={() => {
+                                      setActiveLightboxUrl(mediaCache[mediaObj.mediaId].url);
+                                      setActiveLightboxMimeType(mediaObj.mimeType);
+                                      setActiveLightboxName(`file_${mediaObj.mediaId.substring(6, 12)}.${mediaObj.mimeType.split('/')[1] || 'bin'}`);
+                                      setActiveLightboxId(mediaObj.mediaId);
+                                    }}
                                   />
+                                </div>
+                              ) : mediaObj.mimeType.startsWith('video/') ? (
+                                <div style={{ marginTop: '4px', borderRadius: '12px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)', position: 'relative' }}>
+                                  <video 
+                                    src={mediaCache[mediaObj.mediaId].url} 
+                                    style={{ maxWidth: '100%', maxHeight: '240px', display: 'block', cursor: 'zoom-in' }} 
+                                    onClick={() => {
+                                      setActiveLightboxUrl(mediaCache[mediaObj.mediaId].url);
+                                      setActiveLightboxMimeType(mediaObj.mimeType);
+                                      setActiveLightboxName(`file_${mediaObj.mediaId.substring(6, 12)}.${mediaObj.mimeType.split('/')[1] || 'bin'}`);
+                                      setActiveLightboxId(mediaObj.mediaId);
+                                    }}
+                                  />
+                                  <div 
+                                    style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.3)', pointerEvents: 'none' }}
+                                  >
+                                    <span className="material-symbols-outlined" style={{ fontSize: '48px', color: '#ffffff' }}>play_circle</span>
+                                  </div>
                                 </div>
                               ) : (
                                 <div style={{
@@ -1982,13 +2617,11 @@ function App() {
                                   borderRadius: '12px',
                                   padding: '12px 16px',
                                   cursor: 'pointer'
-                                }} onClick={() => {
-                                  const a = document.createElement('a');
-                                  a.href = mediaCache[mediaObj.mediaId].url;
-                                  a.download = `file_${mediaObj.mediaId.substring(6, 12)}.${mediaObj.mimeType.split('/')[1] || 'bin'}`;
-                                  document.body.appendChild(a);
-                                  a.click();
-                                  document.body.removeChild(a);
+                                }} onClick={async () => {
+                                  const dbBlob = await getCachedMedia(mediaObj.mediaId) || await fetch(mediaCache[mediaObj.mediaId].url).then(r => r.blob());
+                                  if (dbBlob) {
+                                    await saveMediaToDevice(dbBlob, `file_${mediaObj.mediaId.substring(6, 12)}.${mediaObj.mimeType.split('/')[1] || 'bin'}`);
+                                  }
                                 }}>
                                   <span className="material-symbols-outlined" style={{ fontSize: '32px', color: 'var(--accent-indigo)' }}>description</span>
                                   <div style={{ flex: 1, overflow: 'hidden', textAlign: 'left' }}>
@@ -2139,15 +2772,181 @@ function App() {
                           </div>
                         </div>
                       </div>
-                    );
+                    </div>
+                  );
                   })
                 )}
                 <div ref={messagesEndRef} />
               </div>
 
               {/* Message Input Footer */}
-              <footer className={isMobile ? 'safe-footer' : ''} style={{ padding: isMobile ? '12px 16px 24px 16px' : '20px 24px', background: 'rgba(16, 22, 42, 0.4)', borderTop: '1px solid var(--border-light)' }}>
-                <form onSubmit={handleSendMessage} style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxWidth: '800px', margin: '0 auto' }}>
+              <footer className={isMobile ? 'safe-footer' : ''} style={{ padding: isMobile ? '12px 16px 24px 16px' : '20px 24px', background: multiSelectMode ? 'var(--bg-elevated)' : 'rgba(16, 22, 42, 0.4)', borderTop: '1px solid var(--border-light)' }}>
+                {multiSelectMode ? (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', maxWidth: '800px', margin: '0 auto', width: '100%' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-primary)', fontSize: '14px', fontWeight: '600' }}>
+                      <span className="material-symbols-outlined" style={{ color: 'var(--accent-indigo)' }}>check_box</span>
+                      <span>{selectedMessages.length} selected</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <button 
+                        type="button"
+                        style={{
+                          background: 'none',
+                          border: '1px solid var(--border-light)',
+                          borderRadius: '12px',
+                          padding: '8px 16px',
+                          color: 'var(--text-secondary)',
+                          fontSize: '13px',
+                          fontWeight: '600',
+                          cursor: 'pointer',
+                          transition: 'background 0.2s'
+                        }}
+                        onClick={() => {
+                          setMultiSelectMode(false);
+                          setSelectedMessages([]);
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      <button 
+                        type="button"
+                        style={{
+                          background: 'none',
+                          border: '1px solid var(--border-light)',
+                          borderRadius: '12px',
+                          padding: '8px 16px',
+                          color: 'var(--text-primary)',
+                          fontSize: '13px',
+                          fontWeight: '600',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px'
+                        }}
+                        onClick={() => alert("Forwarding functionality is coming soon!")}
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>forward</span>
+                        Forward
+                      </button>
+                      <button 
+                        type="button"
+                        style={{
+                          background: 'var(--accent-indigo)',
+                          border: 'none',
+                          borderRadius: '12px',
+                          padding: '8px 20px',
+                          color: 'white',
+                          fontSize: '13px',
+                          fontWeight: '600',
+                          cursor: selectedMessages.length === 0 ? 'not-allowed' : 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          boxShadow: '0 4px 12px rgba(129, 140, 248, 0.3)',
+                          opacity: selectedMessages.length === 0 ? 0.5 : 1
+                        }}
+                        onClick={() => {
+                          setReplyingToMessage(selectedMessages);
+                          setMultiSelectMode(false);
+                          setSelectedMessages([]);
+                        }}
+                        disabled={selectedMessages.length === 0}
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>reply</span>
+                        Reply
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <form onSubmit={handleSendMessage} style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxWidth: '800px', margin: '0 auto' }}>
+                    {replyingToMessage && replyingToMessage.length > 0 && (
+                      <div 
+                        className="replying-to-preview-container" 
+                        style={{
+                          display: 'flex',
+                          gap: '8px',
+                          overflowX: 'auto',
+                          padding: '4px 0 8px 0',
+                          scrollbarWidth: 'none',
+                          msOverflowStyle: 'none'
+                        }}
+                      >
+                        <style>{`
+                          .replying-to-preview-container::-webkit-scrollbar {
+                            display: none;
+                          }
+                        `}</style>
+                        {replyingToMessage.map((replyMsg) => (
+                          <div 
+                            key={replyMsg.id}
+                            className="replying-to-preview-card" 
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '8px',
+                              background: 'rgba(99, 102, 241, 0.1)',
+                              borderLeft: '3px solid var(--accent-indigo)',
+                              borderTop: '1px solid var(--border-light)',
+                              borderRight: '1px solid var(--border-light)',
+                              borderBottom: '1px solid var(--border-light)',
+                              borderRadius: '8px',
+                              padding: '6px 12px',
+                              fontSize: '11px',
+                              color: 'var(--text-primary)',
+                              backdropFilter: 'blur(8px)',
+                              position: 'relative',
+                              textAlign: 'left',
+                              flexShrink: 0,
+                              maxWidth: '220px'
+                            }}
+                          >
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontWeight: 'bold', color: 'var(--accent-indigo)', marginBottom: '1px', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                                {(() => {
+                                  const senderAddr = replyMsg.sender_address || replyMsg.sender || '';
+                                  if (senderAddr.toLowerCase() === wallet.address.toLowerCase()) {
+                                    return 'You';
+                                  }
+                                  const contact = getCombinedContacts().find(item => item.address.toLowerCase() === senderAddr.toLowerCase());
+                                  return contact ? `@${contact.username}` : `@${usernameCache[senderAddr.toLowerCase()]?.username || senderAddr.substring(0, 8)}`;
+                                })()}
+                              </div>
+                              <div style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {(() => {
+                                  let displayText = replyMsg.body_text || replyMsg.text || '';
+                                  if (!displayText && replyMsg.media_metadata) {
+                                    try {
+                                      const m = typeof replyMsg.media_metadata === 'string' ? JSON.parse(replyMsg.media_metadata) : replyMsg.media_metadata;
+                                      if (m) {
+                                        const mime = m.mimeType || '';
+                                        if (mime.startsWith('image/')) displayText = '📷 Photo';
+                                        else if (mime.startsWith('video/')) displayText = '🎥 Video';
+                                        else if (mime.startsWith('audio/')) displayText = '🎵 Audio';
+                                        else displayText = '📄 File';
+                                      }
+                                    } catch (e) {}
+                                  }
+                                  return displayText;
+                                })()}
+                              </div>
+                            </div>
+                            <button 
+                              type="button" 
+                              style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '2px', marginLeft: '4px' }}
+                              onClick={() => {
+                                setReplyingToMessage(prev => {
+                                  const filtered = prev.filter(m => m.id !== replyMsg.id);
+                                  return filtered.length > 0 ? filtered : null;
+                                });
+                              }}
+                            >
+                              <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>close</span>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
                   {pendingMedia && (
                     <div className="pending-media-preview" style={{
                       display: 'flex',
@@ -2230,10 +3029,10 @@ function App() {
                   )}
 
                   {isMobile ? (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', width: '100%' }}>
                       <button 
                         type="button" 
-                        style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: 'var(--bg-elevated)', border: '1px solid var(--border-light)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
+                        style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: 'var(--bg-elevated)', border: '1px solid var(--border-light)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
                         onClick={() => document.getElementById('mobile-file-input').click()}
                         disabled={!connected}
                       >
@@ -2246,19 +3045,19 @@ function App() {
                         onChange={handleFileChange}
                         disabled={!connected}
                       />
-                      <div style={{ flex: 1, position: 'relative', display: 'flex', alignItems: 'center', backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-light)', borderRadius: '24px', padding: '0 16px' }}>
+                      <div style={{ flex: 1, minWidth: 0, position: 'relative', display: 'flex', alignItems: 'center', backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-light)', borderRadius: '24px', padding: '0 16px' }}>
                         <input 
                           type="text"
                           className="chat-input-field"
                           placeholder="Type a secure message..."
                           value={inputText}
-                          onChange={(e) => setInputText(e.target.value)}
+                          onChange={(e) => handleInputChange(e.target.value)}
                           disabled={!connected}
-                          style={{ flex: 1, background: 'none', border: 'none', outline: 'none', color: 'var(--text-primary)', fontSize: '15px', padding: '12px 0' }}
+                          style={{ flex: 1, minWidth: 0, background: 'none', border: 'none', outline: 'none', color: 'var(--text-primary)', fontSize: '15px', padding: '12px 0' }}
                         />
                         <button 
                           type="button" 
-                          style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', paddingLeft: '8px' }}
+                          style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', paddingLeft: '8px', flexShrink: 0 }}
                           onClick={() => setShowEmojiPicker(!showEmojiPicker)}
                         >
                           <span className="material-symbols-outlined">sentiment_satisfied</span>
@@ -2295,7 +3094,8 @@ function App() {
                           alignItems: 'center',
                           justifyContent: 'center',
                           cursor: 'pointer',
-                          boxShadow: '0 4px 12px rgba(129, 140, 248, 0.3)'
+                          boxShadow: '0 4px 12px rgba(129, 140, 248, 0.3)',
+                          flexShrink: 0
                         }}
                       >
                         <span className="material-symbols-outlined" style={{ fontVariationSettings: "'FILL' 1" }}>
@@ -2325,7 +3125,7 @@ function App() {
                         className="chat-input-field"
                         placeholder="Type a secure message..."
                         value={inputText}
-                        onChange={(e) => setInputText(e.target.value)}
+                        onChange={(e) => handleInputChange(e.target.value)}
                         disabled={!connected}
                         style={{ flex: 1, background: 'none', border: 'none', outline: 'none', color: 'var(--text-primary)', fontSize: '14px', padding: '8px 0' }}
                       />
@@ -2382,6 +3182,7 @@ function App() {
                     <span style={{ fontSize: '10px', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '1px', fontFamily: 'monospace' }}>End-to-End Encrypted</span>
                   </div>
                 </form>
+              )}
               </footer>
             </>
           ) : (
@@ -2438,7 +3239,7 @@ function App() {
         <div className={`settings-pane ${isMobile ? 'safe-pb' : ''}`} style={isMobile ? { paddingBottom: '90px' } : {}}>
           {isMobile ? (
             /* Mobile Settings Header */
-            <header className="safe-header" style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-light)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: 'var(--bg-secondary)', marginBottom: '16px' }}>
+            <header style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 18px)', paddingBottom: '16px', paddingLeft: '20px', paddingRight: '20px', borderBottom: '1px solid var(--border-light)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: 'var(--bg-secondary)', marginBottom: '16px' }}>
               <div>
                 <h1 className="font-headline-sm text-headline-sm font-bold" style={{ color: 'var(--accent-indigo)', fontSize: '20px' }}>Settings</h1>
               </div>
@@ -2766,6 +3567,49 @@ function App() {
       </div>
 
       {/* Modals Implementations */}
+      {/* Start Conversation Choice Modal */}
+      {showNewChatMenu && (
+        <div className="modal-overlay" onClick={() => setShowNewChatMenu(false)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '340px', padding: '24px' }}>
+            <div className="modal-header" style={{ marginBottom: '16px', textAlign: 'center' }}>Start Conversation</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <button 
+                type="button"
+                className="confirm-btn"
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', padding: '14px', fontSize: '15px' }}
+                onClick={() => {
+                  setShowNewChatMenu(false);
+                  setShowDMModal(true);
+                }}
+              >
+                <span className="material-symbols-outlined">chat</span>
+                Direct Message
+              </button>
+              <button 
+                type="button"
+                className="confirm-btn"
+                style={{ background: 'var(--accent-emerald)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', padding: '14px', fontSize: '15px' }}
+                onClick={() => {
+                  setShowNewChatMenu(false);
+                  setShowGroupModal(true);
+                }}
+              >
+                <span className="material-symbols-outlined">group</span>
+                Create Group Chat
+              </button>
+              <button 
+                type="button"
+                className="cancel-btn"
+                style={{ marginTop: '4px', padding: '12px' }}
+                onClick={() => setShowNewChatMenu(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showDMModal && (
         <div className="modal-overlay">
           <div className="modal-card">
@@ -3215,7 +4059,7 @@ function App() {
                 attachments.forEach(msg => {
                   const mediaObj = typeof msg.media_metadata === 'string' ? JSON.parse(msg.media_metadata) : msg.media_metadata;
                   const isCached = mediaCache[mediaObj.mediaId] !== undefined;
-                  const isImage = mediaObj.mimeType.startsWith('image/');
+                  const isImage = mediaObj.mimeType.startsWith('image/') || mediaObj.mimeType.startsWith('video/');
                   const item = {
                     msgId: msg.id,
                     mediaObj,
@@ -3237,7 +4081,7 @@ function App() {
                     {images.length > 0 && (
                       <div>
                         <div style={{ fontSize: '11px', color: 'var(--text-secondary)', textTransform: 'uppercase', tracking: '0.05em', fontWeight: 'bold', marginBottom: '10px', textAlign: 'left' }}>
-                          Images ({images.length})
+                          Media ({images.length})
                         </div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
                           {images.map(item => {
@@ -3257,15 +4101,34 @@ function App() {
                                   justifyContent: 'center',
                                   cursor: isCached ? 'pointer' : 'default'
                                 }}
-                                onClick={() => isCached && setActiveLightboxUrl(mediaCache[mediaObj.mediaId].url)}
-                                title={isCached ? 'Open Image' : 'Download to Decrypt'}
+                                onClick={() => {
+                                  if (isCached) {
+                                    setActiveLightboxUrl(mediaCache[mediaObj.mediaId].url);
+                                    setActiveLightboxMimeType(mediaObj.mimeType);
+                                    setActiveLightboxName(`file_${mediaObj.mediaId.substring(6, 12)}.${mediaObj.mimeType.split('/')[1] || 'bin'}`);
+                                    setActiveLightboxId(mediaObj.mediaId);
+                                  }
+                                }}
+                                title={isCached ? 'Open Media' : 'Download to Decrypt'}
                               >
                                 {isCached ? (
-                                  <img 
-                                    src={mediaCache[mediaObj.mediaId].url} 
-                                    alt="" 
-                                    style={{ width: '100%', height: '100%', objectFit: 'cover' }} 
-                                  />
+                                  mediaObj.mimeType.startsWith('video/') ? (
+                                    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+                                      <video 
+                                        src={mediaCache[mediaObj.mediaId].url} 
+                                        style={{ width: '100%', height: '100%', objectFit: 'cover' }} 
+                                      />
+                                      <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.2)' }}>
+                                        <span className="material-symbols-outlined" style={{ fontSize: '20px', color: '#ffffff' }}>play_circle</span>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <img 
+                                      src={mediaCache[mediaObj.mediaId].url} 
+                                      alt="" 
+                                      style={{ width: '100%', height: '100%', objectFit: 'cover' }} 
+                                    />
+                                  )
                                 ) : (
                                   <div 
                                     style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', padding: '8px', width: '100%', height: '100%', justifyContent: 'center' }}
@@ -3660,7 +4523,7 @@ function App() {
         </div>
       )}
 
-      {/* Lightbox Modal */}
+      {/* Redesigned Fullscreen WhatsApp-style Media Viewer */}
       {activeLightboxUrl && (
         <div 
           style={{
@@ -3669,65 +4532,96 @@ function App() {
             left: 0,
             right: 0,
             bottom: 0,
-            backgroundColor: 'rgba(0, 0, 0, 0.92)',
-            backdropFilter: 'blur(8px)',
+            backgroundColor: '#000000',
             zIndex: 9999,
             display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: 'zoom-out'
+            flexDirection: 'column',
           }}
-          onClick={() => setActiveLightboxUrl(null)}
         >
-          <div onClick={(e) => e.stopPropagation()} style={{ width: '90vw', height: '90vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <QuickPinchZoom
-              onUpdate={({ x, y, scale }) => {
-                if (lightboxImgRef.current) {
-                  lightboxImgRef.current.style.transform = make3dTransformValue({ x, y, scale });
+          {/* Header Overlay Bar */}
+          <div style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            height: '60px',
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: `calc(env(safe-area-inset-top, 0px) + 8px) 16px 8px 16px`,
+            zIndex: 10000
+          }}>
+            <button 
+              type="button" 
+              onClick={() => {
+                setActiveLightboxUrl(null);
+                setActiveLightboxMimeType(null);
+                setActiveLightboxName(null);
+                setActiveLightboxId(null);
+              }}
+              style={{ background: 'none', border: 'none', color: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '8px' }}
+            >
+              <span className="material-symbols-outlined">arrow_back</span>
+            </button>
+            <div style={{ color: '#ffffff', fontSize: '15px', fontWeight: 'bold', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap', flex: 1, marginLeft: '12px', textAlign: 'left' }}>
+              {activeLightboxName || 'Media Viewer'}
+            </div>
+            <button 
+              type="button" 
+              onClick={async (e) => {
+                e.stopPropagation();
+                try {
+                  const dbBlob = await getCachedMedia(activeLightboxId) || await fetch(activeLightboxUrl).then(r => r.blob());
+                  if (dbBlob) {
+                    await saveMediaToDevice(dbBlob, activeLightboxName || 'downloaded_file');
+                  } else {
+                    alert("Media file not found.");
+                  }
+                } catch (err) {
+                  alert("Download failed: " + err.message);
                 }
               }}
-              tapZoomFactor={2}
+              style={{ background: 'none', border: 'none', color: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '8px' }}
             >
-              <img 
-                ref={lightboxImgRef}
-                src={activeLightboxUrl} 
-                alt="Enlarged Media" 
-                style={{ 
-                  maxWidth: '100%', 
-                  maxHeight: '100%', 
-                  objectFit: 'contain',
-                  borderRadius: '12px',
-                  boxShadow: '0 20px 50px rgba(0,0,0,0.5)'
-                }}
-              />
-            </QuickPinchZoom>
+              <span className="material-symbols-outlined">download</span>
+            </button>
           </div>
-          <button 
-            style={{
-              position: 'absolute',
-              top: '24px',
-              right: '24px',
-              background: 'rgba(255,255,255,0.1)',
-              border: 'none',
-              borderRadius: '50%',
-              width: '40px',
-              height: '40px',
-              color: 'white',
-              fontSize: '18px',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              zIndex: 10000,
-              boxShadow: '0 4px 12px rgba(0,0,0,0.2)'
-            }}
-            onClick={(e) => {
-              e.stopPropagation();
-              setActiveLightboxUrl(null);
-            }}
-          >
-            ✕
-          </button>
+
+          {/* Media Viewport */}
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }}>
+            {activeLightboxMimeType?.startsWith('video/') ? (
+              <video 
+                src={activeLightboxUrl} 
+                controls 
+                autoPlay 
+                style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} 
+              />
+            ) : (
+              <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <QuickPinchZoom
+                  onUpdate={({ x, y, scale }) => {
+                    if (lightboxImgRef.current) {
+                      lightboxImgRef.current.style.transform = make3dTransformValue({ x, y, scale });
+                    }
+                  }}
+                  tapZoomFactor={2}
+                  style={{ width: '100%', height: '100%' }}
+                >
+                  <img 
+                    ref={lightboxImgRef}
+                    src={activeLightboxUrl} 
+                    alt="Enlarged Media" 
+                    style={{ 
+                      maxWidth: '100%', 
+                      maxHeight: '100%', 
+                      objectFit: 'contain'
+                    }}
+                  />
+                </QuickPinchZoom>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
