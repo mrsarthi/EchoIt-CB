@@ -89,7 +89,7 @@ export async function isBiometricsAvailable() {
 }
 
 // Request biometric verification
-export async function authenticateBiometrics(reason = 'Verify your identity to unlock Echo') {
+export async function authenticateBiometrics(reason = 'Verify your identity to unlock EchoIt') {
   if (window.Capacitor && window.Capacitor.isNativePlatform()) {
     try {
       await BiometricAuth.checkBiometry();
@@ -227,7 +227,7 @@ export async function loadBiometricEncryptedMnemonic() {
 
   let biometricKey = null;
   if (window.Capacitor && window.Capacitor.isNativePlatform()) {
-    const success = await authenticateBiometrics('Unlock Echo with your biometrics');
+    const success = await authenticateBiometrics('Unlock EchoIt with your biometrics');
     if (!success) throw new Error('Biometric authentication failed');
 
     const { Preferences } = await import('@capacitor/preferences');

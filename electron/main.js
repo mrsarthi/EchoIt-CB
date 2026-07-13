@@ -137,6 +137,11 @@ function createAuthServer() {
 }
 
 function createWindow() {
+    const iconExt = process.platform === 'win32' ? 'ico' : 'png';
+    const iconPath = isDev 
+        ? path.join(__dirname, `../public/icon.${iconExt}`) 
+        : path.join(__dirname, `../dist/icon.${iconExt}`);
+
     // Create the browser window with optimized settings
     mainWindow = new BrowserWindow({
         width: 1200,
@@ -147,10 +152,11 @@ function createWindow() {
         titleBarStyle: 'default',
         backgroundColor: '#0a0a0f',
         show: false,
+        icon: iconPath,
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
-            webSecurity: true, // Re-enabled for SOP protection
+            webSecurity: false, // Set to false to allow local HTTP signalling connections in production
             preload: path.join(__dirname, 'preload.js'),
         },
     });

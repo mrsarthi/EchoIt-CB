@@ -102,15 +102,23 @@ function generateChallenge() {
 function verifyWalletSignature(address, challenge, signature, publicKeyHex = null, type = 'session') {
   try {
     const prefix = type === 'registration' 
-      ? "Authorize Echo Registration: " 
-      : "Authorize Echo Session: ";
+      ? "Authorize EchoIt Registration: " 
+      : "Authorize EchoIt Session: ";
     
     const expectedMessage = `${prefix}${challenge}`;
+    console.log(`[DEBUG verifyWalletSignature] address: ${address}`);
+    console.log(`[DEBUG verifyWalletSignature] challenge: ${challenge}`);
+    console.log(`[DEBUG verifyWalletSignature] signature: ${signature}`);
+    console.log(`[DEBUG verifyWalletSignature] publicKeyHex: ${publicKeyHex}`);
+    console.log(`[DEBUG verifyWalletSignature] type: ${type}`);
+    console.log(`[DEBUG verifyWalletSignature] expectedMessage: "${expectedMessage}"`);
 
     if (publicKeyHex) {
       const { keccak256 } = require('ethers');
       const rawPubBytes = Buffer.from(publicKeyHex, 'hex').slice(-32);
       const derivedAddress = '0x' + keccak256(rawPubBytes).slice(-40).toLowerCase();
+      console.log(`[DEBUG verifyWalletSignature] derivedAddress: ${derivedAddress}`);
+      
       if (derivedAddress !== address.toLowerCase()) {
         console.warn(`[Auth] Address mismatch: expected ${address.toLowerCase()}, got ${derivedAddress}`);
         return false;
@@ -121,11 +129,16 @@ function verifyWalletSignature(address, challenge, signature, publicKeyHex = nul
         format: 'der',
         type: 'spki'
       });
-      return crypto.verify(null, Buffer.from(expectedMessage), publicKey, Buffer.from(signature, 'hex'));
+      
+      const isVerified = crypto.verify(null, Buffer.from(expectedMessage), publicKey, Buffer.from(signature, 'hex'));
+      console.log(`[DEBUG verifyWalletSignature] crypto.verify result: ${isVerified}`);
+      return isVerified;
     } else {
       // Legacy secp256k1 fallback
       const recoveredAddress = verifyMessage(expectedMessage, signature);
-      return recoveredAddress.toLowerCase() === address.toLowerCase();
+      const isVerified = recoveredAddress.toLowerCase() === address.toLowerCase();
+      console.log(`[DEBUG verifyWalletSignature] Legacy verify result: ${isVerified} (recovered: ${recoveredAddress})`);
+      return isVerified;
     }
   } catch (err) {
     console.error("Signature verification error:", err.message);

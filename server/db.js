@@ -161,7 +161,18 @@ const migrations = [
       sender_counter INT NOT NULL
   );`,
   `CREATE INDEX IF NOT EXISTS idx_backup_query ON message_backup(recipient_address, sender_address, sender_counter);`,
-  `CREATE INDEX IF NOT EXISTS idx_backup_group ON message_backup(group_id, sender_address, sender_counter);`
+  `CREATE INDEX IF NOT EXISTS idx_backup_group ON message_backup(group_id, sender_address, sender_counter);`,
+  `CREATE TABLE IF NOT EXISTS blocked_users (
+       blocker VARCHAR(42) NOT NULL,
+       blocked VARCHAR(42) NOT NULL,
+       PRIMARY KEY (blocker, blocked)
+   );`,
+  `CREATE TABLE IF NOT EXISTS ignored_requests (
+       ignorer VARCHAR(42) NOT NULL,
+       sender VARCHAR(42) NOT NULL,
+       ignored_at BIGINT NOT NULL,
+       PRIMARY KEY (ignorer, sender)
+   );`
 ];
 
 async function runMigrations() {

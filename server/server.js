@@ -35,7 +35,9 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
       'http://127.0.0.1:5173',
       'http://localhost',
       'https://localhost',
-      'capacitor://localhost'
+      'capacitor://localhost',
+      'decentrachat://app',
+      'decentrachat://'
     ];
 
 app.use(cors({
@@ -70,13 +72,8 @@ const io = new Server(server, {
 const PORT = process.env.PORT || 3000;
 
 function logConnection(publicKey, socket) {
-  const ip = socket.handshake.headers['x-forwarded-for'] 
-    || socket.handshake.address 
-    || (socket.request && socket.request.connection && socket.request.connection.remoteAddress)
-    || (socket.conn && socket.conn.remoteAddress);
-  const timestamp = new Date().toISOString();
-  const logLine = `[${timestamp}] | ${publicKey} | ${ip}\n`;
-  fs.appendFileSync(path.join(__dirname, 'connection_audit.log'), logLine);
+  // Sanitized - no IP collection, no file logging
+  console.log(`Socket ${socket.id} bound to public key.`);
 }
 
 function isPublicKeyBanned(publicKey) {
@@ -155,6 +152,46 @@ async function limitRefreshTokens(address) {
   }
 }
 
+// In-Memory IP rate limiter to protect connection events
+const ipRateLimiter = new Map();
+const LIMIT_WINDOW_MS = 1000; // 1 second
+const MAX_CONNECTIONS_PER_WINDOW = 5;
+
+function getClientIp(socket) {
+  const forwarded = socket.handshake.headers['x-forwarded-for'];
+  if (forwarded) {
+    return forwarded.split(',')[0].trim();
+  }
+  return socket.handshake.address 
+    || (socket.request && socket.request.connection && socket.request.connection.remoteAddress)
+    || (socket.conn && socket.conn.remoteAddress);
+}
+
+function isIpRateLimited(ip) {
+  const now = Date.now();
+  const userData = ipRateLimiter.get(ip) || { count: 0, firstRequestTime: now };
+
+  if (now - userData.firstRequestTime > LIMIT_WINDOW_MS) {
+    userData.count = 1;
+    userData.firstRequestTime = now;
+    ipRateLimiter.set(ip, userData);
+    return false;
+  }
+
+  userData.count += 1;
+  ipRateLimiter.set(ip, userData);
+  return userData.count > MAX_CONNECTIONS_PER_WINDOW;
+}
+
+io.use((socket, next) => {
+  const ip = getClientIp(socket);
+  if (isIpRateLimited(ip)) {
+    console.warn(`Connection rate limit exceeded for IP: ${ip}`);
+    return next(new Error('Connection rate limit exceeded'));
+  }
+  next();
+});
+
 io.on('connection', (socket) => {
   console.log(`Socket connected: ${socket.id}`);
 
@@ -163,13 +200,41 @@ io.on('connection', (socket) => {
   socket.on = function (event, listener) {
     return originalOn.call(socket, event, function (...args) {
       const expectedArgs = listener.length;
-      if (args.length < expectedArgs) {
-        while (args.length < expectedArgs - 1) {
-          args.push(undefined);
+      
+      // Determine if the listener expects a callback function as its last argument
+      let expectsCallback = false;
+      try {
+        const fnStr = listener.toString().trim();
+        const cleanFnStr = fnStr.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
+        let paramsStr = '';
+        const parenMatch = cleanFnStr.match(/^(?:async\s+)?(?:function\s*)?\(([^)]*)\)/);
+        if (parenMatch) {
+          paramsStr = parenMatch[1];
+        } else {
+          const arrowMatch = cleanFnStr.match(/^(?:async\s+)?([^=]+)=>/);
+          if (arrowMatch) {
+            paramsStr = arrowMatch[1];
+          }
         }
-        args.push(() => {}); // Append a dummy callback
-      } else if (expectedArgs > 0 && typeof args[expectedArgs - 1] !== 'function') {
-        args[expectedArgs - 1] = () => {};
+        const params = paramsStr.split(',').map(s => s.trim()).filter(Boolean);
+        if (params.length > 0) {
+          const lastParam = params[params.length - 1];
+          expectsCallback = lastParam === 'callback' || lastParam === 'cb';
+        }
+      } catch (e) {
+        // Fallback: assume true if there is more than 1 expected arg
+        expectsCallback = expectedArgs > 1;
+      }
+
+      if (expectsCallback) {
+        if (args.length < expectedArgs) {
+          while (args.length < expectedArgs - 1) {
+            args.push(undefined);
+          }
+          args.push(() => {}); // Append a dummy callback
+        } else if (expectedArgs > 0 && typeof args[expectedArgs - 1] !== 'function') {
+          args[expectedArgs - 1] = () => {};
+        }
       }
       return listener.apply(this, args);
     });
@@ -182,6 +247,7 @@ io.on('connection', (socket) => {
     const decoded = verifyAccessToken(token);
     if (decoded && decoded.address === address.toLowerCase()) {
       socket.address = address.toLowerCase();
+      socket.data = { ...socket.data, address: address.toLowerCase() };
       socket.join(socket.address);
       console.log(`Socket ${socket.id} pre-authenticated as ${socket.address}`);
     }
@@ -341,6 +407,7 @@ io.on('connection', (socket) => {
       }
 
       socket.address = address.toLowerCase();
+      socket.data = { ...socket.data, address: address.toLowerCase() };
       socket.join(socket.address);
       socket.broadcast.emit('userConnected', { address: socket.address });
       console.log(`Socket ${socket.id} authenticated as ${socket.address}`);
@@ -376,7 +443,7 @@ io.on('connection', (socket) => {
 
       // Fetch all online users
       const activeSockets = await io.fetchSockets();
-      const onlineUsers = Array.from(new Set(activeSockets.map(s => s.address).filter(Boolean)));
+      const onlineUsers = Array.from(new Set(activeSockets.map(s => s.data?.address || s.address).filter(Boolean)));
 
       callback({
         success: true,
@@ -455,6 +522,7 @@ io.on('connection', (socket) => {
 
       // Authenticate socket session
       socket.address = address.toLowerCase();
+      socket.data = { ...socket.data, address: address.toLowerCase() };
       socket.join(socket.address);
       socket.broadcast.emit('userConnected', { address: socket.address });
       socket.username = user.username;
@@ -471,7 +539,7 @@ io.on('connection', (socket) => {
 
       // Fetch all online users
       const activeSockets = await io.fetchSockets();
-      const onlineUsers = Array.from(new Set(activeSockets.map(s => s.address).filter(Boolean)));
+      const onlineUsers = Array.from(new Set(activeSockets.map(s => s.data?.address || s.address).filter(Boolean)));
 
       callback({
         success: true,
@@ -506,6 +574,7 @@ io.on('connection', (socket) => {
       }
 
       const { id, to, ciphertext, iv, dhPublic, sequenceNumber, timestamp, x3dhInfo, groupId, vectorClock, senderCounter } = payload;
+      console.log(`[Server] sendMessage: from=${socket.address}, to=${to}, groupId=${groupId}, id=${id}`);
 
       if (!id || !to || !ciphertext || !iv || !dhPublic || sequenceNumber === undefined || !timestamp) {
         return callback({ success: false, error: "Missing fields in message payload." });
@@ -550,7 +619,29 @@ io.on('connection', (socket) => {
         if (recRes.rows.length === 0) {
           return callback({ success: false, error: "Recipient user not found." });
         }
-        recipientAddress = recRes.rows[0].address;
+      }
+
+      // Check if blocked
+      const blockCheck = await pool.query(
+        'SELECT 1 FROM blocked_users WHERE blocker = $1 AND blocked = $2',
+        [recipientAddress.toLowerCase(), socket.address.toLowerCase()]
+      );
+      if (blockCheck.rows.length > 0) {
+        return callback({ success: false, error: "blocked" });
+      }
+
+      // Check if ignored (12-hour cooldown)
+      const ignoreCheck = await pool.query(
+        'SELECT ignored_at FROM ignored_requests WHERE ignorer = $1 AND sender = $2',
+        [recipientAddress.toLowerCase(), socket.address.toLowerCase()]
+      );
+      if (ignoreCheck.rows.length > 0) {
+        const ignoredAt = parseInt(ignoreCheck.rows[0].ignored_at, 10);
+        const cooldown = 12 * 60 * 60 * 1000;
+        const elapsed = Date.now() - ignoredAt;
+        if (elapsed < cooldown) {
+          return callback({ success: false, error: "cooldown", remaining: cooldown - elapsed });
+        }
       }
 
       // Insert message into server's message backup buffer
@@ -665,6 +756,68 @@ io.on('connection', (socket) => {
     } catch (err) {
       console.error("sendMessage error:", err.message);
       callback({ success: false, error: "Internal server error during message delivery." });
+    }
+  });
+
+  // Social Graph Management: Block, Unblock, and Ignore Requests
+  socket.on('blockUser', async ({ targetAddress }, callback) => {
+    try {
+      if (!socket.address) {
+        return callback({ success: false, error: "Authentication required." });
+      }
+      const blocker = socket.address.toLowerCase();
+      const blocked = targetAddress.toLowerCase();
+      
+      await pool.query(
+        'INSERT INTO blocked_users (blocker, blocked) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [blocker, blocked]
+      );
+      callback({ success: true });
+    } catch (err) {
+      console.error("blockUser error:", err.message);
+      callback({ success: false, error: "Failed to block user." });
+    }
+  });
+
+  socket.on('unblockUser', async ({ targetAddress }, callback) => {
+    try {
+      if (!socket.address) {
+        return callback({ success: false, error: "Authentication required." });
+      }
+      const blocker = socket.address.toLowerCase();
+      const blocked = targetAddress.toLowerCase();
+      
+      await pool.query(
+        'DELETE FROM blocked_users WHERE blocker = $1 AND blocked = $2',
+        [blocker, blocked]
+      );
+      callback({ success: true });
+    } catch (err) {
+      console.error("unblockUser error:", err.message);
+      callback({ success: false, error: "Failed to unblock user." });
+    }
+  });
+
+  socket.on('ignoreUser', async ({ targetAddress }, callback) => {
+    try {
+      if (!socket.address) {
+        return callback({ success: false, error: "Authentication required." });
+      }
+      const ignorer = socket.address.toLowerCase();
+      const sender = targetAddress.toLowerCase();
+      const timestamp = Date.now();
+      
+      await pool.query(
+        `INSERT INTO ignored_requests (ignorer, sender, ignored_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (ignorer, sender)
+         DO UPDATE SET ignored_at = $3`,
+        [ignorer, sender, timestamp]
+      );
+      callback({ success: true });
+    } catch (err) {
+      console.error("ignoreUser error:", err.message);
+      callback({ success: false, error: "Failed to ignore user." });
     }
   });
 
@@ -929,6 +1082,7 @@ io.on('connection', (socket) => {
       }
 
       const { address } = payload;
+      console.log(`[Server] getKeyBundle: requester=${socket.address}, target=${address}`);
       if (!address) {
         return callback({ success: false, error: "Missing address or username." });
       }
@@ -1295,6 +1449,7 @@ io.on('connection', (socket) => {
 
   socket.on('typing', (payload) => {
     const { recipient, conversationId, isTyping } = payload;
+    console.log(`[Server] Received typing status from ${socket.address} for recipient ${recipient} in conversation ${conversationId}: isTyping=${isTyping}`);
     if (!socket.address || !recipient || !conversationId) return;
     
     // Forward typing status to recipient

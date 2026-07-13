@@ -173,6 +173,52 @@ function App() {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  // Local storage migration for default accent color
+  useEffect(() => {
+    const cachedColor = localStorage.getItem('echo_accent_color');
+    if (cachedColor === '#818cf8') {
+      localStorage.setItem('echo_accent_color', '#10b981');
+      setAccentColor('#10b981');
+    }
+  }, []);
+
+  // Update Checker effect (Task 2.3)
+  useEffect(() => {
+    async function checkForUpdates() {
+      try {
+        const response = await fetch("https://api.github.com/repos/mrsarthi/Echo-Messenger/releases/latest");
+        if (!response.ok) return;
+        const data = await response.json();
+        const latest = data.tag_name;
+        
+        const cleanLatest = latest.replace(/^v/, '');
+        const cleanCurrent = CURRENT_VERSION.replace(/^v/, '');
+        
+        const p1 = cleanLatest.split('.').map(Number);
+        const p2 = cleanCurrent.split('.').map(Number);
+        
+        let needsUpdate = false;
+        for (let i = 0; i < 3; i++) {
+          if (p1[i] > p2[i]) {
+            needsUpdate = true;
+            break;
+          } else if (p1[i] < p2[i]) {
+            break;
+          }
+        }
+        
+        if (needsUpdate) {
+          setLatestVersion(latest);
+          setUpdateUrl(data.html_url);
+          setShowUpdateModal(true);
+        }
+      } catch (err) {
+        console.warn("Failed to check for updates", err);
+      }
+    }
+    checkForUpdates();
+  }, []);
+
   useEffect(() => {
     const loadCachedMedia = async () => {
       const mediaToLoad = [];
@@ -297,27 +343,35 @@ function App() {
 
   const typingTimeoutRef = useRef(null);
   const isTypingRef = useRef(false);
+  const lastSentTypingAtRef = useRef(0);
 
   const handleInputChange = (val) => {
     setInputText(val);
 
     if (!client || !activeConversationId) return;
 
+    const now = Date.now();
     if (!isTypingRef.current) {
       isTypingRef.current = true;
+      lastSentTypingAtRef.current = now;
+      sendTypingToActiveChat(true);
+    } else if (now - lastSentTypingAtRef.current > 2000) {
+      lastSentTypingAtRef.current = now;
       sendTypingToActiveChat(true);
     }
 
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     typingTimeoutRef.current = setTimeout(() => {
       isTypingRef.current = false;
+      lastSentTypingAtRef.current = 0;
       sendTypingToActiveChat(false);
-    }, 2000);
+    }, 3000);
   };
 
   const sendTypingToActiveChat = (isTyping) => {
     if (!client || !activeConversationId) return;
-    const activeChat = conversations.find(c => c.id === activeConversationId);
+    const activeChat = conversations.find(c => c.id.toLowerCase() === activeConversationId.toLowerCase());
+    console.log(`[Typing] sendTypingToActiveChat: activeConversationId=${activeConversationId}, isTyping=${isTyping}, activeChatFound=${!!activeChat}`);
     if (!activeChat) return;
 
     if (activeChat.is_group === 1) {
@@ -325,14 +379,17 @@ function App() {
         const group = db.prepare('SELECT members FROM groups WHERE id = ?').get(activeConversationId);
         if (group) {
           const members = JSON.parse(group.members || '[]');
+          console.log(`[Typing] Group members:`, members);
           members.forEach(member => {
             if (member.toLowerCase() !== client.address.toLowerCase()) {
+              console.log(`[Typing] Sending typing status to group member: ${member}`);
               client.sendTypingStatus(member, activeConversationId, isTyping);
             }
           });
         }
       });
     } else {
+      console.log(`[Typing] Sending typing status to: ${activeConversationId}`);
       client.sendTypingStatus(activeConversationId, activeConversationId, isTyping);
     }
   };
@@ -381,7 +438,54 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('');
 
   // Onboarding & Lockbox states
-  const [onboardingStep, setOnboardingStep] = useState('home'); // 'home', 'show-seed', 'verify-seed', 'restore', 'choose-password'
+  const [onboardingStep, setOnboardingStep] = useState(() => {
+    return localStorage.getItem('echo_setup_completed') === 'true' ? 'home' : 'setup-wizard';
+  });
+  
+  // Setup Wizard states (Task 2.1)
+  const [wizardAgeAccepted, setWizardAgeAccepted] = useState(false);
+  const [wizardPrivacyAccepted, setWizardPrivacyAccepted] = useState(false);
+  const [useCustomRelay, setUseCustomRelay] = useState(false);
+  const [wizardCustomRelayUrl, setWizardCustomRelayUrl] = useState('');
+
+  // Client-Side Blocking states (Task 2.2)
+  const [blockedList, setBlockedList] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('echo_blocked_addresses') || '[]').map(a => a.toLowerCase());
+    } catch {
+      return [];
+    }
+  });
+
+  const isAddressBlocked = (address) => {
+    if (!address) return false;
+    return blockedList.includes(address.toLowerCase());
+  };
+
+  const blockAddress = (address) => {
+    if (!address) return;
+    const addr = address.toLowerCase();
+    if (!blockedList.includes(addr)) {
+      const newList = [...blockedList, addr];
+      setBlockedList(newList);
+      localStorage.setItem('echo_blocked_addresses', JSON.stringify(newList));
+    }
+  };
+
+  const unblockAddress = (address) => {
+    if (!address) return;
+    const addr = address.toLowerCase();
+    const newList = blockedList.filter(a => a !== addr);
+    setBlockedList(newList);
+    localStorage.setItem('echo_blocked_addresses', JSON.stringify(newList));
+  };
+
+  // Mandatory Update Checker states (Task 2.3)
+  const CURRENT_VERSION = "4.2.0";
+  const [showUpdateModal, setShowUpdateModal] = useState(false);
+  const [updateUrl, setUpdateUrl] = useState('');
+  const [latestVersion, setLatestVersion] = useState('');
+
   const [generatedMnemonic, setGeneratedMnemonic] = useState('');
   const [mnemonicInput, setMnemonicInput] = useState('');
   const [mnemonicError, setMnemonicError] = useState('');
@@ -400,7 +504,7 @@ function App() {
     return localStorage.getItem('echo_compact_view') === 'true';
   });
   const [accentColor, setAccentColor] = useState(() => {
-    return localStorage.getItem('echo_accent_color') || '#818cf8';
+    return localStorage.getItem('echo_accent_color') || '#10b981';
   });
   const [autoConnect, setAutoConnect] = useState(() => {
     return localStorage.getItem('echo_auto_connect') !== 'false';
@@ -487,7 +591,7 @@ function App() {
   }, [darkMode]);
 
   useEffect(() => {
-    const safeColor = /^#[0-9a-fA-F]{6}$/.test(accentColor) ? accentColor : '#818cf8';
+    const safeColor = /^#[0-9a-fA-F]{6}$/.test(accentColor) ? accentColor : '#10b981';
     document.documentElement.style.setProperty('--accent-indigo', safeColor);
     localStorage.setItem('echo_accent_color', safeColor);
   }, [accentColor]);
@@ -571,9 +675,9 @@ function App() {
       <div className="mesh-gradient-bg" style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-primary)', backgroundColor: 'var(--bg-primary)', padding: '24px' }}>
         <div className="glass-panel" style={{ width: '100%', maxWidth: '400px', borderRadius: '16px', padding: '32px', display: 'flex', flexDirection: 'column', alignItems: 'center', boxShadow: '0 20px 50px rgba(0,0,0,0.5)', backgroundColor: 'rgba(29, 32, 33, 0.75)', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.05)' }}>
           <div style={{ width: '80px', height: '80px', borderRadius: '50%', backgroundColor: 'rgba(255, 255, 255, 0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid rgba(255, 255, 255, 0.1)', marginBottom: '16px' }}>
-            <img style={{ width: '48px', height: '48px', objectFit: 'contain' }} alt="Echo Logo" src={logo} />
+            <img style={{ width: '48px', height: '48px', objectFit: 'contain' }} alt="EchoIt Logo" src={logo} />
           </div>
-          <h2 style={{ fontSize: '22px', fontWeight: 'bold', marginBottom: '8px', color: 'var(--text-primary)' }}>Unlock Echo</h2>
+          <h2 style={{ fontSize: '22px', fontWeight: 'bold', marginBottom: '8px', color: 'var(--text-primary)' }}>Unlock EchoIt</h2>
           <p style={{ fontSize: '13px', color: 'var(--text-secondary)', textAlign: 'center', marginBottom: '24px' }}>
             Enter your secure password to decrypt your credentials and synchronize keys.
           </p>
@@ -843,27 +947,16 @@ function App() {
     
     // Add real DM conversation contacts
     conversations.forEach(c => {
-      if (c.is_group !== 1) {
+      if (Number(c.is_group) !== 1 && Number(c.is_contact) === 1) {
         const cached = usernameCache[c.id.toLowerCase()];
         addUnique({ 
           address: c.id, 
           username: cached?.username || c.username || c.id,
-          hide_wallet: cached ? cached.hideWallet : c.hide_wallet,
+          hide_wallet: 0,
           bio: (cached && cached.bio !== undefined) ? cached.bio : (c.bio || ''),
           pfp: (cached && cached.pfp !== undefined) ? cached.pfp : (c.pfp || null)
         });
       }
-    });
-
-    // Add any other cached entries not yet in the list
-    Object.keys(usernameCache).forEach(addr => {
-      addUnique({
-        address: addr,
-        username: usernameCache[addr].username,
-        hide_wallet: usernameCache[addr].hideWallet,
-        bio: usernameCache[addr].bio || '',
-        pfp: usernameCache[addr].pfp || null
-      });
     });
 
     return list;
@@ -875,8 +968,8 @@ function App() {
       <div className="auth-overlay">
         <div className="auth-card">
           <div className="auth-logo-container">
-            <img src={logo} alt="Echo Logo" className="auth-logo-img" style={{ height: '48px', width: 'auto' }} />
-            <span className="auth-logo-text">Echo</span>
+            <img src={logo} alt="EchoIt Logo" className="auth-logo-img" style={{ height: '48px', width: 'auto' }} />
+            <span className="auth-logo-text">EchoIt</span>
           </div>
           <div className="auth-desc">Accessing local secure enclave databases...</div>
         </div>
@@ -890,8 +983,8 @@ function App() {
       <div className="mesh-gradient-bg" style={{ width: '100%', minHeight: '100vh', display: 'flex', flexDirection: 'column', position: 'relative', overflowY: 'auto' }}>
         <header style={{ width: '100%', height: '64px', position: 'fixed', top: 0, left: 0, zIndex: 40, backgroundColor: 'rgba(17, 20, 21, 0.85)', backdropFilter: 'blur(10px)', borderBottom: '1px solid rgba(255, 255, 255, 0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 24px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <img src={logo} alt="Echo Logo" style={{ height: '32px', width: 'auto' }} />
-            <span className="font-headline-md font-bold" style={{ fontSize: '20px', fontFamily: 'Manrope, sans-serif', color: 'var(--text-primary)' }}>Echo</span>
+            <img src={logo} alt="EchoIt Logo" style={{ height: '32px', width: 'auto' }} />
+            <span className="font-headline-md font-bold" style={{ fontSize: '20px', fontFamily: 'Manrope, sans-serif', color: 'var(--text-primary)' }}>EchoIt</span>
           </div>
           <div>
             <button style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer' }} onClick={() => window.open('https://metamask.io/faqs/', '_blank')}>
@@ -906,7 +999,7 @@ function App() {
             
             <div style={{ position: 'relative', marginBottom: '16px', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
               <div style={{ width: '96px', height: '96px', borderRadius: '50%', backgroundColor: 'rgba(255, 255, 255, 0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid rgba(255, 255, 255, 0.1)', overflow: 'hidden' }}>
-                <img src={logo} alt="Echo Logo" style={{ height: '48px', width: 'auto' }} />
+                <img src={logo} alt="EchoIt Logo" style={{ height: '48px', width: 'auto' }} />
               </div>
               <div style={{ position: 'absolute', bottom: '-2px', right: '-2px', backgroundColor: '#f59e0b', width: '24px', height: '24px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '3px solid var(--bg-primary)' }}>
                 <span className="material-symbols-outlined font-bold" style={{ fontSize: '12px', color: '#ffffff' }}>lock_open</span>
@@ -966,7 +1059,7 @@ function App() {
             <a href="#" className="hover:text-primary transition-colors">TERMS OF SERVICE</a>
           </div>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            <span>VERSION 4.0.1-STABLE</span>
+            <span>VERSION {CURRENT_VERSION}</span>
             <span style={{ width: '4px', height: '4px', borderRadius: '50%', backgroundColor: 'rgba(255,255,255,0.3)' }}></span>
             <span>BUILD 9301</span>
           </div>
@@ -1046,20 +1139,158 @@ function App() {
         <header className="safe-header" style={{ width: '100%', position: 'fixed', top: 0, left: 0, zIndex: 40, borderBottom: '1px solid var(--border-light)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 24px', backgroundColor: 'rgba(27, 27, 34, 0.85)', backdropFilter: 'blur(10px)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <span className="material-symbols-outlined" style={{ color: 'var(--accent-indigo)' }}>shield</span>
-            <span className="font-headline-md font-bold" style={{ fontSize: '20px', color: 'var(--text-primary)' }}>Echo</span>
+            <span className="font-headline-md font-bold" style={{ fontSize: '20px', color: 'var(--text-primary)' }}>EchoIt</span>
           </div>
         </header>
 
         <main className="safe-pt safe-pb" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flexGrow: 1, padding: '24px 20px', paddingTop: '100px', width: '100%' }}>
           
+          {onboardingStep === 'setup-wizard' && (
+            <div className="glass-panel animate-fade-in" style={{ width: '100%', maxWidth: '460px', borderRadius: '16px', padding: '32px', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 50px rgba(0,0,0,0.5)', backgroundColor: 'rgba(29, 32, 33, 0.7)', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.05)' }}>
+              
+              <h2 style={{ fontSize: '20px', fontWeight: 'bold', color: 'var(--text-primary)', marginBottom: '8px', textAlign: 'center' }}>Initial Setup Wizard</h2>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.5', marginBottom: '24px', textAlign: 'center' }}>
+                Please configure the security and privacy parameters below to initialize your EchoIt Messenger instance.
+              </p>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', width: '100%', marginBottom: '32px' }}>
+                
+                {/* 1. Age Verification */}
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', background: 'rgba(255,255,255,0.02)', padding: '12px 16px', borderRadius: '12px', border: '1px solid var(--border-light)', cursor: 'pointer', userSelect: 'none' }}>
+                  <input 
+                    type="checkbox" 
+                    id="wizard-age-check"
+                    checked={wizardAgeAccepted} 
+                    onChange={(e) => setWizardAgeAccepted(e.target.checked)} 
+                    style={{ marginTop: '3px', cursor: 'pointer', width: '16px', height: '16px', accentColor: 'var(--accent-indigo)' }}
+                  />
+                  <label htmlFor="wizard-age-check" style={{ fontSize: '13px', color: 'var(--text-primary)', cursor: 'pointer', lineHeight: '1.4' }}>
+                    I confirm that I am <strong>13 years of age or older</strong> (or 16+ in the European Union).
+                  </label>
+                </div>
+ 
+                {/* 2. Privacy Policy Agreement */}
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', background: 'rgba(255,255,255,0.02)', padding: '12px 16px', borderRadius: '12px', border: '1px solid var(--border-light)', cursor: 'pointer', userSelect: 'none' }}>
+                  <input 
+                    type="checkbox" 
+                    id="wizard-privacy-check"
+                    checked={wizardPrivacyAccepted} 
+                    onChange={(e) => setWizardPrivacyAccepted(e.target.checked)} 
+                    style={{ marginTop: '3px', cursor: 'pointer', width: '16px', height: '16px', accentColor: 'var(--accent-indigo)' }}
+                  />
+                  <label htmlFor="wizard-privacy-check" style={{ fontSize: '13px', color: 'var(--text-primary)', cursor: 'pointer', lineHeight: '1.4' }}>
+                    I accept the <a href="https://mrsarthi.github.io/EchoIt-Messenger/#legal-privacy" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent-indigo)', textDecoration: 'underline', fontWeight: 'bold', cursor: 'pointer' }}>Privacy Policy</a> and <a href="https://mrsarthi.github.io/EchoIt-Messenger/#legal-terms" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent-indigo)', textDecoration: 'underline', fontWeight: 'bold', cursor: 'pointer' }}>Terms of Service</a>, and agree that the relay server processes socket connection metadata ephemerally for message routing.
+                  </label>
+                </div>
+
+                {/* 3. Relay Node Selector */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', background: 'rgba(255,255,255,0.02)', padding: '16px', borderRadius: '12px', border: '1px solid var(--border-light)' }}>
+                  <span style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Relay Connection Node</span>
+                  
+                  <div style={{ display: 'flex', gap: '16px', marginTop: '6px' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: 'var(--text-primary)', cursor: 'pointer' }}>
+                      <input 
+                        type="radio" 
+                        name="relay-type" 
+                        checked={!useCustomRelay} 
+                        onChange={() => setUseCustomRelay(false)}
+                        style={{ cursor: 'pointer', accentColor: 'var(--accent-indigo)' }}
+                      />
+                      Official Relay
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: 'var(--text-primary)', cursor: 'pointer' }}>
+                      <input 
+                        type="radio" 
+                        name="relay-type" 
+                        checked={useCustomRelay} 
+                        onChange={() => setUseCustomRelay(true)}
+                        style={{ cursor: 'pointer', accentColor: 'var(--accent-indigo)' }}
+                      />
+                      Custom Relay
+                    </label>
+                  </div>
+
+                  {useCustomRelay && (
+                    <input 
+                      type="text" 
+                      placeholder="ws://localhost:3009 or wss://myrelay.com" 
+                      value={wizardCustomRelayUrl}
+                      onChange={(e) => setWizardCustomRelayUrl(e.target.value)}
+                      style={{ 
+                        marginTop: '8px',
+                        width: '100%', 
+                        height: '38px', 
+                        borderRadius: '8px', 
+                        border: '1px solid var(--border-light)', 
+                        background: 'rgba(0,0,0,0.2)', 
+                        color: 'var(--text-primary)', 
+                        padding: '0 12px', 
+                        fontSize: '13px',
+                        outline: 'none'
+                      }} 
+                    />
+                  )}
+                </div>
+
+              </div>
+
+              <button 
+                onClick={() => {
+                  if (!wizardAgeAccepted) {
+                    alert("You must verify your age to proceed.");
+                    return;
+                  }
+                  if (!wizardPrivacyAccepted) {
+                    alert("You must accept the Privacy Policy to proceed.");
+                    return;
+                  }
+                  if (useCustomRelay && !wizardCustomRelayUrl.trim()) {
+                    alert("Please enter a custom relay URL.");
+                    return;
+                  }
+                  
+                  // Save options
+                  localStorage.setItem('echo_setup_completed', 'true');
+                  if (useCustomRelay) {
+                    localStorage.setItem('echo_custom_relay_url', wizardCustomRelayUrl.trim());
+                  } else {
+                    localStorage.removeItem('echo_custom_relay_url');
+                  }
+                  
+                  // Go to main onboarding home
+                  setOnboardingStep('home');
+                }} 
+                className="auth-btn" 
+                style={{ 
+                  width: '100%', 
+                  height: '48px', 
+                  borderRadius: '10px', 
+                  background: 'var(--accent-indigo)', 
+                  color: '#ffffff', 
+                  fontWeight: 'bold', 
+                  border: 'none', 
+                  cursor: 'pointer', 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  justifyContent: 'center', 
+                  gap: '8px' 
+                }}
+              >
+                Continue Setup
+                <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>arrow_forward</span>
+              </button>
+
+            </div>
+          )}
+
           {onboardingStep === 'home' && (
             <div className="glass-panel animate-fade-in" style={{ width: '100%', maxWidth: '440px', borderRadius: '16px', padding: '32px', display: 'flex', flexDirection: 'column', alignItems: 'center', boxShadow: '0 20px 50px rgba(0,0,0,0.5)', backgroundColor: 'rgba(29, 32, 33, 0.7)', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.05)' }}>
               <div className="animate-float" style={{ position: 'relative', marginBottom: '24px', width: '120px', height: '120px', borderRadius: '50%', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <img style={{ width: '80px', height: '80px', objectFit: 'contain' }} alt="Echo Logo" src={logo} />
+                <img style={{ width: '80px', height: '80px', objectFit: 'contain' }} alt="EchoIt Logo" src={logo} />
               </div>
-              <h1 className="font-headline-lg-mobile" style={{ fontSize: '24px', fontWeight: 'bold', color: 'var(--text-primary)', textAlign: 'center', marginBottom: '8px' }}>Welcome to Echo</h1>
+              <h1 className="font-headline-lg-mobile" style={{ fontSize: '24px', fontWeight: 'bold', color: 'var(--text-primary)', textAlign: 'center', marginBottom: '8px' }}>Welcome to EchoIt</h1>
               <p style={{ fontSize: '14px', color: 'var(--text-secondary)', textAlign: 'center', maxWidth: '340px', lineHeight: '1.6', marginBottom: '32px' }}>
-                Echo is a fully decentralized, peer-to-peer messaging application. All cryptographic keys are generated and stored locally on your device.
+                EchoIt is a fully decentralized, peer-to-peer messaging application. All cryptographic keys are generated and stored locally on your device.
               </p>
               
               <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', width: '100%' }}>
@@ -1232,7 +1463,7 @@ function App() {
 
                 {/* Biometrics Toggle (Capacitor Native only) */}
                 {window.Capacitor?.isNativePlatform() && (
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '8px', margin: '8px 0' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '8px', margin: '8px 0', cursor: 'pointer', userSelect: 'none' }}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
                       <span style={{ fontSize: '13px', fontWeight: 'bold' }}>Enable Biometric Login</span>
                       <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Unlock app using FaceID or Fingerprint</span>
@@ -1243,7 +1474,7 @@ function App() {
                       onChange={(e) => setOptInBiometrics(e.target.checked)}
                       style={{ width: '20px', height: '20px', cursor: 'pointer', accentColor: 'var(--accent-indigo)' }}
                     />
-                  </div>
+                  </label>
                 )}
 
                 {isDerivingKey ? (
@@ -1280,11 +1511,11 @@ function App() {
         <div className="auth-overlay" style={{ overflowY: 'auto', display: 'flex', flexDirection: 'column', padding: '40px 24px' }}>
           <div className="auth-card">
             <div className="auth-logo-container">
-              <img src={logo} alt="Echo Logo" className="auth-logo-img" style={{ height: '48px', width: 'auto' }} />
-              <span className="auth-logo-text">Echo</span>
+              <img src={logo} alt="EchoIt Logo" className="auth-logo-img" style={{ height: '48px', width: 'auto' }} />
+              <span className="auth-logo-text">EchoIt</span>
             </div>
             <div className="auth-desc">
-              Your account is already registered on the Echo network. Click login below to retrieve your secure session and access your inbox.
+              Your account is already registered on the EchoIt network. Click login below to retrieve your secure session and access your inbox.
             </div>
             
             <div className="profile-card" style={{ textAlign: 'left' }}>
@@ -1300,7 +1531,7 @@ function App() {
             {error && <div className="error-banner">{error}</div>}
 
             <button type="button" className="auth-btn" onClick={loginUser} style={{ marginTop: '12px' }}>
-              Login to Echo
+              Login to EchoIt
             </button>
 
             <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
@@ -1363,8 +1594,8 @@ function App() {
        <div className="auth-overlay" style={{ overflowY: 'auto', display: 'flex', flexDirection: 'column', padding: '40px 24px' }}>
          <div className="auth-card">
            <div className="auth-logo-container">
-             <img src={logo} alt="Echo Logo" className="auth-logo-img" style={{ height: '48px', width: 'auto' }} />
-             <span className="auth-logo-text">Echo</span>
+             <img src={logo} alt="EchoIt Logo" className="auth-logo-img" style={{ height: '48px', width: 'auto' }} />
+             <span className="auth-logo-text">EchoIt</span>
            </div>
            <div className="auth-desc">
              Local account initialized. Pick an immutable username to register your key bundles on the relay server.
@@ -1493,11 +1724,11 @@ function App() {
       <div className="auth-overlay" style={{ overflowY: 'auto', display: 'flex', flexDirection: 'column', padding: '40px 24px' }}>
         <div className="auth-card">
           <div className="auth-logo-container">
-            <img src={logo} alt="Echo Logo" className="auth-logo-img" style={{ height: '48px', width: 'auto' }} />
-            <span className="auth-logo-text">Echo</span>
+            <img src={logo} alt="EchoIt Logo" className="auth-logo-img" style={{ height: '48px', width: 'auto' }} />
+            <span className="auth-logo-text">EchoIt</span>
           </div>
           <div className="auth-desc">
-            You are currently disconnected from the Echo relay network. Authenticate your session with your wallet signature to access your secure inbox.
+            You are currently disconnected from the EchoIt relay network. Authenticate your session with your wallet signature to access your secure inbox.
           </div>
           
           <div className="profile-card" style={{ textAlign: 'left' }}>
@@ -1540,11 +1771,21 @@ function App() {
   // 3. Registered & Connected State: Full Three-pane Layout Dashboard
   const activeChat = conversations.find(c => c.id === activeConversationId);
   const isGroupActive = activeChat?.is_group === 1;
+  const isPendingRequest = activeChat?.pending_request === 1;
 
-  // Filter Conversations by Search
-  const filteredConversations = conversations.filter(c =>
-    c.username.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const pendingRequestsCount = conversations.filter(c => c.pending_request === 1).length;
+
+  // Filter Conversations by Search and Tab
+  const filteredConversations = conversations.filter(c => {
+    const matchesSearch = c.username.toLowerCase().includes(searchQuery.toLowerCase());
+    if (!matchesSearch) return false;
+    
+    if (activeTab === 'requests') {
+      return c.pending_request === 1;
+    } else {
+      return c.pending_request !== 1;
+    }
+  });
 
   // Filter Contacts by Search
   const filteredContacts = getCombinedContacts().filter(contact =>
@@ -1579,10 +1820,10 @@ function App() {
       <aside className="desktop-sidebar">
         <div className="desktop-sidebar-header">
           <div className="w-10 h-10 rounded-lg bg-primary-container flex items-center justify-center shrink-0 shadow-sm" style={{ background: 'transparent', borderRadius: '8px', padding: '4px' }}>
-            <img src={logo} alt="Echo Logo" style={{ height: '28px', width: 'auto' }} />
+            <img src={logo} alt="EchoIt Logo" style={{ height: '28px', width: 'auto' }} />
           </div>
           <div>
-            <h1 className="font-headline-md text-headline-md font-bold text-primary truncate" style={{ fontSize: '18px', fontWeight: 'bold' }}>Echo</h1>
+            <h1 className="font-headline-md text-headline-md font-bold text-primary truncate" style={{ fontSize: '18px', fontWeight: 'bold' }}>EchoIt</h1>
             <p className="text-on-surface-variant font-body-md text-xs opacity-70" style={{ fontSize: '10px' }}>Secure Desktop</p>
           </div>
         </div>
@@ -1594,6 +1835,30 @@ function App() {
           >
             <span className="material-symbols-outlined">chat</span>
             <span>Chats</span>
+          </div>
+          <div 
+            className={`desktop-nav-item ${activeTab === 'requests' ? 'active' : ''}`}
+            onClick={() => { setActiveTab('requests'); setActiveConversationId(null); }}
+            style={{ position: 'relative' }}
+          >
+            <span className="material-symbols-outlined">move_to_inbox</span>
+            <span>Requests</span>
+            {pendingRequestsCount > 0 && (
+              <span style={{
+                position: 'absolute',
+                right: '12px',
+                background: 'var(--accent-emerald)',
+                color: 'white',
+                fontSize: '10px',
+                fontWeight: 'bold',
+                padding: '2px 6px',
+                borderRadius: '10px',
+                minWidth: '18px',
+                textAlign: 'center'
+              }}>
+                {pendingRequestsCount}
+              </span>
+            )}
           </div>
           <div 
             className={`desktop-nav-item ${activeTab === 'contacts' ? 'active' : ''}`}
@@ -1642,15 +1907,17 @@ function App() {
           </div>
         </div>
       </aside>
-
+ 
       {/* 2. Middle Pane (mockup: Recent Chats list / Contacts list) */}
-      {activeTab === 'chats' && (
+      {(activeTab === 'chats' || activeTab === 'requests') && (
         <section className={`middle-pane ${isMobile ? 'safe-pb' : ''}`}>
           {isMobile ? (
             /* Mobile Recent Chats Header */
             <header style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 18px)', paddingBottom: '16px', paddingLeft: '20px', paddingRight: '20px', borderBottom: '1px solid var(--border-light)', display: 'flex', flexDirection: 'column', gap: '12px', backgroundColor: 'var(--bg-secondary)', zIndex: 40 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h1 className="font-headline-sm text-headline-sm font-bold" style={{ color: 'var(--accent-indigo)', fontSize: '20px' }}>Echo</h1>
+                <h1 className="font-headline-sm text-headline-sm font-bold" style={{ color: 'var(--accent-indigo)', fontSize: '20px' }}>
+                  {activeTab === 'requests' ? 'Requests' : 'EchoIt'}
+                </h1>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                   <button style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer' }} onClick={() => setShowDMModal(true)}>
                     <span className="material-symbols-outlined">search</span>
@@ -1673,7 +1940,9 @@ function App() {
             /* Desktop Recent Chats Header */
             <header style={{ padding: '24px 24px 12px 24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h2 className="font-headline-sm text-headline-sm text-on-surface" style={{ fontSize: '20px', fontWeight: 'bold' }}>Messages</h2>
+                <h2 className="font-headline-sm text-headline-sm text-on-surface" style={{ fontSize: '20px', fontWeight: 'bold' }}>
+                  {activeTab === 'requests' ? 'Requests' : 'Messages'}
+                </h2>
                 <button 
                   className="w-10 h-10 rounded-full flex items-center justify-center hover:bg-surface-container-high text-primary transition-colors"
                   onClick={() => setShowDMModal(true)}
@@ -1695,8 +1964,8 @@ function App() {
               </div>
             </header>
           )}
-
-          {isMobile && (
+ 
+          {isMobile && activeTab !== 'requests' && (
             /* Mobile Status/Stories Bar */
             <section className="hide-scrollbar" style={{ overflowX: 'auto', whiteSpace: 'nowrap', display: 'flex', gap: '16px', padding: '12px 20px', borderBottom: '1px solid var(--border-light)', backgroundColor: 'var(--bg-primary)' }}>
               {/* Add Status */}
@@ -1752,20 +2021,22 @@ function App() {
                     onClick={() => setActiveConversationId(conv.id)}
                     style={isMobile ? { borderBottom: '1px solid rgba(255,255,255,0.02)', borderRadius: 0 } : {}}
                   >
-                    <div className={`avatar-container ${conv.is_group ? 'group' : ''}`} style={{ overflow: 'hidden', position: 'relative' }}>
-                      {conv.is_group 
-                        ? 'G' 
-                        : (() => {
-                            const pfpUrl = contact?.pfp;
-                            if (sanitizePfpUrl(pfpUrl)) {
-                              return <img src={sanitizePfpUrl(pfpUrl)} alt="Contact Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />;
-                            }
-                            const name = contact ? contact.username : conv.username;
-                            return name.substring(0, 2).toUpperCase();
-                          })()
-                      }
+                    <div style={{ position: 'relative' }}>
+                      <div className={`avatar-container ${conv.is_group ? 'group' : ''}`} style={{ overflow: 'hidden' }}>
+                        {conv.is_group 
+                          ? 'G' 
+                          : (() => {
+                              const pfpUrl = contact?.pfp;
+                              if (sanitizePfpUrl(pfpUrl)) {
+                                return <img src={sanitizePfpUrl(pfpUrl)} alt="Contact Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />;
+                              }
+                              const name = contact ? contact.username : conv.username;
+                              return name.substring(0, 2).toUpperCase();
+                            })()
+                        }
+                      </div>
                       {!conv.is_group && isOnline && (
-                        <div style={{ position: 'absolute', bottom: 0, right: 0, width: '10px', height: '10px', backgroundColor: 'var(--accent-emerald)', borderRadius: '50%', border: '2px solid var(--bg-secondary)' }}></div>
+                        <div style={{ position: 'absolute', bottom: 0, right: 0, width: '10px', height: '10px', backgroundColor: 'var(--accent-emerald)', borderRadius: '50%', border: '2px solid var(--bg-secondary)', zIndex: 1 }}></div>
                       )}
                     </div>
                     <div className="conv-details">
@@ -1774,7 +2045,11 @@ function App() {
                           <span className="conv-name" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                             {conv.is_group 
                               ? conv.username 
-                              : (contact ? `@${contact.username}` : `@${conv.username}`)
+                              : (() => {
+                                  const usernameToShow = contact ? contact.username : conv.username;
+                                  const isDeletedContact = Number(conv.is_contact) === 0 && Number(conv.pending_request) === 0;
+                                  return isDeletedContact ? conv.id : `@${usernameToShow}`;
+                                })()
                             }
                             <span className="material-symbols-outlined" style={{ fontSize: '14px', color: 'var(--accent-indigo)', fontVariationSettings: "'FILL' 1" }}>verified</span>
                           </span>
@@ -2063,7 +2338,7 @@ function App() {
       )}
 
       {/* 3. Detail Pane (mockup: Active Chat (Desktop) vs Empty Screen Placeholder vs Settings Page) */}
-      {activeTab === 'chats' && (
+      {(activeTab === 'chats' || activeTab === 'requests') && (
         <section className="chat-pane" style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column' }}>
           {activeConversationId ? (
             <>
@@ -2104,7 +2379,9 @@ function App() {
                                 item.address.toLowerCase() === activeChat.id.toLowerCase() ||
                                 item.username.toLowerCase() === activeChat.id.toLowerCase()
                               );
-                              return contact ? `@${contact.username}` : `@${activeChat.username}`;
+                              const usernameToShow = contact ? contact.username : activeChat.username;
+                              const isDeletedContact = Number(activeChat.is_contact) === 0 && Number(activeChat.pending_request) === 0;
+                              return isDeletedContact ? activeChat.id : `@${usernameToShow}`;
                             })()
                         }
                         <span className="material-symbols-outlined" style={{ fontSize: '14px', color: 'var(--accent-indigo)', fontVariationSettings: "'FILL' 1" }}>verified</span>
@@ -2172,25 +2449,21 @@ function App() {
                                 item.address.toLowerCase() === activeChat.id.toLowerCase() ||
                                 item.username.toLowerCase() === activeChat.id.toLowerCase()
                               );
-                              return contact ? `@${contact.username}` : `@${activeChat.username}`;
+                              const usernameToShow = contact ? contact.username : activeChat.username;
+                              const isDeletedContact = Number(activeChat.is_contact) === 0 && Number(activeChat.pending_request) === 0;
+                              return isDeletedContact ? activeChat.id : `@${usernameToShow}`;
                             })()
                         }
                       </div>
                       <div className="chat-header-sub" title={activeChat.id}>
-                        {isGroupActive ? 'Secure Group Chat' : 'Active Secure Session'} • {(() => {
-                          const contact = getCombinedContacts().find(item => 
-                            item.address.toLowerCase() === activeChat.id.toLowerCase() ||
-                            item.username.toLowerCase() === activeChat.id.toLowerCase()
-                          );
-                          return contact?.hide_wallet ? 'Address Hidden' : (activeChat.id.startsWith('0x') ? truncateAddress(activeChat.id) : 'Address Hidden');
-                        })()}
+                        {isGroupActive ? 'Secure Group Chat' : 'Active Secure Session'} • {activeChat.id.startsWith('0x') ? truncateAddress(activeChat.id) : 'Address Hidden'}
                       </div>
                     </div>
                   </div>
                   
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <div className="hidden md:flex items-center gap-xs px-sm py-1.5 rounded-full bg-primary-container/10 border border-primary/20 text-primary" style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.2)', padding: '6px 12px', borderRadius: '20px', color: 'var(--accent-indigo)' }}>
-                      <img src={logo} alt="Echo Logo" style={{ height: '16px', width: 'auto' }} />
+                      <img src={logo} alt="EchoIt Logo" style={{ height: '16px', width: 'auto' }} />
                       <span className="text-xs font-bold tracking-tight" style={{ fontSize: '11px', fontWeight: 'bold' }}>Secure Session</span>
                     </div>
                     <button className="p-2 hover:bg-surface-container-high rounded-full transition-colors" style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer' }} onClick={() => alert("Video calls not supported in V4 client.")}>
@@ -2696,7 +2969,7 @@ function App() {
                               </div>
                             )
                           ) : (
-                            <div>{msg.body_text}</div>
+                            <div className="message-text">{msg.body_text}</div>
                           )}
 
                           <div className="message-footer" style={{ display: 'flex', alignItems: 'center', justifyContent: 'end', gap: '4px', fontSize: '10px', color: 'rgba(255, 255, 255, 0.4)', marginTop: '4px' }}>
@@ -2706,13 +2979,15 @@ function App() {
                                 {(() => {
                                   if (isGroupActive) {
                                     const readMembers = groupMessageStatuses
-                                      .filter(status => status.message_id === msg.id && status.status === 'read')
+                                      .filter(status => status.message_id === msg.id && status.status === 'read' && status.user_address)
                                       .map(status => {
-                                        const contact = getCombinedContacts().find(item => item.address.toLowerCase() === status.user_address.toLowerCase());
+                                        const addrKey = status.user_address.toLowerCase();
+                                        const contact = getCombinedContacts().find(item => item.address.toLowerCase() === addrKey);
+                                        const cached = usernameCache[addrKey];
                                         return {
                                           address: status.user_address,
-                                          username: contact ? contact.username : status.user_address.substring(0, 6),
-                                          pfp: contact ? contact.pfp : null
+                                          username: contact ? contact.username : (cached ? cached.username : status.user_address.substring(0, 6)),
+                                          pfp: contact ? contact.pfp : (cached ? cached.pfp : null)
                                         };
                                       });
 
@@ -2776,6 +3051,42 @@ function App() {
                   );
                   })
                 )}
+                {(() => {
+                  if (!activeConversationId) return null;
+                  const activeChat = conversations.find(c => c.id.toLowerCase() === activeConversationId.toLowerCase());
+                  if (!activeChat) return null;
+                  const typingList = (typingUsers[activeConversationId.toLowerCase()] || [])
+                    .filter(addr => addr.toLowerCase() !== wallet.address.toLowerCase());
+                  
+                  if (typingList.length === 0) return null;
+
+                  const isGroupActive = activeChat.is_group === 1;
+
+                  return (
+                    <div className="message-row received" style={{ display: 'flex', gap: '8px', alignItems: 'flex-end', marginBottom: '12px', width: '100%', justifyContent: 'flex-start' }}>
+                      {isGroupActive && (
+                        <div className="avatar-container" style={{ width: '32px', height: '32px', borderRadius: '50%', overflow: 'hidden', border: '1px solid var(--border-light)', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'var(--bg-tertiary)', fontSize: '10px', color: 'var(--text-secondary)', flexShrink: 0 }}>
+                          💬
+                        </div>
+                      )}
+                      <div className="message-bubble" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', borderRadius: '16px', borderBottomLeftRadius: '4px', border: '1px solid var(--border-light)', maxWidth: '70%', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        {isGroupActive && (
+                          <span className="message-sender" style={{ color: 'var(--accent-indigo)', fontSize: '11px', fontWeight: '700', marginBottom: '2px', display: 'block' }}>
+                            {typingList.map(addr => {
+                              const contact = getCombinedContacts().find(item => item.address.toLowerCase() === addr.toLowerCase());
+                              return contact ? `@${contact.username}` : addr.substring(0, 6);
+                            }).join(', ')}
+                          </span>
+                        )}
+                        <div className="typing-indicator">
+                          <span></span>
+                          <span></span>
+                          <span></span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
                 <div ref={messagesEndRef} />
               </div>
 
@@ -2854,6 +3165,125 @@ function App() {
                       >
                         <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>reply</span>
                         Reply
+                      </button>
+                    </div>
+                  </div>
+                ) : isPendingRequest ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '600px', margin: '0 auto', padding: '20px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border-light)', borderRadius: '16px', textAlign: 'center', backdropFilter: 'blur(10px)' }}>
+                    <h3 style={{ fontSize: '16px', fontWeight: 'bold', color: 'var(--text-primary)' }}>
+                      {isGroupActive 
+                        ? `Group Invitation: ${activeChat.username}` 
+                        : `Message Request from @${activeChat.username}`}
+                    </h3>
+                    <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
+                      {isGroupActive 
+                        ? `You have been added to this group chat. Would you like to accept and start messaging, or ignore to delete this group?` 
+                        : `This user is not in your contacts list. Do you want to accept this request to allow messaging, or ignore to delete the chat?`}
+                    </p>
+                    <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
+                      <button 
+                        onClick={async () => {
+                          try {
+                            const targetId = activeConversationId;
+                            // Notify server for 12-hour cooldown
+                            if (client.socket && client.socket.connected) {
+                              client.socket.emit('ignoreUser', { targetAddress: targetId }, (res) => {
+                                console.log("[UI] ignoreUser server response:", res);
+                              });
+                            }
+                            await client.db.write((db) => {
+                              db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(targetId);
+                              db.prepare('DELETE FROM conversations WHERE id = ?').run(targetId);
+                              db.prepare('DELETE FROM ratchet_sessions WHERE peer_address = ?').run(targetId);
+                              db.prepare('DELETE FROM skipped_message_keys WHERE peer_address = ?').run(targetId);
+                            });
+                            setActiveConversationId(null);
+                            await refreshData(client);
+                          } catch (e) {
+                            console.error("Failed to reject request", e);
+                          }
+                        }}
+                        style={{
+                          flex: 1,
+                          height: '40px',
+                          borderRadius: '8px',
+                          background: 'rgba(239, 68, 68, 0.1)',
+                          border: '1px solid rgba(239, 68, 68, 0.3)',
+                          color: '#fda4af',
+                          fontWeight: 'bold',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        Ignore
+                      </button>
+                      <button 
+                        onClick={async () => {
+                          try {
+                            const targetId = activeConversationId;
+                            // Add to local blocked addresses list
+                            blockAddress(targetId);
+                            // Notify server for permanent block
+                            if (client.socket && client.socket.connected) {
+                              client.socket.emit('blockUser', { targetAddress: targetId }, (res) => {
+                                console.log("[UI] blockUser server response:", res);
+                              });
+                            }
+                            await client.db.write((db) => {
+                              db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(targetId);
+                              db.prepare('DELETE FROM conversations WHERE id = ?').run(targetId);
+                              db.prepare('DELETE FROM ratchet_sessions WHERE peer_address = ?').run(targetId);
+                              db.prepare('DELETE FROM skipped_message_keys WHERE peer_address = ?').run(targetId);
+                            });
+                            setActiveConversationId(null);
+                            await refreshData(client);
+                          } catch (e) {
+                            console.error("Failed to block request", e);
+                          }
+                        }}
+                        style={{
+                          flex: 1,
+                          height: '40px',
+                          borderRadius: '8px',
+                          background: 'rgba(239, 68, 68, 0.2)',
+                          border: '1px solid rgba(239, 68, 68, 0.5)',
+                          color: '#ff8a8a',
+                          fontWeight: 'bold',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        Block
+                      </button>
+                      <button 
+                        onClick={async () => {
+                          try {
+                            const targetId = activeConversationId;
+                            await client.promoteToContact(targetId);
+                            try {
+                              const peerAddress = await client.resolvePeerAddress(targetId);
+                              await client.sendRequestAccepted(peerAddress);
+                            } catch (notifyErr) {
+                              console.warn('[UI] Failed to notify sender of accepted request:', notifyErr.message);
+                            }
+                            setActiveConversationId(null);
+                            setActiveTab('chats');
+                            await refreshData(client);
+                            await markActiveConversationAsRead(targetId);
+                          } catch (e) {
+                            console.error("Failed to accept request", e);
+                          }
+                        }}
+                        style={{
+                          flex: 1,
+                          height: '40px',
+                          borderRadius: '8px',
+                          background: 'var(--accent-indigo)',
+                          color: 'white',
+                          border: 'none',
+                          fontWeight: 'bold',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        Accept
                       </button>
                     </div>
                   </div>
@@ -3000,7 +3430,7 @@ function App() {
                     }}>
                       <span className="material-symbols-outlined" style={{ animation: 'spin 2s linear infinite', fontSize: '18px', color: 'var(--accent-indigo)' }}>sync</span>
                       <div style={{ flex: 1, textAlign: 'left' }}>
-                        <div>Uploading <strong>{uploadingFile.name}</strong> to Render homing relays...</div>
+                        <div>Uploading <strong>{uploadingFile.name}</strong> to homing relays...</div>
                         <div style={{
                           background: 'rgba(255,255,255,0.1)',
                           borderRadius: '4px',
@@ -3053,7 +3483,7 @@ function App() {
                           value={inputText}
                           onChange={(e) => handleInputChange(e.target.value)}
                           disabled={!connected}
-                          style={{ flex: 1, minWidth: 0, background: 'none', border: 'none', outline: 'none', color: 'var(--text-primary)', fontSize: '15px', padding: '12px 0' }}
+                          style={{ flex: 1, minWidth: 0, background: 'none', border: 'none', outline: 'none', color: 'var(--text-primary)', fontSize: '15px', padding: '12px 0', paddingLeft: '8px' }}
                         />
                         <button 
                           type="button" 
@@ -3127,7 +3557,7 @@ function App() {
                         value={inputText}
                         onChange={(e) => handleInputChange(e.target.value)}
                         disabled={!connected}
-                        style={{ flex: 1, background: 'none', border: 'none', outline: 'none', color: 'var(--text-primary)', fontSize: '14px', padding: '8px 0' }}
+                        style={{ flex: 1, background: 'none', border: 'none', outline: 'none', color: 'var(--text-primary)', fontSize: '14px', padding: '8px 0', paddingLeft: '8px' }}
                       />
                       <div style={{ position: 'relative' }}>
                         <button 
@@ -3349,30 +3779,21 @@ function App() {
                   <button type="button" style={{ background: 'none', border: 'none', color: 'var(--accent-indigo)', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer', textDecoration: 'underline' }} onClick={() => alert("Rotating pre-keys bundle...")}>Rotate Keys</button>
                 </div>
                 <div style={{ padding: '16px', background: 'rgba(255,255,255,0.03)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                  <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', cursor: 'pointer', userSelect: 'none' }}>
                     <span style={{ fontWeight: 'bold', fontSize: '14px' }}>Stealth Mode</span>
-                    <label className="switch">
+                    <label className="switch" style={{ pointerEvents: 'none' }}>
                       <input type="checkbox" checked={stealthMode} onChange={(e) => setStealthMode(e.target.checked)} />
                       <span className="slider"></span>
                     </label>
-                  </div>
+                  </label>
                   <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Obscures your username and online status from public directories.</p>
                 </div>
-                <div style={{ padding: '16px', background: 'rgba(255,255,255,0.03)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                    <span style={{ fontWeight: 'bold', fontSize: '14px' }}>Hide Wallet Address</span>
-                    <label className="switch">
-                      <input type="checkbox" checked={hideWalletAddress} onChange={(e) => setHideWalletAddress(e.target.checked)} />
-                      <span className="slider"></span>
-                    </label>
-                  </div>
-                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Hides your Web3 wallet address from your profile in others' views.</p>
-                </div>
+
                 {deviceBiometricsAvailable && (
                   <div style={{ padding: '16px', background: 'rgba(255,255,255,0.03)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                    <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', cursor: 'pointer', userSelect: 'none' }}>
                       <span style={{ fontWeight: 'bold', fontSize: '14px' }}>Biometric Login</span>
-                      <label className="switch">
+                      <label className="switch" style={{ pointerEvents: 'none' }}>
                         <input 
                           type="checkbox" 
                           checked={biometricsSupported} 
@@ -3399,7 +3820,7 @@ function App() {
                         />
                         <span className="slider"></span>
                       </label>
-                    </div>
+                    </label>
                     <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Unlock the application using fingerprint or FaceID.</p>
                   </div>
                 )}
@@ -3535,7 +3956,7 @@ function App() {
             <div style={{ flex: 1 }}>
               {!isMobile && <h4 style={{ fontSize: '15px', fontWeight: 'bold', marginBottom: '4px' }}>Private Key Custody Notice</h4>}
               <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
-                Echo does not store your private keys on any central server. If you lose your recovery phrase, you will lose access to all encrypted messages. Ensure you have a physical backup of your credentials.
+                EchoIt does not store your private keys on any central server. If you lose your recovery phrase, you will lose access to all encrypted messages. Ensure you have a physical backup of your credentials.
               </p>
             </div>
             <button 
@@ -3555,6 +3976,27 @@ function App() {
         <div className={`nav-item ${activeTab === 'chats' ? 'active' : ''}`} onClick={() => { setActiveTab('chats'); setActiveConversationId(null); }}>
           <span className="material-symbols-outlined">chat</span>
           <span>Chats</span>
+        </div>
+        <div className={`nav-item ${activeTab === 'requests' ? 'active' : ''}`} onClick={() => { setActiveTab('requests'); setActiveConversationId(null); }} style={{ position: 'relative' }}>
+          <span className="material-symbols-outlined">move_to_inbox</span>
+          <span>Requests</span>
+          {pendingRequestsCount > 0 && (
+            <span style={{
+              position: 'absolute',
+              top: '4px',
+              right: '20%',
+              background: 'var(--accent-emerald)',
+              color: 'white',
+              fontSize: '8px',
+              fontWeight: 'bold',
+              padding: '1px 4px',
+              borderRadius: '8px',
+              minWidth: '14px',
+              textAlign: 'center'
+            }}>
+              {pendingRequestsCount}
+            </span>
+          )}
         </div>
         <div className={`nav-item ${activeTab === 'contacts' ? 'active' : ''}`} onClick={() => setActiveTab('contacts')}>
           <span className="material-symbols-outlined">group</span>
@@ -3727,7 +4169,7 @@ function App() {
                   getCombinedContacts().map(contact => {
                     const isChecked = selectedGroupMembers.includes(contact.address);
                     return (
-                      <label key={contact.address} style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', padding: '4px' }}>
+                      <label key={contact.address} style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', padding: '4px', userSelect: 'none' }}>
                         <input
                           type="checkbox"
                           checked={isChecked}
@@ -3738,6 +4180,7 @@ function App() {
                               setSelectedGroupMembers(prev => prev.filter(addr => addr !== contact.address));
                             }
                           }}
+                          style={{ cursor: 'pointer' }}
                         />
                         <div className="avatar-container" style={{ width: '24px', height: '24px', fontSize: '10px' }}>
                           {contact.pfp ? (
@@ -3770,6 +4213,36 @@ function App() {
                   alert("Please select at least one member.");
                 }
               }}>Create Group</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showUpdateModal && (
+        <div className="modal-overlay" style={{ zIndex: 100 }} onClick={() => setShowUpdateModal(false)}>
+          <div className="modal-card" style={{ width: '400px', textAlign: 'center', padding: '24px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px' }} onClick={e => e.stopPropagation()}>
+            <span className="material-symbols-outlined" style={{ fontSize: '48px', color: 'var(--accent-indigo)' }}>update</span>
+            <h2 style={{ fontSize: '18px', fontWeight: 'bold', color: 'var(--text-primary)' }}>New Update Available</h2>
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
+              A new version of EchoIt Messenger ({latestVersion}) is available. Please update to ensure database compatibility and security.
+            </p>
+            <div style={{ display: 'flex', gap: '12px', width: '100%', marginTop: '8px' }}>
+              <button 
+                onClick={() => setShowUpdateModal(false)}
+                className="action-btn"
+                style={{ flex: 1, height: '40px', borderRadius: '8px', cursor: 'pointer' }}
+              >
+                Later
+              </button>
+              <a 
+                href={updateUrl} 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="auth-btn" 
+                style={{ flex: 1, height: '40px', borderRadius: '8px', background: 'var(--accent-indigo)', color: '#ffffff', fontWeight: 'bold', display: 'flex', alignItems: 'center', justifyContent: 'center', textDecoration: 'none' }}
+              >
+                Update Now
+              </a>
             </div>
           </div>
         </div>
@@ -3880,13 +4353,18 @@ function App() {
                   {/* Name / Username */}
                   <div>
                     <h3 style={{ fontSize: '20px', fontWeight: 'bold', color: 'var(--text-primary)', margin: 0 }}>
-                      {isGroupActive ? activeChat.username : (() => {
-                        const contact = getCombinedContacts().find(item => 
-                          item.address.toLowerCase() === activeChat.id.toLowerCase() ||
-                          item.username.toLowerCase() === activeChat.id.toLowerCase()
-                        );
-                        return contact ? `@${contact.username}` : `@${activeChat.username}`;
-                      })()}
+                      {isGroupActive 
+                        ? activeChat.username 
+                        : (() => {
+                            const contact = getCombinedContacts().find(item => 
+                              item.address.toLowerCase() === activeChat.id.toLowerCase() ||
+                              item.username.toLowerCase() === activeChat.id.toLowerCase()
+                            );
+                            const usernameToShow = contact ? contact.username : activeChat.username;
+                            const isDeletedContact = Number(activeChat.is_contact) === 0 && Number(activeChat.pending_request) === 0;
+                            return isDeletedContact ? activeChat.id : `@${usernameToShow}`;
+                          })()
+                      }
                     </h3>
                     
                     {!isGroupActive && (
@@ -3897,42 +4375,26 @@ function App() {
                   </div>
 
                   {/* Wallet Address section */}
-                  {!isGroupActive && (() => {
-                    const contact = getCombinedContacts().find(item => 
-                      item.address.toLowerCase() === activeChat.id.toLowerCase() ||
-                      item.username.toLowerCase() === activeChat.id.toLowerCase()
-                    );
-                    const hideWallet = contact?.hide_wallet;
-                    const addressToShow = contact?.address || activeChat.id;
-                    if (hideWallet) {
-                      return (
-                        <div style={{ background: 'rgba(255,255,255,0.02)', padding: '10px 16px', borderRadius: '12px', border: '1px solid var(--border-light)', width: '100%' }}>
-                          <div style={{ fontSize: '11px', color: 'var(--text-secondary)', textTransform: 'uppercase', tracking: '0.05em', fontWeight: 'bold', textAlign: 'left' }}>Wallet Address</div>
-                          <div style={{ fontSize: '13px', color: 'var(--text-secondary)', fontStyle: 'italic', marginTop: '4px', textAlign: 'left' }}>Hidden for privacy</div>
+                  {!isGroupActive && (
+                    <div style={{ background: 'rgba(255,255,255,0.02)', padding: '10px 16px', borderRadius: '12px', border: '1px solid var(--border-light)', width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ textAlign: 'left' }}>
+                        <div style={{ fontSize: '11px', color: 'var(--text-secondary)', textTransform: 'uppercase', tracking: '0.05em', fontWeight: 'bold' }}>Wallet Address</div>
+                        <div style={{ fontSize: '13px', color: 'var(--accent-emerald)', fontFamily: 'monospace', marginTop: '4px', wordBreak: 'break-all' }}>
+                          {activeChat.id}
                         </div>
-                      );
-                    }
-                    return (
-                      <div style={{ background: 'rgba(255,255,255,0.02)', padding: '10px 16px', borderRadius: '12px', border: '1px solid var(--border-light)', width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <div style={{ textAlign: 'left' }}>
-                          <div style={{ fontSize: '11px', color: 'var(--text-secondary)', textTransform: 'uppercase', tracking: '0.05em', fontWeight: 'bold' }}>Wallet Address</div>
-                          <div style={{ fontSize: '13px', color: 'var(--accent-emerald)', fontFamily: 'monospace', marginTop: '4px', wordBreak: 'break-all' }}>
-                            {addressToShow}
-                          </div>
-                        </div>
-                        <button 
-                          onClick={() => {
-                            navigator.clipboard.writeText(addressToShow);
-                            alert("Address copied to clipboard!");
-                          }}
-                          style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', padding: '4px', display: 'flex', alignItems: 'center' }}
-                          title="Copy Address"
-                        >
-                          <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>content_copy</span>
-                        </button>
                       </div>
-                    );
-                  })()}
+                      <button 
+                        onClick={() => {
+                          navigator.clipboard.writeText(activeChat.id);
+                          alert("Address copied to clipboard!");
+                        }}
+                        style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', padding: '4px', display: 'flex', alignItems: 'center' }}
+                        title="Copy Address"
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>content_copy</span>
+                      </button>
+                    </div>
+                  )}
 
                   {/* Bio details (if 1-1 chat) */}
                   {!isGroupActive && (() => {
@@ -3947,6 +4409,49 @@ function App() {
                         <div style={{ fontSize: '13px', color: 'var(--text-primary)', background: 'rgba(255,255,255,0.02)', padding: '12px 16px', borderRadius: '12px', border: '1px solid var(--border-light)', minHeight: '44px', fontStyle: contact?.bio ? 'normal' : 'italic' }}>
                           {bioText}
                         </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Block / Unblock Action (if 1-1 chat) (Task 2.2) */}
+                  {!isGroupActive && (() => {
+                    const contact = getCombinedContacts().find(item => 
+                      item.address.toLowerCase() === activeChat.id.toLowerCase() ||
+                      item.username.toLowerCase() === activeChat.id.toLowerCase()
+                    );
+                    const targetAddress = contact?.address || activeChat.id;
+                    const isBlocked = isAddressBlocked(targetAddress);
+                    return (
+                      <div style={{ width: '100%', marginTop: '8px' }}>
+                        <button
+                          onClick={() => {
+                            if (isBlocked) {
+                              unblockAddress(targetAddress);
+                            } else {
+                              blockAddress(targetAddress);
+                            }
+                          }}
+                          style={{
+                            width: '100%',
+                            height: '44px',
+                            borderRadius: '10px',
+                            background: isBlocked ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+                            border: isBlocked ? '1px solid var(--accent-emerald)' : '1px solid rgba(239, 68, 68, 0.3)',
+                            color: isBlocked ? 'var(--accent-emerald)' : '#fda4af',
+                            fontWeight: 'bold',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: '8px',
+                            transition: 'all 0.2s'
+                          }}
+                        >
+                          <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>
+                            {isBlocked ? 'check_circle' : 'block'}
+                          </span>
+                          {isBlocked ? 'Unblock User' : 'Block User'}
+                        </button>
                       </div>
                     );
                   })()}
