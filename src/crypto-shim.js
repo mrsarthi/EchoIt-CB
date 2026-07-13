@@ -303,14 +303,19 @@ async function scryptAsync(passphrase, salt, keylen) {
 
 // 11. sign
 function sign(algorithm, message, privateKey) {
-  const pair = nacl.sign.keyPair.fromSeed(privateKey.rawKey);
-  const signature = nacl.sign.detached(message, pair.secretKey);
+  const msgUint8 = new Uint8Array(message);
+  const seedUint8 = new Uint8Array(privateKey.rawKey);
+  const pair = nacl.sign.keyPair.fromSeed(seedUint8);
+  const signature = nacl.sign.detached(msgUint8, pair.secretKey);
   return Buffer.from(signature);
 }
 
 // 12. verify
 function verify(algorithm, message, publicKey, signature) {
-  return nacl.sign.detached.verify(message, signature, publicKey.rawKey);
+  const msgUint8 = new Uint8Array(message);
+  const sigUint8 = new Uint8Array(signature);
+  const pubUint8 = new Uint8Array(publicKey.rawKey);
+  return nacl.sign.detached.verify(msgUint8, sigUint8, pubUint8);
 }
 
 const _exports = {

@@ -25,10 +25,10 @@ export default function SplashScreen({ phase, error }) {
     <div style={styles.container}>
       <div style={styles.card}>
         <div style={styles.logoContainer}>
-          <img src={logo} alt="Echo Logo" style={error ? styles.logoStatic : styles.logoPulsing} />
+          <img src={logo} alt="EchoIt Logo" style={error ? styles.logoStatic : styles.logoPulsing} />
         </div>
         
-        <h1 style={styles.title}>Echo Messenger</h1>
+        <h1 style={styles.title}>EchoIt Messenger</h1>
         <p style={styles.subtitle}>Decentralized & End-to-End Encrypted</p>
 
         {error ? (
@@ -127,7 +127,7 @@ const styles = {
     fontWeight: '700',
     margin: '0 0 4px 0',
     letterSpacing: '-0.025em',
-    background: 'linear-gradient(135deg, #a5b4fc, #6366f1)', // Vibrant gradient
+    background: 'linear-gradient(135deg, #a7f3d0, #10b981)', // Vibrant gradient
     WebkitBackgroundClip: 'text',
     WebkitTextFillColor: 'transparent'
   },
@@ -152,7 +152,7 @@ const styles = {
     fontSize: '14px',
     fontWeight: status === 'active' ? '500' : '400',
     color: status === 'completed' 
-      ? '#818cf8' 
+      ? '#10b981' 
       : status === 'active' 
         ? '#f3f4f6' 
         : '#4b5563',
@@ -167,12 +167,12 @@ const styles = {
     borderRadius: '50%',
     fontSize: status === 'completed' ? '12px' : '8px',
     backgroundColor: status === 'completed' 
-      ? 'rgba(129, 140, 248, 0.15)' 
+      ? 'rgba(16, 185, 129, 0.15)' 
       : status === 'active' 
         ? 'rgba(255, 255, 255, 0.1)' 
         : 'transparent',
     border: status === 'pending' ? '1px solid #374151' : 'none',
-    color: status === 'completed' ? '#818cf8' : status === 'active' ? '#a5b4fc' : '#4b5563',
+    color: status === 'completed' ? '#10b981' : status === 'active' ? '#a7f3d0' : '#4b5563',
     transition: 'all 0.3s ease',
     animation: status === 'active' ? 'pulse 1.2s infinite ease-in-out' : 'none'
   }),
@@ -214,9 +214,9 @@ const styles = {
     return {
       height: '100%',
       width: widths[phase] || '0%',
-      backgroundColor: '#6366f1',
+      backgroundColor: '#10b981',
       borderRadius: '2px',
-      boxShadow: '0 0 8px #6366f1',
+      boxShadow: '0 0 8px #10b981',
       transition: 'width 0.4s cubic-bezier(0.4, 0, 0.2, 1)'
     };
   }

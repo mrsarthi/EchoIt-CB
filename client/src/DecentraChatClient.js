@@ -190,7 +190,7 @@ class DecentraChatClient extends EventEmitter {
 
     // 2. Generate local session signing key
     const localWallet = Wallet.createRandom();
-    const delegationSignature = await this.wallet.signMessage(`Authorize Echo Session Key: ${localWallet.address}`);
+    const delegationSignature = await this.wallet.signMessage(`Authorize EchoIt Session Key: ${localWallet.address}`);
     await this.setMetadata('session_signing_private', localWallet.privateKey);
     await this.setMetadata('session_signing_public', localWallet.address);
     await this.setMetadata('session_signing_delegation', delegationSignature);
@@ -221,7 +221,7 @@ class DecentraChatClient extends EventEmitter {
           }
 
           // Sign the registration authorization challenge
-          const signature = await this.wallet.signMessage(`Authorize Echo Registration: ${challenge}`);
+          const signature = await this.wallet.signMessage(`Authorize EchoIt Registration: ${challenge}`);
 
           tempSocket.emit('register', {
             address: this.address,
@@ -296,7 +296,7 @@ class DecentraChatClient extends EventEmitter {
           }
 
           // Sign the login challenge using session prefix
-          const signature = await this.wallet.signMessage(`Authorize Echo Session: ${challenge}`);
+          const signature = await this.wallet.signMessage(`Authorize EchoIt Session: ${challenge}`);
 
           tempSocket.emit('loginWithSignature', {
             address: this.address,
@@ -336,7 +336,7 @@ class DecentraChatClient extends EventEmitter {
     let delegationSignature = await this.getMetadata('session_signing_delegation');
     if (!signingPrivate || !delegationSignature) {
       const localWallet = Wallet.createRandom();
-      const newSig = await this.wallet.signMessage(`Authorize Echo Session Key: ${localWallet.address}`);
+      const newSig = await this.wallet.signMessage(`Authorize EchoIt Session Key: ${localWallet.address}`);
       await this.setMetadata('session_signing_private', localWallet.privateKey);
       await this.setMetadata('session_signing_public', localWallet.address);
       await this.setMetadata('session_signing_delegation', newSig);
@@ -386,7 +386,7 @@ class DecentraChatClient extends EventEmitter {
           }
 
           // Sign the login challenge using session prefix
-          const signature = await this.wallet.signMessage(`Authorize Echo Session: ${challenge}`);
+          const signature = await this.wallet.signMessage(`Authorize EchoIt Session: ${challenge}`);
 
           tempSocket.emit('loginWithSignature', {
             address: this.address,
@@ -860,6 +860,7 @@ class DecentraChatClient extends EventEmitter {
 
       const decryptedPlaintext = decryptAES_GCM(payload.ciphertext, group.group_key, payload.iv);
 
+      let msgId = payload.id;
       let bodyText = decryptedPlaintext;
       let vectorClockObj = payload.vectorClock || null;
       let senderCounterVal = payload.senderCounter || 0;
@@ -875,6 +876,9 @@ class DecentraChatClient extends EventEmitter {
           }
           if (parsed.vectorClock !== undefined) {
             vectorClockObj = parsed.vectorClock;
+          }
+          if (parsed.messageId) {
+            msgId = parsed.messageId;
           }
         }
       } catch (e) {
@@ -902,7 +906,7 @@ class DecentraChatClient extends EventEmitter {
               const derivedAddr = '0x' + keccak256(rawPubBytes).slice(-40).toLowerCase();
               if (derivedAddr === resolvedFromAddress) {
                 isDelegationValid = verifyEd25519Signature(
-                  `Authorize Echo Session Key: ${payloadObj.sessionSigner}`,
+                  `Authorize EchoIt Session Key: ${payloadObj.sessionSigner}`,
                   payloadObj.sessionDelegation,
                   payloadObj.sessionIdentityKey
                 );
@@ -910,7 +914,7 @@ class DecentraChatClient extends EventEmitter {
             } else {
               // Legacy secp256k1 fallback
               try {
-                const recoveredMain = verifyMessage(`Authorize Echo Session Key: ${payloadObj.sessionSigner}`, payloadObj.sessionDelegation);
+                const recoveredMain = verifyMessage(`Authorize EchoIt Session Key: ${payloadObj.sessionSigner}`, payloadObj.sessionDelegation);
                 isDelegationValid = recoveredMain.toLowerCase() === resolvedFromAddress;
               } catch (e) {
                 isDelegationValid = false;
@@ -955,6 +959,9 @@ class DecentraChatClient extends EventEmitter {
                 const replyArray = Array.isArray(parsedBody.replyTo) ? parsedBody.replyTo : [parsedBody.replyTo];
                 replyMetadataVal = JSON.stringify(replyArray);
               }
+              if (parsedBody.messageId) {
+                msgId = parsedBody.messageId;
+              }
             }
           } catch (e) {
             // Not a JSON body, standard text
@@ -978,12 +985,12 @@ class DecentraChatClient extends EventEmitter {
               db.prepare(`
                 INSERT OR REPLACE INTO group_message_status (message_id, user_address, status, timestamp)
                 VALUES (?, ?, ?, ?)
-              `).run(mid, fromAddress, 'read', payload.timestamp);
+              `).run(mid, resolvedFromAddress, 'read', payload.timestamp);
             }
           });
 
           this.emit('readReceipt', {
-            from: fromAddress,
+            from: resolvedFromAddress,
             messageIds,
             groupId
           });
@@ -1012,10 +1019,14 @@ class DecentraChatClient extends EventEmitter {
       }
 
       await this.db.write((db) => {
+        const existing = db.prepare('SELECT id, pending_request FROM conversations WHERE id = ?').get(payload.groupId);
+        const isNew = !existing;
+        const pendingVal = isNew ? 1 : (existing.pending_request || 0);
+
         db.prepare(`
-          INSERT OR IGNORE INTO conversations (id, username, is_group, last_message_at, created_at)
-          VALUES (?, ?, 1, ?, ?)
-        `).run(payload.groupId, group.name, payload.timestamp, payload.timestamp);
+          INSERT OR IGNORE INTO conversations (id, username, is_group, last_message_at, created_at, pending_request)
+          VALUES (?, ?, 1, ?, ?, ?)
+        `).run(payload.groupId, group.name, payload.timestamp, payload.timestamp, pendingVal);
 
         db.prepare(`
           UPDATE conversations SET last_message_at = ? WHERE id = ?
@@ -1025,7 +1036,7 @@ class DecentraChatClient extends EventEmitter {
           INSERT OR REPLACE INTO messages (id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status, vector_clock, sender_counter, reply_metadata)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
-          payload.id,
+          msgId,
           payload.groupId,
           fromAddress,
           payload.groupId,
@@ -1045,7 +1056,7 @@ class DecentraChatClient extends EventEmitter {
       });
 
       return {
-        id: payload.id,
+        id: msgId,
         from: fromAddress,
         groupId: payload.groupId,
         text: bodyText,
@@ -1169,10 +1180,14 @@ class DecentraChatClient extends EventEmitter {
           db.prepare('INSERT OR REPLACE INTO groups (id, name, group_key, members) VALUES (?, ?, ?, ?)')
             .run(groupData.groupId, groupData.name, groupData.groupKey, JSON.stringify(groupData.members));
 
+          const existing = db.prepare('SELECT id, pending_request FROM conversations WHERE id = ?').get(groupData.groupId);
+          const isNew = !existing;
+          const pendingVal = isNew ? 1 : (existing.pending_request || 0);
+
           db.prepare(`
-            INSERT OR IGNORE INTO conversations (id, username, is_group, last_message_at, created_at)
-            VALUES (?, ?, 1, ?, ?)
-          `).run(groupData.groupId, groupData.name, payload.timestamp, payload.timestamp);
+            INSERT OR IGNORE INTO conversations (id, username, is_group, last_message_at, created_at, pending_request)
+            VALUES (?, ?, 1, ?, ?, ?)
+          `).run(groupData.groupId, groupData.name, payload.timestamp, payload.timestamp, pendingVal);
         });
 
         return {
@@ -1194,28 +1209,64 @@ class DecentraChatClient extends EventEmitter {
     // Extract media metadata if it exists
     let bodyText = decryptedBody;
 
+    // Check if this is a request-accepted notification in 1-1 chat
+    if (bodyText && bodyText.startsWith('__REQUEST_ACCEPTED__:')) {
+      try {
+        const resolvedFrom = await this.resolveConversationIdFromSender(fromAddress);
+        await this.promoteToContact(resolvedFrom);
+        this.emit('requestAccepted', { from: resolvedFrom });
+        return {
+          id: payload.id,
+          from: resolvedFrom,
+          type: 'request_accepted',
+          system: true,
+          timestamp: payload.timestamp
+        };
+      } catch (err) {
+        console.error('[SDK] Failed to process request accepted:', err.message);
+      }
+    }
+
     // Check if this is an encrypted read receipt in 1-1 chat
     if (bodyText && bodyText.startsWith('__READ_RECEIPT__:')) {
       try {
         const parts = bodyText.substring(17);
         const { messageIds, groupId } = JSON.parse(parts);
+        console.log(`[SDK] Received read receipt payload: fromAddress=${fromAddress}, groupId=${groupId}, messageIds=`, messageIds);
+
+        let resolvedFrom = fromAddress;
+        if (!(fromAddress.startsWith('0x') && fromAddress.length === 42)) {
+          const addrRes = await this.db.read((db) => {
+            return db.prepare('SELECT id FROM conversations WHERE username = ?').get(fromAddress);
+          });
+          if (addrRes) {
+            resolvedFrom = addrRes.id.toLowerCase();
+          }
+        }
 
         await this.db.write((db) => {
           for (const mid of messageIds) {
-            db.prepare('UPDATE messages SET status = ? WHERE id = ?')
-              .run('read', mid);
+            if (groupId) {
+              db.prepare(`
+                INSERT OR REPLACE INTO group_message_status (message_id, user_address, status, timestamp)
+                VALUES (?, ?, ?, ?)
+              `).run(mid, resolvedFrom, 'read', payload.timestamp);
+            } else {
+              db.prepare('UPDATE messages SET status = ? WHERE id = ?')
+                .run('read', mid);
+            }
           }
         });
 
         this.emit('readReceipt', {
-          from: fromAddress,
+          from: resolvedFrom,
           messageIds,
           groupId
         });
 
         return {
           id: payload.id,
-          from: fromAddress,
+          from: resolvedFrom,
           type: 'read_receipt',
           system: true,
           timestamp: payload.timestamp
@@ -1238,17 +1289,28 @@ class DecentraChatClient extends EventEmitter {
 
     // Create a local conversation record if it does not exist
     await this.db.write((db) => {
+      const existing = db.prepare('SELECT id, pending_request, is_contact FROM conversations WHERE id = ?').get(fromAddress);
+      const isNew = !existing;
+      const pendingVal = isNew ? 1 : (existing.pending_request || 0);
+      let isContactVal = isNew ? 0 : (existing.is_contact !== undefined ? existing.is_contact : 1);
+      // Promote when peer replies to our outbound request (conversation exists, not a pending inbound request)
+      if (!isNew && Number(existing.pending_request) === 0 && Number(existing.is_contact) === 0) {
+        isContactVal = 1;
+      }
+
       db.prepare(`
-        INSERT OR IGNORE INTO conversations (id, username, last_message_at, created_at, hide_wallet, bio, pfp)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT OR IGNORE INTO conversations (id, username, last_message_at, created_at, hide_wallet, bio, pfp, pending_request, is_contact)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         fromAddress,
         payload.senderUsername || fromAddress.substring(0, 10),
         payload.timestamp,
         payload.timestamp,
-        payload.senderHideWallet ? 1 : 0,
+        0, // hide_wallet is always 0 (disabled)
         payload.senderBio !== undefined ? payload.senderBio : null,
-        payload.senderPfp !== undefined ? payload.senderPfp : null
+        payload.senderPfp !== undefined ? payload.senderPfp : null,
+        pendingVal,
+        isContactVal
       );
 
       if (payload.senderUsername) {
@@ -1256,11 +1318,17 @@ class DecentraChatClient extends EventEmitter {
           UPDATE conversations SET username = ?, hide_wallet = ?, bio = ?, pfp = ? WHERE id = ?
         `).run(
           payload.senderUsername,
-          payload.senderHideWallet ? 1 : 0,
+          0, // hide_wallet is always 0 (disabled)
           payload.senderBio !== undefined ? payload.senderBio : null,
           payload.senderPfp !== undefined ? payload.senderPfp : null,
           fromAddress
         );
+      }
+
+      if (!isNew) {
+        db.prepare(`
+          UPDATE conversations SET pending_request = ?, is_contact = ? WHERE id = ?
+        `).run(pendingVal, isContactVal, fromAddress);
       }
 
       db.prepare(`
@@ -1447,7 +1515,12 @@ class DecentraChatClient extends EventEmitter {
       plaintext = `__MEDIA__:${JSON.stringify(mediaMetadata)}`;
     }
 
-    const isProtocolMessage = bodyText && (bodyText.startsWith('__GROUP_KEY__:') || bodyText.startsWith('__READ_RECEIPT__:') || bodyText.startsWith('__WIPE_USER_DATA__:'));
+    const isProtocolMessage = bodyText && (
+      bodyText.startsWith('__GROUP_KEY__:') ||
+      bodyText.startsWith('__READ_RECEIPT__:') ||
+      bodyText.startsWith('__REQUEST_ACCEPTED__:') ||
+      bodyText.startsWith('__WIPE_USER_DATA__:')
+    );
 
     let vectorClock = null;
     let senderCounter = 0;
@@ -1483,17 +1556,21 @@ class DecentraChatClient extends EventEmitter {
     // Store in local database as 'sending' (only if not a protocol message)
     if (!isProtocolMessage) {
       await this.db.write((db) => {
+        const existing = db.prepare('SELECT id, is_contact FROM conversations WHERE id = ?').get(toAddress);
+        const contactVal = existing && Number(existing.is_contact) === 1 ? 1 : 0;
+
         db.prepare(`
-          INSERT OR IGNORE INTO conversations (id, username, last_message_at, created_at, hide_wallet, bio, pfp)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+          INSERT OR IGNORE INTO conversations (id, username, last_message_at, created_at, hide_wallet, bio, pfp, is_contact)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           toAddress,
           localUsername || toAddress.substring(0, 10),
           timestamp,
           timestamp,
-          localHideWallet ? 1 : 0,
+          0, // hide_wallet is always 0 (disabled)
           localBio !== undefined ? localBio : null,
-          localPfp !== undefined ? localPfp : null
+          localPfp !== undefined ? localPfp : null,
+          contactVal
         );
 
         if (localUsername) {
@@ -1501,7 +1578,7 @@ class DecentraChatClient extends EventEmitter {
             UPDATE conversations SET username = ?, hide_wallet = ?, bio = ?, pfp = ? WHERE id = ?
           `).run(
             localUsername,
-            localHideWallet ? 1 : 0,
+            0, // hide_wallet is always 0 (disabled)
             localBio !== undefined ? localBio : null,
             localPfp !== undefined ? localPfp : null,
             toAddress
@@ -1573,11 +1650,28 @@ class DecentraChatClient extends EventEmitter {
             await this.db.write((db) => {
               db.prepare('UPDATE messages SET status = ? WHERE id = ?')
                 .run('failed', messageId);
+              
+              if (res.error === 'cooldown' || res.error === 'blocked') {
+                const sysMsgId = crypto.randomUUID();
+                let sysText = '';
+                if (res.error === 'cooldown') {
+                  const hours = Math.ceil(res.remaining / (1000 * 60 * 60));
+                  sysText = `Your request was not accepted. You can try again in ${hours} hours.`;
+                } else {
+                  sysText = `This user has blocked you.`;
+                }
+                db.prepare(`
+                  INSERT INTO messages (id, conversation_id, sender_address, recipient_address, ciphertext, body_text, media_metadata, timestamp, status)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                `).run(sysMsgId, toAddress, 'system', this.address, 'system', sysText, 'system', Date.now(), 'read');
+              }
             });
             this.emit('messageStatus', {
               messageId,
               status: 'failed',
-              recipient: toAddress.toLowerCase()
+              recipient: toAddress.toLowerCase(),
+              error: res.error,
+              remaining: res.remaining
             });
           }
         }
@@ -1644,26 +1738,28 @@ class DecentraChatClient extends EventEmitter {
 
     const members = JSON.parse(group.members);
     const iv = crypto.randomBytes(12).toString('hex');
+    const messageId = crypto.randomUUID();
+    const timestamp = Date.now();
     
     let plaintext = bodyText;
     if (mediaMetadata) {
       plaintext = `__MEDIA__:${JSON.stringify(mediaMetadata)}`;
     }
 
-    if (replyTo) {
-      plaintext = JSON.stringify({
-        body: plaintext,
-        replyTo: replyTo ? (Array.isArray(replyTo) ? replyTo.map(r => ({
-          id: r.id,
-          sender: r.sender_address || r.sender,
-          text: formatReplyMetadataText(r)
-        })) : [{
-          id: replyTo.id,
-          sender: replyTo.sender_address || replyTo.sender,
-          text: formatReplyMetadataText(replyTo)
-        }]) : null
-      });
-    }
+    // Always wrap in a JSON payload containing the consistent messageId so that all members store it under the exact same ID.
+    plaintext = JSON.stringify({
+      body: plaintext,
+      messageId: messageId,
+      replyTo: replyTo ? (Array.isArray(replyTo) ? replyTo.map(r => ({
+        id: r.id,
+        sender: r.sender_address || r.sender,
+        text: formatReplyMetadataText(r)
+      })) : [{
+        id: replyTo.id,
+        sender: replyTo.sender_address || replyTo.sender,
+        text: formatReplyMetadataText(replyTo)
+      }]) : null
+    });
 
     // Sign the group message payload using delegated session key to prevent repeated user popups
     let authenticatedPayload;
@@ -1686,11 +1782,14 @@ class DecentraChatClient extends EventEmitter {
 
     // Encrypt under the group key
     const ciphertext = encryptAES_GCM(authenticatedPayload, group.group_key, iv);
-    const messageId = crypto.randomUUID();
-    const timestamp = Date.now();
 
     // Store locally as sent (only if not a protocol message)
-    const isProtocolMessage = bodyText && (bodyText.startsWith('__GROUP_KEY__:') || bodyText.startsWith('__READ_RECEIPT__:') || bodyText.startsWith('__WIPE_USER_DATA__:'));
+    const isProtocolMessage = bodyText && (
+      bodyText.startsWith('__GROUP_KEY__:') ||
+      bodyText.startsWith('__READ_RECEIPT__:') ||
+      bodyText.startsWith('__REQUEST_ACCEPTED__:') ||
+      bodyText.startsWith('__WIPE_USER_DATA__:')
+    );
     if (!isProtocolMessage) {
       await this.db.write((db) => {
         db.prepare(`
@@ -1927,28 +2026,104 @@ class DecentraChatClient extends EventEmitter {
 
   async sendReadReceipt(recipientAddress, messageIds, groupId = null) {
     const payloadText = `__READ_RECEIPT__:${JSON.stringify({ messageIds, groupId })}`;
-    if (groupId) {
-      return this.sendGroupMessage(groupId, payloadText);
-    } else {
-      return this.sendMessage(recipientAddress, payloadText);
+    return this.sendMessage(recipientAddress, payloadText);
+  }
+
+  async resolveConversationIdFromSender(senderRef) {
+    const ref = (senderRef || '').toLowerCase();
+    if (ref.startsWith('0x') && ref.length === 42) return ref;
+
+    const convs = await this.db.read((db) => db.prepare('SELECT * FROM conversations').all());
+    const convMatch = (convs || []).find((c) =>
+      Number(c.is_group) !== 1 &&
+      (c.id.toLowerCase() === ref || (c.username && c.username.toLowerCase() === ref))
+    );
+    if (convMatch) return convMatch.id.toLowerCase();
+
+    const msgs = await this.db.read((db) => db.prepare('SELECT * FROM messages').all());
+    const msgMatch = (msgs || []).find((m) =>
+      (m.sender_address || '').toLowerCase() === ref ||
+      (m.conversation_id || '').toLowerCase() === ref
+    );
+    if (msgMatch?.conversation_id) return msgMatch.conversation_id.toLowerCase();
+
+    return ref;
+  }
+
+  async resolvePeerAddress(conversationId) {
+    const ref = (conversationId || '').toLowerCase();
+    if (ref.startsWith('0x') && ref.length === 42) return ref;
+
+    const msgs = await this.db.read((db) =>
+      db.prepare('SELECT * FROM messages WHERE conversation_id = ?').all(conversationId)
+    );
+    for (const row of msgs || []) {
+      const addr = (row.sender_address || '').toLowerCase();
+      if (addr && addr !== this.address && addr.startsWith('0x') && addr.length === 42) {
+        return addr;
+      }
     }
+
+    const ratchet = await this.db.read((db) =>
+      db.prepare('SELECT * FROM ratchet_sessions WHERE peer_address = ?').get(ref)
+    );
+    if (ratchet?.peer_address?.startsWith('0x')) return ratchet.peer_address.toLowerCase();
+
+    const convs = await this.db.read((db) => db.prepare('SELECT * FROM conversations').all());
+    const conv = (convs || []).find((c) =>
+      c.id.toLowerCase() === ref || (c.username && c.username.toLowerCase() === ref)
+    );
+    if (conv?.id?.startsWith('0x')) return conv.id.toLowerCase();
+
+    return ref;
+  }
+
+  async promoteToContact(conversationId) {
+    const convId = await this.resolveConversationIdFromSender(conversationId);
+    await this.db.write((db) => {
+      db.prepare('UPDATE conversations SET pending_request = 0, is_contact = 1 WHERE id = ?').run(convId);
+    });
+  }
+
+  async sendRequestAccepted(recipientAddress) {
+    const peerAddress = await this.resolvePeerAddress(recipientAddress);
+    const payloadText = `__REQUEST_ACCEPTED__:${JSON.stringify({ acceptedAt: Date.now() })}`;
+    return this.sendMessage(peerAddress, payloadText);
   }
 
   async sendGroupReadReceipt(groupId, messageIds) {
-    const group = await this.db.read((db) => {
-      return db.prepare('SELECT members FROM groups WHERE id = ?').get(groupId);
+    console.log(`[SDK] sendGroupReadReceipt called: groupId=${groupId}, messageIds=`, messageIds);
+    if (!messageIds || messageIds.length === 0) return;
+
+    // Fetch all messages and filter by messageIds in memory to support mock DB SQL routing
+    const allMsgs = await this.db.read((db) => {
+      return db.prepare('SELECT * FROM messages').all();
     });
-    if (!group) return;
-    const members = JSON.parse(group.members);
-    const promises = [];
-    for (const member of members) {
-      if (member.toLowerCase() !== this.address) {
-        promises.push(this.sendReadReceipt(member, messageIds, groupId).catch(err => {
-          console.error(`Failed to send read receipt to group member ${member}:`, err.message);
-        }));
+    const messageSenders = allMsgs.filter(m => messageIds.includes(m.id));
+
+    console.log(`[SDK] sendGroupReadReceipt: found senders:`, messageSenders);
+
+    // Group message IDs by their sender address (lowercase)
+    const senderToMessagesMap = {};
+    for (const row of messageSenders) {
+      if (row.sender_address && row.sender_address.toLowerCase() !== this.address) {
+        const senderAddr = row.sender_address.toLowerCase();
+        if (!senderToMessagesMap[senderAddr]) {
+          senderToMessagesMap[senderAddr] = [];
+        }
+        senderToMessagesMap[senderAddr].push(row.id);
       }
     }
+
+    const promises = [];
+    for (const [senderAddr, mids] of Object.entries(senderToMessagesMap)) {
+      console.log(`[SDK] sendGroupReadReceipt: sending read receipt for messages ${mids} to sender: ${senderAddr}`);
+      promises.push(this.sendReadReceipt(senderAddr, mids, groupId).catch(err => {
+        console.error(`Failed to send read receipt to group member ${senderAddr}:`, err.message);
+      }));
+    }
     await Promise.all(promises);
+    console.log(`[SDK] sendGroupReadReceipt completed.`);
   }
 
   async deleteAccount() {
@@ -2009,7 +2184,7 @@ class DecentraChatClient extends EventEmitter {
       signingPrivate = localWallet.privateKey;
       
       // Request delegation signature once from user wallet
-      delegationSignature = await this.wallet.signMessage(`Authorize Echo Session Key: ${localWallet.address}`);
+      delegationSignature = await this.wallet.signMessage(`Authorize EchoIt Session Key: ${localWallet.address}`);
       
       await this.setMetadata('session_signing_private', signingPrivate);
       await this.setMetadata('session_signing_public', localWallet.address);
@@ -2028,6 +2203,12 @@ class DecentraChatClient extends EventEmitter {
       db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(conversationId);
       db.prepare('DELETE FROM ratchet_sessions WHERE peer_address = ?').run(conversationId);
       db.prepare('DELETE FROM skipped_message_keys WHERE peer_address = ?').run(conversationId);
+    });
+  }
+
+  async deleteContact(contactId) {
+    await this.db.write(db => {
+      db.prepare('UPDATE conversations SET is_contact = 0 WHERE id = ?').run(contactId);
     });
   }
 

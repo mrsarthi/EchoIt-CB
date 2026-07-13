@@ -1,6 +1,6 @@
 {
   "name": "decentrachat-client-sdk",
-  "version": "4.0.2",
+  "version": "4.2.0",
   "description": "Headless Client SDK for DecentraChat V4",
   "main": "src/DecentraChatClient.js",
   "scripts": {

@@ -1,6 +1,6 @@
 {
   "name": "decentrachat-relay-server",
-  "version": "4.1.0",
+  "version": "4.2.0",
   "description": "Zero-Knowledge Ephemeral Relay Server for DecentraChat V4",
   "main": "server.js",
   "scripts": {

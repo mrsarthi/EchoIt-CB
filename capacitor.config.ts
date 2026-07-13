@@ -2,7 +2,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
     appId: 'com.decentrachat.app',
-    appName: 'Echo Messenger',
+    appName: 'EchoIt Messenger',
     webDir: 'dist',
     server: {
         // Use the bundled web assets (don't connect to a live dev server)

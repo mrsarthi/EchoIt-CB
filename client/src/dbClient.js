@@ -94,7 +94,11 @@ try {
           const parsed = JSON.parse(legacyData);
           this.tables = {
             key_metadata: parsed.key_metadata || [],
-            conversations: parsed.conversations || [],
+            conversations: (parsed.conversations || []).map(c => ({
+              ...c,
+              is_contact: c.is_contact !== undefined ? c.is_contact : 1,
+              pending_request: c.pending_request !== undefined ? c.pending_request : 0
+            })),
             messages: parsed.messages || [],
             ratchet_sessions: parsed.ratchet_sessions || [],
             skipped_message_keys: parsed.skipped_message_keys || [],
@@ -127,7 +131,11 @@ try {
           const parsed = JSON.parse(dec.decode(decrypted));
           this.tables = {
             key_metadata: parsed.key_metadata || [],
-            conversations: parsed.conversations || [],
+            conversations: (parsed.conversations || []).map(c => ({
+              ...c,
+              is_contact: c.is_contact !== undefined ? c.is_contact : 1,
+              pending_request: c.pending_request !== undefined ? c.pending_request : 0
+            })),
             messages: parsed.messages || [],
             ratchet_sessions: parsed.ratchet_sessions || [],
             skipped_message_keys: parsed.skipped_message_keys || [],
@@ -215,32 +223,72 @@ try {
             self.tables.one_time_keys = self.tables.one_time_keys.filter(r => r.key_id !== key_id);
           }
           else if (cleanSql.includes('INTO conversations')) {
-            let id, username, is_group = 0, last_message_at, created_at, hide_wallet = 0, bio = '', pfp = null;
-            if (args.length === 5) {
-              if (cleanSql.includes('is_group')) {
-                [id, username, is_group, last_message_at, created_at] = args;
-              } else {
-                [id, username, last_message_at, created_at, hide_wallet] = args;
-                is_group = 0;
-              }
-            } else if (args.length === 4) {
-              [id, username, last_message_at, created_at] = args;
-              is_group = cleanSql.includes(', 1,') ? 1 : 0;
-            } else if (args.length === 6) {
-              [id, username, is_group, last_message_at, created_at, hide_wallet] = args;
-            } else if (args.length === 7) {
-              [id, username, last_message_at, created_at, hide_wallet, bio, pfp] = args;
-              is_group = 0;
-            } else if (args.length === 8) {
-              [id, username, is_group, last_message_at, created_at, hide_wallet, bio, pfp] = args;
+            const colStart = cleanSql.indexOf('(');
+            const colEnd = cleanSql.indexOf(')');
+            let colNames = [];
+            if (colStart !== -1 && colEnd !== -1) {
+              colNames = cleanSql.substring(colStart + 1, colEnd).split(',').map(s => s.trim());
+            } else {
+              colNames = ['id', 'username', 'is_group', 'last_message_at', 'created_at', 'hide_wallet', 'bio', 'pfp', 'pending_request'];
             }
 
-            const idx = self.tables.conversations.findIndex(r => r.id === id);
-            const row = { id, username, is_group, last_message_at, created_at, hide_wallet, bio, pfp };
+            const valStart = cleanSql.indexOf('VALUES');
+            let valTokens = [];
+            if (valStart !== -1) {
+              const valPart = cleanSql.substring(valStart);
+              const parenStart = valPart.indexOf('(');
+              const parenEnd = valPart.lastIndexOf(')');
+              if (parenStart !== -1 && parenEnd !== -1) {
+                valTokens = valPart.substring(parenStart + 1, parenEnd).split(',').map(s => s.trim());
+              }
+            }
+
+            const idColIdx = colNames.indexOf('id');
+            let rowId = '';
+            if (idColIdx !== -1) {
+              const valToken = valTokens[idColIdx];
+              if (valToken === '?') {
+                let placeholderCount = 0;
+                for (let k = 0; k < idColIdx; k++) {
+                  if (valTokens[k] === '?') placeholderCount++;
+                }
+                rowId = args[placeholderCount];
+              } else if (valToken !== undefined) {
+                rowId = valToken.replace(/['"]/g, '');
+              }
+            }
+
+            const idx = self.tables.conversations.findIndex(r => r.id.toLowerCase() === rowId.toLowerCase());
+            const existingRow = idx !== -1 ? self.tables.conversations[idx] : {
+              id: '',
+              username: '',
+              is_group: 0,
+              last_message_at: Date.now(),
+              created_at: Date.now(),
+              hide_wallet: 0,
+              bio: '',
+              pfp: null,
+              pending_request: 0,
+              is_contact: 1
+            };
+
+            const row = { ...existingRow };
+
+            let argIdx = 0;
+            for (let i = 0; i < colNames.length; i++) {
+              const col = colNames[i];
+              const valToken = valTokens[i];
+              if (valToken === '?') {
+                row[col] = args[argIdx++];
+              } else if (valToken !== undefined) {
+                const num = parseInt(valToken);
+                row[col] = isNaN(num) ? valToken.replace(/['"]/g, '') : num;
+              }
+            }
 
             if (cleanSql.includes('INSERT OR REPLACE')) {
               if (idx !== -1) {
-                self.tables.conversations[idx] = { ...self.tables.conversations[idx], ...row };
+                self.tables.conversations[idx] = row;
               } else {
                 self.tables.conversations.push(row);
               }
@@ -251,14 +299,15 @@ try {
               }
             }
           }
+
           else if (cleanSql.includes('UPDATE conversations SET last_message_at = ? WHERE id = ?')) {
             const [last_message_at, id] = args;
-            const idx = self.tables.conversations.findIndex(r => r.id === id);
+            const idx = self.tables.conversations.findIndex(r => r.id.toLowerCase() === id.toLowerCase());
             if (idx !== -1) self.tables.conversations[idx].last_message_at = last_message_at;
           }
           else if (cleanSql.includes('UPDATE conversations SET username = ?, hide_wallet = ?, bio = ?, pfp = ? WHERE id = ?')) {
             const [username, hide_wallet, bio, pfp, id] = args;
-            const idx = self.tables.conversations.findIndex(r => r.id === id);
+            const idx = self.tables.conversations.findIndex(r => r.id.toLowerCase() === id.toLowerCase());
             if (idx !== -1) {
               self.tables.conversations[idx].username = username;
               self.tables.conversations[idx].hide_wallet = hide_wallet;
@@ -268,7 +317,7 @@ try {
           }
           else if (cleanSql.includes('UPDATE conversations SET username = ?, hide_wallet = ? WHERE id = ?')) {
             const [username, hide_wallet, id] = args;
-            const idx = self.tables.conversations.findIndex(r => r.id === id);
+            const idx = self.tables.conversations.findIndex(r => r.id.toLowerCase() === id.toLowerCase());
             if (idx !== -1) {
               // Check if it's the conditional update from Context
               if (cleanSql.includes('AND (username IS NULL OR username LIKE')) {
@@ -280,6 +329,49 @@ try {
               } else {
                 self.tables.conversations[idx].username = username;
                 self.tables.conversations[idx].hide_wallet = hide_wallet;
+              }
+            }
+          }
+          else if (cleanSql.includes('UPDATE conversations SET')) {
+            const setIndex = cleanSql.indexOf('SET');
+            const whereIndex = cleanSql.indexOf('WHERE');
+            if (setIndex !== -1 && whereIndex !== -1) {
+              const setPart = cleanSql.substring(setIndex + 3, whereIndex).trim();
+              const wherePart = cleanSql.substring(whereIndex + 5).trim();
+              const assignments = setPart.split(',').map(s => s.trim());
+
+              let idVal = '';
+              const idMatch = wherePart.match(/id\s*=\s*(\?|'[^']+'|"[^"]+")/);
+              if (idMatch) {
+                idVal = idMatch[1];
+              }
+
+              let placeholderCount = 0;
+              assignments.forEach(assign => {
+                if (assign.includes('?')) placeholderCount++;
+              });
+
+              let whereId = '';
+              if (idVal === '?') {
+                whereId = args[placeholderCount];
+              } else if (idVal) {
+                whereId = idVal.replace(/['"]/g, '');
+              }
+
+              const idx = self.tables.conversations.findIndex(r => r.id.toLowerCase() === whereId.toLowerCase());
+              if (idx !== -1) {
+                let argIdx = 0;
+                assignments.forEach(assign => {
+                  const parts = assign.split('=').map(s => s.trim());
+                  const col = parts[0];
+                  const valToken = parts[1];
+                  if (valToken === '?') {
+                    self.tables.conversations[idx][col] = args[argIdx++];
+                  } else if (valToken !== undefined) {
+                    const num = parseInt(valToken);
+                    self.tables.conversations[idx][col] = isNaN(num) ? valToken.replace(/['"]/g, '') : num;
+                  }
+                });
               }
             }
           }
@@ -367,7 +459,7 @@ try {
           }
           else if (cleanSql.includes('DELETE FROM conversations WHERE id = ?')) {
             const [id] = args;
-            self.tables.conversations = self.tables.conversations.filter(r => r.id !== id);
+            self.tables.conversations = self.tables.conversations.filter(r => r.id.toLowerCase() !== id.toLowerCase());
           }
           else if (cleanSql.includes('DELETE FROM conversations')) {
             self.tables.conversations = [];
@@ -412,6 +504,14 @@ try {
           else if (cleanSql.includes('FROM groups WHERE id = ?')) {
             const [id] = args;
             return self.tables.groups.find(r => r.id === id);
+          }
+          else if (cleanSql.includes('FROM conversations WHERE id = ?')) {
+            const [id] = args;
+            return self.tables.conversations.find(r => r.id.toLowerCase() === id.toLowerCase());
+          }
+          else if (cleanSql.includes('FROM conversations WHERE username = ?')) {
+            const [username] = args;
+            return self.tables.conversations.find(r => r.username.toLowerCase() === username.toLowerCase());
           }
           else if (cleanSql.includes('SELECT * FROM ratchet_sessions WHERE peer_address = ?')) {
             const [peer_address] = args;
@@ -519,7 +619,9 @@ class DBClient {
         created_at INTEGER NOT NULL,
         hide_wallet INTEGER DEFAULT 0,
         bio TEXT,
-        pfp TEXT
+        pfp TEXT,
+        pending_request INTEGER DEFAULT 0,
+        is_contact INTEGER DEFAULT 1
       );
 
       CREATE TABLE IF NOT EXISTS messages (
@@ -595,6 +697,16 @@ class DBClient {
     }
     try {
       this.db.exec('ALTER TABLE conversations ADD COLUMN pfp TEXT');
+    } catch (e) {
+      // Ignore if column already exists
+    }
+    try {
+      this.db.exec('ALTER TABLE conversations ADD COLUMN pending_request INTEGER DEFAULT 0');
+    } catch (e) {
+      // Ignore if column already exists
+    }
+    try {
+      this.db.exec('ALTER TABLE conversations ADD COLUMN is_contact INTEGER DEFAULT 1');
     } catch (e) {
       // Ignore if column already exists
     }

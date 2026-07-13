@@ -88,9 +88,7 @@ export const DecentraChatProvider = ({ children }) => {
   const [stealthMode, setStealthMode] = useState(() => {
     return localStorage.getItem('echo_stealth_mode') === 'true';
   });
-  const [hideWalletAddress, setHideWalletAddress] = useState(() => {
-    return localStorage.getItem('echo_hide_wallet') === 'true';
-  });
+  const [hideWalletAddress, setHideWalletAddress] = useState(false);
   const [usernameCache, setUsernameCache] = useState(() => {
     try {
       const saved = sessionStorage.getItem('echo_username_cache');
@@ -115,8 +113,8 @@ export const DecentraChatProvider = ({ children }) => {
   }, [stealthMode]);
 
   useEffect(() => {
-    localStorage.setItem('echo_hide_wallet', hideWalletAddress ? 'true' : 'false');
-  }, [hideWalletAddress]);
+    localStorage.removeItem('echo_hide_wallet');
+  }, []);
 
   // Sync settings to server when connected
   useEffect(() => {
@@ -141,11 +139,24 @@ export const DecentraChatProvider = ({ children }) => {
     return 'http://localhost:3009';
   };
 
-  const serverUrl = import.meta.env.VITE_RELAY_URL
-    ? import.meta.env.VITE_RELAY_URL
-    : (typeof window !== 'undefined' && window.location && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') && !import.meta.env.PROD)
-      ? getLocalServerUrl()
-      : 'https://decentrachat-singnalling.onrender.com';
+  const isElectron = typeof window !== 'undefined' && navigator.userAgent.toLowerCase().includes('electron');
+  const getCustomServerUrl = () => {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      return window.localStorage.getItem('echo_custom_relay_url');
+    }
+    return null;
+  };
+
+  const serverUrl = getCustomServerUrl()
+    || (import.meta.env.VITE_RELAY_URL
+      ? import.meta.env.VITE_RELAY_URL
+      : (typeof window !== 'undefined' && window.location && 
+         (window.location.hostname === 'localhost' || 
+          window.location.hostname === '127.0.0.1' || 
+          isElectron) && 
+         (!import.meta.env.PROD || isElectron))
+        ? getLocalServerUrl()
+        : 'https://decentrachat-singnalling.onrender.com');
 
   const wakeUpServer = useCallback(async (maxTries = 3) => {
     console.log(`[Server Wakeup] Pinging signalling server at ${serverUrl}/health...`);
@@ -669,14 +680,40 @@ export const DecentraChatProvider = ({ children }) => {
 
     const handleMessage = async (msg) => {
       console.log("[Context] Received real-time message:", msg);
+      
+      // Client-side block filter (Task 2.2)
+      const isAddressBlocked = (address) => {
+        if (!address) return false;
+        try {
+          const blockedStr = localStorage.getItem('echo_blocked_addresses') || '[]';
+          const blocked = JSON.parse(blockedStr);
+          return blocked.map(a => a.toLowerCase()).includes(address.toLowerCase());
+        } catch {
+          return false;
+        }
+      };
+
+      if (isAddressBlocked(msg.from)) {
+        console.log(`[Block] Discarded incoming message from blocked user: ${msg.from}`);
+        return;
+      }
+
       if (msg.senderUsername) {
         updateUsernameCache(msg.from, msg.senderUsername, msg.senderHideWallet, msg.senderBio, msg.senderPfp);
+      }
+      if (msg.system || msg.type === 'read_receipt' || msg.type === 'request_accepted') {
+        return;
       }
       await refreshDataRef.current(client);
     };
 
     const handleReadReceipt = async (payload) => {
       console.log("[Context] Received read receipt:", payload);
+      await refreshDataRef.current(client);
+    };
+
+    const handleRequestAccepted = async (payload) => {
+      console.log("[Context] Request accepted by peer:", payload);
       await refreshDataRef.current(client);
     };
 
@@ -696,8 +733,12 @@ export const DecentraChatProvider = ({ children }) => {
 
     const handleTypingStatus = (data) => {
       const { senderAddress, conversationId, isTyping } = data;
-      const convId = conversationId.toLowerCase();
+      console.log(`[Typing] handleTypingStatus received: senderAddress=${senderAddress}, conversationId=${conversationId}, isTyping=${isTyping}`);
       const sender = senderAddress.toLowerCase();
+      const convId = conversationId.toLowerCase() === client.address.toLowerCase()
+        ? sender
+        : conversationId.toLowerCase();
+      console.log(`[Typing] handleTypingStatus mapped: sender=${sender}, convId=${convId}`);
 
       setTypingUsers(prev => {
         const currentSet = new Set(prev[convId] || []);
@@ -733,6 +774,7 @@ export const DecentraChatProvider = ({ children }) => {
 
     client.on('message', handleMessage);
     client.on('readReceipt', handleReadReceipt);
+    client.on('requestAccepted', handleRequestAccepted);
     client.on('messageStatus', handleMessageStatus);
     client.on('status', handleStatus);
     client.on('presenceUpdate', handlePresenceUpdate);
@@ -746,6 +788,7 @@ export const DecentraChatProvider = ({ children }) => {
     return () => {
       client.off('message', handleMessage);
       client.off('readReceipt', handleReadReceipt);
+      client.off('requestAccepted', handleRequestAccepted);
       client.off('messageStatus', handleMessageStatus);
       client.off('status', handleStatus);
       client.off('presenceUpdate', handlePresenceUpdate);
@@ -785,7 +828,7 @@ export const DecentraChatProvider = ({ children }) => {
         await client.markConversationAsRead(activeId);
         
         // Notify peer/group via read receipt in the background
-        const isGroup = conversations.find(c => c.id === activeId)?.is_group === 1;
+        const isGroup = conversations.find(c => c.id.toLowerCase() === activeId.toLowerCase())?.is_group === 1;
         if (isGroup) {
           client.sendGroupReadReceipt(activeId, unreadIds).catch(err => {
             console.warn("Failed to send group read receipt to peer/group:", err.message);
@@ -811,10 +854,14 @@ export const DecentraChatProvider = ({ children }) => {
     if (client && connected && activeConversationId) {
       const hasUnread = messages.some(m => m.sender_address.toLowerCase() !== client.address && m.status === 'unread');
       if (hasUnread) {
+        const conv = conversations.find(c => c.id.toLowerCase() === activeConversationId.toLowerCase());
+        if (conv && Number(conv.pending_request) === 1) {
+          return;
+        }
         markActiveConversationAsRead(activeConversationId);
       }
     }
-  }, [client, connected, activeConversationId, messages, markActiveConversationAsRead]);
+  }, [client, connected, activeConversationId, messages, markActiveConversationAsRead, conversations]);
 
   // 1. User Registration Action
   const registerUser = async (usernameInput) => {
@@ -877,18 +924,15 @@ export const DecentraChatProvider = ({ children }) => {
   // Delete a contact and its E2EE session data locally
   const deleteContact = async (conversationId) => {
     if (!client) throw new Error("Client is offline or uninitialized.");
-    // Optimistically remove from conversations list
-    setConversations(prev => prev.filter(c => c.id !== conversationId));
+    // Optimistically set is_contact = 0 in conversations list
+    setConversations(prev => prev.map(c => c.id === conversationId ? { ...c, is_contact: 0 } : c));
     try {
-      client.deleteConversation(conversationId)
-        .then(() => refreshData(client))
-        .catch(err => {
-          console.error("Failed to delete contact in database:", err);
-          refreshData(client);
-        });
+      await client.deleteContact(conversationId);
+      await refreshData(client);
     } catch (err) {
       console.error("[Context] Delete contact error:", err.message);
       setError("Failed to delete contact: " + err.message);
+      await refreshData(client);
       throw err;
     }
   };
