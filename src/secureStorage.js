@@ -1,11 +1,47 @@
 // secureStorage.js: Key Storage and Biometric Authentication
 import { BiometricAuth, AndroidBiometryStrength } from '@aparajita/capacitor-biometric-auth';
+import { Preferences } from '@capacitor/preferences';
 import { argon2id } from 'hash-wasm';
 import crypto from 'crypto';
 import { Buffer } from 'buffer';
 
-// IndexedDB Helper Functions
-export function getIDBValue(key) {
+// Helper to detect native Capacitor platform on boot before window.Capacitor injection
+export function isNativePlatform() {
+  if (typeof window === 'undefined') return false;
+  if (window.Capacitor?.isNativePlatform?.()) return true;
+  // Fallbacks for early boot detection
+  if (navigator.userAgent && (
+    navigator.userAgent.includes('DecentraChat-Android') || 
+    navigator.userAgent.includes('Capacitor')
+  )) {
+    return true;
+  }
+  if (window.location && (
+    window.location.protocol === 'capacitor:' || 
+    window.location.protocol === 'http-extension:' ||
+    (window.location.hostname === 'localhost' && !window.location.port && window.location.protocol === 'https:')
+  )) {
+    return true;
+  }
+  return false;
+}
+
+// Unified Secure Storage Functions (Preferences-first, falling back to IndexedDB)
+export async function getIDBValue(key) {
+  try {
+    const { value } = await Preferences.get({ key });
+    if (value) {
+      try {
+        return JSON.parse(value);
+      } catch {
+        return value;
+      }
+    }
+  } catch (e) {
+    console.warn(`[secureStorage] Preferences get failed for ${key}, falling back to IndexedDB:`, e);
+  }
+
+  // Fallback to IndexedDB (e.g. legacy browser support or fallback)
   return new Promise((resolve) => {
     try {
       const request = indexedDB.open('decentrachat_secure_storage', 1);
@@ -20,8 +56,14 @@ export function getIDBValue(key) {
         const tx = db.transaction('keys', 'readonly');
         const store = tx.objectStore('keys');
         const getReq = store.get(key);
-        getReq.onsuccess = () => resolve(getReq.result || null);
-        getReq.onerror = () => resolve(null);
+        getReq.onsuccess = () => {
+          resolve(getReq.result || null);
+          db.close();
+        };
+        getReq.onerror = () => {
+          resolve(null);
+          db.close();
+        };
       };
       request.onerror = () => resolve(null);
     } catch {
@@ -30,7 +72,13 @@ export function getIDBValue(key) {
   });
 }
 
-export function setIDBValue(key, value) {
+export async function setIDBValue(key, value) {
+  try {
+    await Preferences.set({ key, value: typeof value === 'string' ? value : JSON.stringify(value) });
+  } catch (e) {
+    console.warn(`[secureStorage] Preferences set failed for ${key}:`, e);
+  }
+
   return new Promise((resolve) => {
     try {
       const request = indexedDB.open('decentrachat_secure_storage', 1);
@@ -45,8 +93,14 @@ export function setIDBValue(key, value) {
         const tx = db.transaction('keys', 'readwrite');
         const store = tx.objectStore('keys');
         const putReq = store.put(value, key);
-        putReq.onsuccess = () => resolve(true);
-        putReq.onerror = () => resolve(false);
+        putReq.onsuccess = () => {
+          resolve(true);
+          db.close();
+        };
+        putReq.onerror = () => {
+          resolve(false);
+          db.close();
+        };
       };
       request.onerror = () => resolve(false);
     } catch {
@@ -55,7 +109,13 @@ export function setIDBValue(key, value) {
   });
 }
 
-export function removeIDBValue(key) {
+export async function removeIDBValue(key) {
+  try {
+    await Preferences.remove({ key });
+  } catch (e) {
+    console.warn(`[secureStorage] Preferences remove failed for ${key}:`, e);
+  }
+
   return new Promise((resolve) => {
     try {
       const request = indexedDB.open('decentrachat_secure_storage', 1);
@@ -64,8 +124,14 @@ export function removeIDBValue(key) {
         const tx = db.transaction('keys', 'readwrite');
         const store = tx.objectStore('keys');
         const delReq = store.delete(key);
-        delReq.onsuccess = () => resolve(true);
-        delReq.onerror = () => resolve(false);
+        delReq.onsuccess = () => {
+          resolve(true);
+          db.close();
+        };
+        delReq.onerror = () => {
+          resolve(false);
+          db.close();
+        };
       };
       request.onerror = () => resolve(false);
     } catch {
@@ -76,7 +142,7 @@ export function removeIDBValue(key) {
 
 // Check if biometric authentication is available on this device
 export async function isBiometricsAvailable() {
-  if (window.Capacitor && window.Capacitor.isNativePlatform()) {
+  if (isNativePlatform()) {
     try {
       const result = await BiometricAuth.checkBiometry();
       return result.isAvailable;
@@ -88,9 +154,16 @@ export async function isBiometricsAvailable() {
   return false;
 }
 
+let isBiometricPromptActive = false;
+
 // Request biometric verification
 export async function authenticateBiometrics(reason = 'Verify your identity to unlock EchoIt') {
-  if (window.Capacitor && window.Capacitor.isNativePlatform()) {
+  if (isNativePlatform()) {
+    if (isBiometricPromptActive) {
+      console.warn("Biometric prompt is already active. Ignoring duplicate request.");
+      return false;
+    }
+    isBiometricPromptActive = true;
     try {
       await BiometricAuth.checkBiometry();
       await BiometricAuth.authenticate({
@@ -103,9 +176,11 @@ export async function authenticateBiometrics(reason = 'Verify your identity to u
         androidConfirmationRequired: false,
         androidBiometryStrength: AndroidBiometryStrength.weak,
       });
+      isBiometricPromptActive = false;
       return true;
     } catch (e) {
       console.warn("Biometric authentication failed:", e);
+      isBiometricPromptActive = false;
       return false;
     }
   }
@@ -210,14 +285,8 @@ export async function saveBiometricEncryptedMnemonic(mnemonic) {
 
   await setIDBValue('biometric_encrypted_mnemonic', bundle);
 
-  // Store biometric key securely in native preferences (protected by biometrics gate in UI)
-  if (window.Capacitor && window.Capacitor.isNativePlatform()) {
-    const { Preferences } = await import('@capacitor/preferences');
-    await Preferences.set({ key: 'biometric_key', value: biometricKey });
-  } else {
-    // Fallback for dev/testing on web
-    await setIDBValue('biometric_key', biometricKey);
-  }
+  // Store biometric key securely in native preferences
+  await Preferences.set({ key: 'biometric_key', value: biometricKey });
 }
 
 // Load and decrypt mnemonic using biometrics
@@ -225,18 +294,13 @@ export async function loadBiometricEncryptedMnemonic() {
   const bundle = await getIDBValue('biometric_encrypted_mnemonic');
   if (!bundle) throw new Error('No biometric credentials set up');
 
-  let biometricKey = null;
-  if (window.Capacitor && window.Capacitor.isNativePlatform()) {
+  if (isNativePlatform()) {
     const success = await authenticateBiometrics('Unlock EchoIt with your biometrics');
     if (!success) throw new Error('Biometric authentication failed');
-
-    const { Preferences } = await import('@capacitor/preferences');
-    const { value } = await Preferences.get({ key: 'biometric_key' });
-    biometricKey = value;
-  } else {
-    // Fallback for dev/testing on web
-    biometricKey = await getIDBValue('biometric_key');
   }
+
+  const { value } = await Preferences.get({ key: 'biometric_key' });
+  const biometricKey = value;
 
   if (!biometricKey) throw new Error('Biometric key not found');
 
@@ -250,10 +314,5 @@ export async function loadBiometricEncryptedMnemonic() {
 
 export async function deleteBiometricCredentials() {
   await removeIDBValue('biometric_encrypted_mnemonic');
-  if (window.Capacitor && window.Capacitor.isNativePlatform()) {
-    const { Preferences } = await import('@capacitor/preferences');
-    await Preferences.remove({ key: 'biometric_key' });
-  } else {
-    await removeIDBValue('biometric_key');
-  }
+  await Preferences.remove({ key: 'biometric_key' });
 }
