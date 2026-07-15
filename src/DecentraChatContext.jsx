@@ -419,6 +419,27 @@ export const DecentraChatProvider = ({ children }) => {
     const checkExistingConnection = async () => {
       try {
         setBootPhase('checking_crypto');
+        
+        // Wait for Capacitor bridge injection if on native platform
+        if (typeof window !== 'undefined') {
+          const isCap = navigator.userAgent && (
+            navigator.userAgent.includes('DecentraChat-Android') || 
+            navigator.userAgent.includes('Capacitor')
+          );
+          if (isCap && !window.Capacitor) {
+            await new Promise((resolve) => {
+              let attempts = 0;
+              const interval = setInterval(() => {
+                attempts++;
+                if (window.Capacitor || attempts > 100) {
+                  clearInterval(interval);
+                  resolve();
+                }
+              }, 10);
+            });
+          }
+        }
+
         if (!window.crypto?.getRandomValues || !window.crypto?.subtle) {
           throw new Error('CRYPTO_UNAVAILABLE');
         }
@@ -450,19 +471,6 @@ export const DecentraChatProvider = ({ children }) => {
             setBootPhase('lockbox_locked');
           }
           return;
-        }
-
-        // Try automatic biometric login if available
-        if (isBioAvailable && hasBiometricCreds) {
-          setBootPhase('loading_keys');
-          try {
-            const mnemonic = await loadBiometricEncryptedMnemonic();
-            const keys = deriveKeysFromMnemonic(mnemonic);
-            await initializeClientForKeys(keys, () => isCurrent);
-            return;
-          } catch (e) {
-            console.warn("Auto biometric login bypassed:", e.message);
-          }
         }
 
         // Default to password lock screen
