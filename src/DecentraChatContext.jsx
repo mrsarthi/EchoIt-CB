@@ -148,15 +148,9 @@ export const DecentraChatProvider = ({ children }) => {
   };
 
   const serverUrl = getCustomServerUrl()
-    || (import.meta.env.VITE_RELAY_URL
-      ? import.meta.env.VITE_RELAY_URL
-      : (typeof window !== 'undefined' && window.location && 
-         (window.location.hostname === 'localhost' || 
-          window.location.hostname === '127.0.0.1' || 
-          isElectron) && 
-         (!import.meta.env.PROD || isElectron))
-        ? getLocalServerUrl()
-        : 'https://decentrachat-singnalling.onrender.com');
+    || (import.meta.env.PROD
+      ? (import.meta.env.VITE_RELAY_URL || 'https://decentrachat-singnalling.onrender.com')
+      : getLocalServerUrl());
 
   const wakeUpServer = useCallback(async (maxTries = 3) => {
     console.log(`[Server Wakeup] Pinging signalling server at ${serverUrl}/health...`);

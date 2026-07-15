@@ -1,5 +1,10 @@
 require('dotenv').config();
 
+if (process.env.NODE_ENV === 'production' && process.env.TEST_MODE === 'true') {
+  console.error('FATAL ERROR: TEST_MODE=true is not allowed in production environments!');
+  process.exit(1);
+}
+
 const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
 
@@ -192,8 +197,50 @@ io.use((socket, next) => {
   next();
 });
 
+// Envelope parser that accepts both new and legacy formats (U-6/Remediation Issue 1)
+function parseIncomingMessageEnvelope(payload) {
+  if (payload && payload.protocolVersion === 1) {
+    return {
+      protocolVersion: 1,
+      id: payload.messageId,
+      to: payload.recipientAddress || payload.to,
+      type: payload.messageType || 'chat',
+      timestamp: payload.createdAt,
+      ciphertext: payload.body.ciphertext,
+      iv: payload.body.iv,
+      dhPublic: payload.body.dhPublic,
+      sequenceNumber: payload.body.sequenceNumber,
+      x3dhInfo: payload.body.x3dhInfo,
+      groupId: payload.groupId,
+      vectorClock: payload.body.vectorClock,
+      senderCounter: payload.body.senderCounter,
+      raw: payload
+    };
+  }
+  return {
+    protocolVersion: undefined,
+    id: payload.id,
+    to: payload.to,
+    type: payload.groupId ? 'group' : 'chat',
+    timestamp: payload.timestamp,
+    ciphertext: payload.ciphertext,
+    iv: payload.iv,
+    dhPublic: payload.dhPublic,
+    sequenceNumber: payload.sequenceNumber,
+    x3dhInfo: payload.x3dhInfo,
+    groupId: payload.groupId,
+    vectorClock: payload.vectorClock,
+    senderCounter: payload.senderCounter,
+    raw: payload
+  };
+}
+
 io.on('connection', (socket) => {
   console.log(`Socket connected: ${socket.id}`);
+
+  // Track client protocol version (Phase 3)
+  const clientProtocolVersion = socket.handshake.auth?.protocolVersion || 0;
+  socket.protocolVersion = Number(clientProtocolVersion);
 
   // Safe wrapper for socket.on to prevent crashes if a client (e.g., load generator) omits a expected callback
   const originalOn = socket.on;
@@ -573,7 +620,8 @@ io.on('connection', (socket) => {
         return callback({ success: false, error: "Rate limit exceeded. Maximum 20 messages per second." });
       }
 
-      const { id, to, ciphertext, iv, dhPublic, sequenceNumber, timestamp, x3dhInfo, groupId, vectorClock, senderCounter } = payload;
+      const parsed = parseIncomingMessageEnvelope(payload);
+      const { id, to, ciphertext, iv, dhPublic, sequenceNumber, timestamp, x3dhInfo, groupId, vectorClock, senderCounter } = parsed;
       console.log(`[Server] sendMessage: from=${socket.address}, to=${to}, groupId=${groupId}, id=${id}`);
 
       if (!id || !to || !ciphertext || !iv || !dhPublic || sequenceNumber === undefined || !timestamp) {
@@ -675,23 +723,50 @@ io.on('connection', (socket) => {
 
       if (isOnline) {
         // Milestone 4: Direct Online Routing
-        io.to(recipient).emit('message', {
-          id,
-          from: senderHideWallet ? senderUsername : socket.address,
-          senderUsername,
-          senderHideWallet: !!senderHideWallet,
-          senderBio,
-          senderPfp,
-          ciphertext,
-          iv,
-          dhPublic,
-          sequenceNumber,
-          timestamp,
-          x3dhInfo,
-          groupId,
-          vectorClock,
-          senderCounter
-        });
+        const recipientProtocol = recipientSockets[0].protocolVersion || 0;
+        if (recipientProtocol >= 1) {
+          io.to(recipient).emit('message', {
+            protocolVersion: 1,
+            messageId: id,
+            messageType: parsed.type || 'chat',
+            conversationId: groupId || (senderHideWallet ? senderUsername : socket.address),
+            senderAddress: senderHideWallet ? senderUsername : socket.address,
+            recipientAddress: recipient,
+            groupId: groupId || null,
+            createdAt: timestamp,
+            body: {
+              ciphertext,
+              iv,
+              dhPublic,
+              sequenceNumber,
+              x3dhInfo,
+              vectorClock,
+              senderCounter
+            },
+            senderUsername,
+            senderHideWallet: !!senderHideWallet,
+            senderBio,
+            senderPfp
+          });
+        } else {
+          io.to(recipient).emit('message', {
+            id,
+            from: senderHideWallet ? senderUsername : socket.address,
+            senderUsername,
+            senderHideWallet: !!senderHideWallet,
+            senderBio,
+            senderPfp,
+            ciphertext,
+            iv,
+            dhPublic,
+            sequenceNumber,
+            timestamp,
+            x3dhInfo,
+            groupId,
+            vectorClock,
+            senderCounter
+          });
+        }
         callback({ success: true, delivered: true });
       } else {
         // Check recipient outbox quota (Milestone 5 storage quota enforcer)
@@ -831,6 +906,18 @@ io.on('connection', (socket) => {
       const { conversationId, senderAddress, counter } = payload;
       if (!conversationId || !senderAddress || counter === undefined) {
         return callback({ success: false, error: "Missing required parameters." });
+      }
+
+      // Remediate U-6: Server-side check for direct messages
+      const isDM = conversationId.startsWith('0x') && conversationId.length === 42;
+      if (isDM) {
+        const reqLower = socket.address.toLowerCase();
+        const senderLower = senderAddress.toLowerCase();
+        const convLower = conversationId.toLowerCase();
+        if (convLower !== reqLower && convLower !== senderLower) {
+          console.warn(`[Server Log] Unauthorized requestMissingMessage from ${socket.address} for conversation ${conversationId}`);
+          return callback({ success: false, error: "Unauthorized conversation access." });
+        }
       }
 
       console.log(`[Server Log] requestMissingMessage for ${conversationId}, sender: ${senderAddress}, counter: ${counter}`);

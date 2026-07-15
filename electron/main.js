@@ -23,6 +23,7 @@ let mainWindow;
 let tray = null;
 let authServer;
 let authResolve = null;
+let pendingAuthNonce = null;
 let isQuitting = false; // True only when user explicitly quits from tray or menu
 
 // Auth server port
@@ -57,6 +58,17 @@ function createAuthServer() {
                 try {
                     const data = JSON.parse(body);
                     console.log('Auth received:', data.address);
+
+                    // Remediate U-7: Validate cryptographic nonce
+                    if (!pendingAuthNonce || data.nonce !== pendingAuthNonce) {
+                        console.warn('Auth callback rejected: Invalid or missing nonce.');
+                        res.writeHead(403, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Invalid auth nonce' }));
+                        return;
+                    }
+
+                    // Consume the nonce
+                    pendingAuthNonce = null;
 
                     // Send auth data to renderer
                     if (mainWindow) {
@@ -156,7 +168,8 @@ function createWindow() {
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
-            webSecurity: false, // Set to false to allow local HTTP signalling connections in production
+            webSecurity: true,
+            sandbox: true,
             preload: path.join(__dirname, 'preload.js'),
         },
     });
@@ -217,14 +230,15 @@ function createWindow() {
 
 // IPC handlers
 ipcMain.handle('open-auth-browser', async () => {
-    const nonce = Date.now().toString();
+    // Remediate U-7: Generate secure random nonce
+    pendingAuthNonce = crypto.randomBytes(32).toString('hex');
     let authUrl;
 
     if (isDev) {
-        authUrl = `http://localhost:5173/auth.html?nonce=${nonce}`;
+        authUrl = `http://localhost:5173/auth.html?nonce=${pendingAuthNonce}`;
     } else {
         // In production, serve from local server to support MetaMask
-        authUrl = `http://127.0.0.1:${AUTH_PORT}/auth.html?nonce=${nonce}`;
+        authUrl = `http://127.0.0.1:${AUTH_PORT}/auth.html?nonce=${pendingAuthNonce}`;
     }
 
     shell.openExternal(authUrl);

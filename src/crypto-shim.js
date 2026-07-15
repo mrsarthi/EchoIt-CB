@@ -153,20 +153,10 @@ function createHmac(algorithm, key) {
   };
 }
 
-// 9. scryptSync
+// 9. scryptSync (Deprecated)
 function scryptSync(passphrase, salt, keylen) {
-  const passStr = Buffer.isBuffer(passphrase) ? passphrase.toString() : passphrase;
-  const saltStr = Buffer.isBuffer(salt) ? salt.toString('hex') : Buffer.from(salt).toString('hex');
-  
-  // Use node-forge pbkdf2 as backup derivation function with OWASP-compliant iterations
-  const derivedBytes = forge.pkcs5.pbkdf2(
-    passStr,
-    forge.util.hexToBytes(saltStr),
-    600000, // iterations
-    keylen,
-    'sha256'
-  );
-  return Buffer.from(derivedBytes, 'binary');
+  console.warn("[Crypto Shim] scryptSync is deprecated and will be removed in a future release. Calling pbkdf2Sync instead.");
+  return pbkdf2Sync(passphrase, salt, 600000, keylen, 'sha256');
 }
 
 // 9b. pbkdf2Sync
@@ -275,12 +265,12 @@ function createDecipheriv(algorithm, key, iv) {
   };
 }
 
-async function scryptAsync(passphrase, salt, keylen) {
+async function pbkdf2Async(password, salt, iterations, keylen, digest) {
   if (typeof window !== 'undefined' && window.crypto?.subtle) {
     const encoder = new TextEncoder();
     const passwordKey = await window.crypto.subtle.importKey(
       'raw',
-      encoder.encode(passphrase),
+      encoder.encode(password),
       { name: 'PBKDF2' },
       false,
       ['deriveBits']
@@ -290,15 +280,20 @@ async function scryptAsync(passphrase, salt, keylen) {
       {
         name: 'PBKDF2',
         salt: saltBytes,
-        iterations: 600000,
-        hash: 'SHA-256'
+        iterations: iterations,
+        hash: digest === 'sha256' ? 'SHA-256' : 'SHA-1'
       },
       passwordKey,
       keylen * 8
     );
     return Buffer.from(derivedBits);
   }
-  return scryptSync(passphrase, salt, keylen);
+  return pbkdf2Sync(password, salt, iterations, keylen, digest);
+}
+
+async function scryptAsync(passphrase, salt, keylen) {
+  console.warn("[Crypto Shim] scryptAsync is deprecated and will be removed in a future release. Calling pbkdf2Async instead.");
+  return pbkdf2Async(passphrase, salt, 600000, keylen, 'sha256');
 }
 
 // 11. sign
@@ -332,6 +327,7 @@ const _exports = {
   createCipheriv,
   createDecipheriv,
   pbkdf2Sync,
+  pbkdf2Async,
   sign,
   verify
 };
@@ -350,6 +346,7 @@ export {
   createCipheriv,
   createDecipheriv,
   pbkdf2Sync,
+  pbkdf2Async,
   sign,
   verify
 };
