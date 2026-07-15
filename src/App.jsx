@@ -101,6 +101,45 @@ const getMetaMaskLink = () => {
   return 'https://metamask.app.link/dapp/decentrachat-singnalling.onrender.com';
 };
 
+const compressProfilePicture = (file, maxWidth = 200, maxHeight = 200, quality = 0.7) => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > maxWidth) {
+            height = Math.round((height * maxWidth) / width);
+            width = maxWidth;
+          }
+        } else {
+          if (height > maxHeight) {
+            width = Math.round((width * maxHeight) / height);
+            height = maxHeight;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        resolve(dataUrl);
+      };
+      img.onerror = (err) => reject(err);
+      img.src = event.target.result;
+    };
+    reader.onerror = (err) => reject(err);
+    reader.readAsDataURL(file);
+  });
+};
+
 function App() {
   const {
     wallet,
@@ -428,6 +467,8 @@ function App() {
   const [editBio, setEditBio] = useState('');
   const [editPfp, setEditPfp] = useState(null);
   const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [viewPfpUrl, setViewPfpUrl] = useState(null);
+  const [viewPfpTitle, setViewPfpTitle] = useState('');
 
   // Emoji & Media States
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -1890,7 +1931,17 @@ function App() {
           </div>
           <div className="profile-card" style={{ marginTop: '8px', cursor: 'pointer' }} onClick={() => setShowProfileModal(true)}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <div className="avatar-container" style={{ width: '32px', height: '32px', fontSize: '12px', overflow: 'hidden' }}>
+              <div 
+                className="avatar-container" 
+                style={{ width: '32px', height: '32px', fontSize: '12px', overflow: 'hidden', cursor: sanitizePfpUrl(pfp) ? 'zoom-in' : 'default' }}
+                onClick={(e) => {
+                  if (sanitizePfpUrl(pfp)) {
+                    e.stopPropagation();
+                    setViewPfpUrl(pfp);
+                    setViewPfpTitle(username);
+                  }
+                }}
+              >
                 {sanitizePfpUrl(pfp) ? (
                   <img src={sanitizePfpUrl(pfp)} alt="Profile" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                 ) : (
@@ -2022,7 +2073,17 @@ function App() {
                     style={isMobile ? { borderBottom: '1px solid rgba(255,255,255,0.02)', borderRadius: 0 } : {}}
                   >
                     <div style={{ position: 'relative' }}>
-                      <div className={`avatar-container ${conv.is_group ? 'group' : ''}`} style={{ overflow: 'hidden' }}>
+                      <div 
+                        className={`avatar-container ${conv.is_group ? 'group' : ''}`} 
+                        style={{ overflow: 'hidden', cursor: (!conv.is_group && sanitizePfpUrl(contact?.pfp)) ? 'zoom-in' : 'default' }}
+                        onClick={(e) => {
+                          if (!conv.is_group && sanitizePfpUrl(contact?.pfp)) {
+                            e.stopPropagation();
+                            setViewPfpUrl(contact.pfp);
+                            setViewPfpTitle(contact.username);
+                          }
+                        }}
+                      >
                         {conv.is_group 
                           ? 'G' 
                           : (() => {
@@ -2285,7 +2346,17 @@ function App() {
                     }
                   }}
                 >
-                  <div className="avatar-container" style={{ overflow: 'hidden' }}>
+                  <div 
+                    className="avatar-container" 
+                    style={{ overflow: 'hidden', cursor: sanitizePfpUrl(contact.pfp) ? 'zoom-in' : 'default' }}
+                    onClick={(e) => {
+                      if (sanitizePfpUrl(contact.pfp)) {
+                        e.stopPropagation();
+                        setViewPfpUrl(contact.pfp);
+                        setViewPfpTitle(contact.username);
+                      }
+                    }}
+                  >
                     {sanitizePfpUrl(contact.pfp) ? (
                       <img src={sanitizePfpUrl(contact.pfp)} alt="Contact Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                     ) : (
@@ -2350,7 +2421,33 @@ function App() {
                       <span className="material-symbols-outlined">arrow_back</span>
                     </button>
                     <div style={{ position: 'relative' }}>
-                      <div className={`avatar-container ${isGroupActive ? 'group' : ''}`} style={{ width: '40px', height: '40px', overflow: 'hidden' }}>
+                      <div 
+                        className={`avatar-container ${isGroupActive ? 'group' : ''}`} 
+                        style={{ 
+                          width: '40px', 
+                          height: '40px', 
+                          overflow: 'hidden', 
+                          cursor: (() => {
+                            if (isGroupActive) return 'default';
+                            const contact = getCombinedContacts().find(item => 
+                              item.address.toLowerCase() === activeChat.id.toLowerCase() ||
+                              item.username.toLowerCase() === activeChat.id.toLowerCase()
+                            );
+                            return sanitizePfpUrl(contact?.pfp) ? 'zoom-in' : 'default';
+                          })()
+                        }}
+                        onClick={() => {
+                          if (isGroupActive) return;
+                          const contact = getCombinedContacts().find(item => 
+                            item.address.toLowerCase() === activeChat.id.toLowerCase() ||
+                            item.username.toLowerCase() === activeChat.id.toLowerCase()
+                          );
+                          if (sanitizePfpUrl(contact?.pfp)) {
+                            setViewPfpUrl(contact.pfp);
+                            setViewPfpTitle(contact.username);
+                          }
+                        }}
+                      >
                         {isGroupActive 
                           ? 'G' 
                           : (() => {
@@ -2359,7 +2456,7 @@ function App() {
                                 item.username.toLowerCase() === activeChat.id.toLowerCase()
                               );
                               if (sanitizePfpUrl(contact?.pfp)) {
-                                return <img src={sanitizePfpUrl(contact.pfp)} alt="Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />;
+                                  return <img src={sanitizePfpUrl(contact.pfp)} alt="Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />;
                               }
                               const name = contact ? contact.username : activeChat.username;
                               return name.substring(0, 2).toUpperCase();
@@ -2424,21 +2521,45 @@ function App() {
                     <button type="button" className="back-btn" onClick={() => setActiveConversationId(null)}>
                       ←
                     </button>
-                    <div className={`avatar-container ${isGroupActive ? 'group' : ''}`} style={{ overflow: 'hidden' }}>
-                      {isGroupActive 
-                        ? 'G' 
-                        : (() => {
+                    <div 
+                        className={`avatar-container ${isGroupActive ? 'group' : ''}`} 
+                        style={{ 
+                          overflow: 'hidden', 
+                          cursor: (() => {
+                            if (isGroupActive) return 'default';
                             const contact = getCombinedContacts().find(item => 
                               item.address.toLowerCase() === activeChat.id.toLowerCase() ||
                               item.username.toLowerCase() === activeChat.id.toLowerCase()
                             );
-                            if (sanitizePfpUrl(contact?.pfp)) {
-                              return <img src={sanitizePfpUrl(contact.pfp)} alt="Contact Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />;
-                            }
-                            const name = contact ? contact.username : activeChat.username;
-                            return name.substring(0, 2).toUpperCase();
+                            return sanitizePfpUrl(contact?.pfp) ? 'zoom-in' : 'default';
                           })()
-                      }
+                        }}
+                        onClick={() => {
+                          if (isGroupActive) return;
+                          const contact = getCombinedContacts().find(item => 
+                            item.address.toLowerCase() === activeChat.id.toLowerCase() ||
+                            item.username.toLowerCase() === activeChat.id.toLowerCase()
+                          );
+                          if (sanitizePfpUrl(contact?.pfp)) {
+                            setViewPfpUrl(contact.pfp);
+                            setViewPfpTitle(contact.username);
+                          }
+                        }}
+                      >
+                        {isGroupActive 
+                          ? 'G' 
+                          : (() => {
+                              const contact = getCombinedContacts().find(item => 
+                                item.address.toLowerCase() === activeChat.id.toLowerCase() ||
+                                item.username.toLowerCase() === activeChat.id.toLowerCase()
+                              );
+                              if (sanitizePfpUrl(contact?.pfp)) {
+                                return <img src={sanitizePfpUrl(contact.pfp)} alt="Contact Avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />;
+                              }
+                              const name = contact ? contact.username : activeChat.username;
+                              return name.substring(0, 2).toUpperCase();
+                            })()
+                        }
                     </div>
                     <div>
                       <div className="chat-header-title">
@@ -4916,14 +5037,26 @@ function App() {
             {!isMobile && <div className="modal-header">Edit Profile Hub</div>}
             
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: '20px', gap: '8px' }}>
-              <div className="avatar-container" style={{ width: '96px', height: '96px', fontSize: '32px', position: 'relative', overflow: 'hidden', cursor: 'pointer', border: '3px solid var(--accent-indigo)', borderRadius: '50%' }} onClick={() => document.getElementById('profile-pfp-input').click()}>
+              <div className="avatar-container profile-edit-avatar" style={{ width: '96px', height: '96px', fontSize: '32px', position: 'relative', overflow: 'hidden', border: '3px solid var(--accent-indigo)', borderRadius: '50%' }}>
                 {sanitizePfpUrl(editPfp) ? (
-                  <img src={sanitizePfpUrl(editPfp)} alt="Profile" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  <img 
+                    src={sanitizePfpUrl(editPfp)} 
+                    alt="Profile" 
+                    style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'zoom-in' }} 
+                    onClick={() => {
+                      setViewPfpUrl(editPfp);
+                      setViewPfpTitle(editUsername);
+                    }}
+                  />
                 ) : (
                   editUsername.substring(0, 2).toUpperCase()
                 )}
-                <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', opacity: 0, transition: 'opacity 0.2s' }} className="avatar-hover">
-                  <span className="material-symbols-outlined" style={{ fontSize: '24px' }}>photo_camera</span>
+                <div 
+                  style={{ position: 'absolute', bottom: 0, left: 0, right: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', height: '28px', cursor: 'pointer', transition: 'background 0.2s' }} 
+                  onClick={() => document.getElementById('profile-pfp-input').click()}
+                  title="Upload new photo"
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>photo_camera</span>
                 </div>
               </div>
               <input
@@ -4931,22 +5064,21 @@ function App() {
                 id="profile-pfp-input"
                 style={{ display: 'none' }}
                 accept="image/*"
-                onChange={(e) => {
+                onChange={async (e) => {
                   const file = e.target.files?.[0];
                   if (!file) return;
-                  if (file.size > 150 * 1024) {
-                    alert("Profile picture must be under 150KB. Please choose a smaller image.");
-                    e.target.value = '';
-                    return;
+                  try {
+                    // Compress file client-side to 200x200 max, JPEG quality 0.7
+                    const compressed = await compressProfilePicture(file, 200, 200, 0.7);
+                    setEditPfp(compressed);
+                  } catch (err) {
+                    console.error("Compression error:", err.message);
+                    alert("Failed to process image. Please try another one.");
                   }
-                  const reader = new FileReader();
-                  reader.onloadend = () => {
-                    setEditPfp(reader.result);
-                  };
-                  reader.readAsDataURL(file);
+                  e.target.value = '';
                 }}
               />
-              <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Click avatar to upload photo</span>
+              <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Click photo to view fullscreen • Camera icon to change</span>
             </div>
 
             <div className="glass-card" style={{ padding: '16px', borderRadius: '16px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -5141,6 +5273,38 @@ function App() {
                 Computing PBKDF2-SHA256 (600,000 iterations). This will take a moment.
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Profile Picture Fullscreen Lightbox Modal */}
+      {viewPfpUrl && (
+        <div 
+          className="modal-overlay" 
+          style={{ zIndex: 9999, backgroundColor: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(8px)' }} 
+          onClick={() => setViewPfpUrl(null)}
+        >
+          <div 
+            style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px', maxWidth: '90vw' }} 
+            onClick={e => e.stopPropagation()}
+          >
+            <button 
+              type="button"
+              style={{ position: 'absolute', top: '-48px', right: 0, background: 'none', border: 'none', color: 'white', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '4px' }}
+              onClick={() => setViewPfpUrl(null)}
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: '32px' }}>close</span>
+            </button>
+            <img 
+              src={viewPfpUrl} 
+              alt="Profile picture" 
+              style={{ maxWidth: 'min(400px, 85vw)', maxHeight: 'min(400px, 75vh)', borderRadius: '16px', boxShadow: '0 8px 32px rgba(0,0,0,0.5)', objectFit: 'cover', border: '2px solid rgba(255,255,255,0.2)' }} 
+            />
+            {viewPfpTitle && (
+              <div style={{ color: 'white', fontWeight: 'bold', fontSize: '18px', textShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>
+                @{viewPfpTitle}
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -499,7 +499,8 @@ class DecentraChatClient extends EventEmitter {
     this.socket = io(this.serverUrl, {
       auth: {
         token,
-        address: this.address
+        address: this.address,
+        protocolVersion: 1
       }
     });
 
@@ -575,8 +576,9 @@ class DecentraChatClient extends EventEmitter {
       this.socket.on('message', async (payload) => {
         try {
           const decrypted = await this.decryptAndStoreMessage(payload);
+          const messageId = payload.protocolVersion === 1 ? payload.messageId : payload.id;
           // Acknowledge receipt to purge message from the relay
-          this.socket.emit('messageAck', { messageIds: [payload.id] }, (ack) => {
+          this.socket.emit('messageAck', { messageIds: [messageId] }, (ack) => {
             if (!ack.success) console.error("[SDK] Failed to send message ACK to server.");
           });
           this.emit('message', decrypted);
@@ -625,6 +627,45 @@ class DecentraChatClient extends EventEmitter {
         const { conversationId, counter, requestedBy } = data;
         console.log(`[SDK] Received getMissingMessage request from ${requestedBy} for counter ${counter} in ${conversationId}`);
         
+        const requesterLower = requestedBy.toLowerCase();
+
+        // Remediate U-6: Check conversation authorization
+        const conv = await this.db.read(db => {
+          return db.prepare('SELECT is_group FROM conversations WHERE id = ?').get(conversationId);
+        });
+
+        if (!conv) {
+          console.warn(`[SDK] getMissingMessage requested for unknown conversation: ${conversationId}`);
+          return;
+        }
+
+        if (Number(conv.is_group) === 1) {
+          // Verify requester is in the group members list
+          const grp = await this.db.read(db => {
+            return db.prepare('SELECT members FROM groups WHERE id = ?').get(conversationId);
+          });
+          if (!grp) {
+            console.warn(`[SDK] Group metadata missing for conversation: ${conversationId}`);
+            return;
+          }
+          try {
+            const members = JSON.parse(grp.members).map(m => m.toLowerCase());
+            if (!members.includes(requesterLower)) {
+              console.warn(`[SDK] Unauthorized missing message request: ${requestedBy} is not a member of group ${conversationId}`);
+              return;
+            }
+          } catch (e) {
+            console.error("[SDK] Failed to parse group members:", e);
+            return;
+          }
+        } else {
+          // For direct messaging: conversationId is the peer's address. Only the peer can request.
+          if (conversationId.toLowerCase() !== requesterLower) {
+            console.warn(`[SDK] Unauthorized missing message request: ${requestedBy} requested DM messages from ${conversationId}`);
+            return;
+          }
+        }
+
         const msg = await this.db.read(db => {
           return db.prepare(`
             SELECT * FROM messages 
@@ -775,10 +816,11 @@ class DecentraChatClient extends EventEmitter {
         for (const payload of queue) {
           try {
             const decrypted = await this.decryptAndStoreMessage(payload);
-            acknowledgedIds.push(payload.id);
+            acknowledgedIds.push(payload.protocolVersion === 1 ? payload.messageId : payload.id);
             this.emit('message', decrypted);
           } catch (err) {
-            console.error(`[SDK] Error processing offline message ${payload.id}:`, err.message);
+            const messageId = payload.protocolVersion === 1 ? payload.messageId : payload.id;
+            console.error(`[SDK] Error processing offline message ${messageId}:`, err.message);
           }
         }
 
@@ -799,9 +841,31 @@ class DecentraChatClient extends EventEmitter {
   }
 
   // Decrypts message envelope and stores plaintext in the local SQLite database
-  async decryptAndStoreMessage(payload) {
-    if (payload && payload.timestamp !== undefined) {
-      payload.timestamp = Number(payload.timestamp);
+  async decryptAndStoreMessage(rawPayload) {
+    let payload;
+    if (rawPayload && rawPayload.protocolVersion === 1) {
+      payload = {
+        id: rawPayload.messageId,
+        timestamp: rawPayload.createdAt !== undefined ? Number(rawPayload.createdAt) : undefined,
+        from: rawPayload.senderAddress,
+        ciphertext: rawPayload.body.ciphertext,
+        iv: rawPayload.body.iv,
+        dhPublic: rawPayload.body.dhPublic,
+        sequenceNumber: rawPayload.body.sequenceNumber,
+        x3dhInfo: rawPayload.body.x3dhInfo,
+        groupId: rawPayload.groupId,
+        vectorClock: rawPayload.body.vectorClock,
+        senderCounter: rawPayload.body.senderCounter,
+        senderUsername: rawPayload.senderUsername,
+        senderHideWallet: rawPayload.senderHideWallet,
+        senderBio: rawPayload.senderBio,
+        senderPfp: rawPayload.senderPfp
+      };
+    } else {
+      payload = { ...rawPayload };
+      if (payload && payload.timestamp !== undefined) {
+        payload.timestamp = Number(payload.timestamp);
+      }
     }
     // 1. Message ID duplicate replay check
     const exists = await this.db.read((db) => {
@@ -1619,19 +1683,27 @@ class DecentraChatClient extends EventEmitter {
 
     // Transmit to relay server in background
     if (this.socket && this.socket.connected) {
-      this.socket.emit('sendMessage', {
-        id: messageId,
-        to: toAddress,
-        ciphertext: encResult.ciphertext,
-        iv: encResult.iv,
-        dhPublic: encResult.dhPublic,
-        sequenceNumber: encResult.sequenceNumber,
-        timestamp,
-        x3dhInfo,
+      const envelope = {
+        protocolVersion: 1,
+        messageId,
+        messageType: isProtocolMessage ? 'control' : 'chat',
+        conversationId: toAddress,
+        senderAddress: this.address,
+        recipientAddress: toAddress,
         groupId: null,
-        vectorClock,
-        senderCounter
-      }, async (res) => {
+        createdAt: timestamp,
+        body: {
+          ciphertext: encResult.ciphertext,
+          iv: encResult.iv,
+          dhPublic: encResult.dhPublic,
+          sequenceNumber: encResult.sequenceNumber,
+          x3dhInfo,
+          vectorClock,
+          senderCounter
+        }
+      };
+
+      this.socket.emit('sendMessage', envelope, async (res) => {
         if (res.success) {
           const finalStatus = res.delivered ? 'delivered' : 'sent';
           if (!isProtocolMessage) {
@@ -1727,6 +1799,97 @@ class DecentraChatClient extends EventEmitter {
     })();
 
     return { groupId };
+  }
+
+  // Rotates the group key (generating a new symmetric key) and distributes it to all current members
+  async rotateGroupKey(groupId) {
+    const group = await this.db.read((db) => {
+      return db.prepare('SELECT * FROM groups WHERE id = ?').get(groupId);
+    });
+    if (!group) throw new Error("Group not found in local database.");
+
+    const newGroupKey = crypto.randomBytes(32).toString('hex');
+    const members = JSON.parse(group.members);
+
+    console.log(`[SDK] Rotating group key for ${group.name} (${groupId})...`);
+
+    // Update local database with the new key
+    await this.db.write((db) => {
+      db.prepare('UPDATE groups SET group_key = ? WHERE id = ?').run(newGroupKey, groupId);
+    });
+
+    // Distribute the new key payload via 1-to-1 ratchets to all OTHER current members
+    const distributionPayload = `__GROUP_KEY__:${JSON.stringify({
+      groupId,
+      groupKey: newGroupKey,
+      name: group.name,
+      members
+    })}`;
+
+    (async () => {
+      for (const member of members) {
+        if (member.toLowerCase() !== this.address.toLowerCase()) {
+          try {
+            await this.sendMessage(member, distributionPayload);
+          } catch (err) {
+            console.error(`[SDK rotateGroupKey] Failed to send updated key to ${member}:`, err.message);
+          }
+        }
+      }
+      console.log(`[SDK] Group key rotation completed for group ${group.name}.`);
+    })();
+
+    return { success: true };
+  }
+
+  // Adds a member to the group and triggers key rotation
+  async addGroupMember(groupId, newMemberAddress) {
+    const group = await this.db.read((db) => {
+      return db.prepare('SELECT * FROM groups WHERE id = ?').get(groupId);
+    });
+    if (!group) throw new Error("Group not found in local database.");
+
+    const members = JSON.parse(group.members).map(m => m.toLowerCase());
+    const lowerNewMember = newMemberAddress.toLowerCase();
+
+    if (members.includes(lowerNewMember)) {
+      throw new Error("User is already a member of this group.");
+    }
+
+    const updatedMembers = [...members, lowerNewMember];
+
+    // Save the updated members list locally
+    await this.db.write((db) => {
+      db.prepare('UPDATE groups SET members = ? WHERE id = ?').run(JSON.stringify(updatedMembers), groupId);
+    });
+
+    // Trigger key rotation (distributes new key to everyone including the new member)
+    return this.rotateGroupKey(groupId);
+  }
+
+  // Removes a member from the group and triggers key rotation
+  async removeGroupMember(groupId, removedMemberAddress) {
+    const group = await this.db.read((db) => {
+      return db.prepare('SELECT * FROM groups WHERE id = ?').get(groupId);
+    });
+    if (!group) throw new Error("Group not found in local database.");
+
+    const members = JSON.parse(group.members).map(m => m.toLowerCase());
+    const lowerRemovedMember = removedMemberAddress.toLowerCase();
+
+    if (!members.includes(lowerRemovedMember)) {
+      throw new Error("User is not a member of this group.");
+    }
+
+    const updatedMembers = members.filter(m => m !== lowerRemovedMember);
+
+    // Save the updated members list locally
+    await this.db.write((db) => {
+      db.prepare('UPDATE groups SET members = ? WHERE id = ?').run(JSON.stringify(updatedMembers), groupId);
+    });
+
+    // Trigger key rotation (this distributes the new key to the remaining members, locking the removed user out)
+    return this.rotateGroupKey(groupId);
   }
 
   // Encrypts and sends a group message using client-side multicast
@@ -1830,16 +1993,27 @@ class DecentraChatClient extends EventEmitter {
         if (!this.connected || !this.socket) continue;
 
         promises.push(new Promise((resolve, reject) => {
-          this.socket.emit('sendMessage', {
-            id: crypto.randomUUID(), // Unique id per outbox packet
-            to: member,
-            ciphertext,
-            iv,
-            dhPublic: 'group',
-            sequenceNumber: 0,
-            timestamp,
-            groupId
-          }, (res) => {
+          const envelope = {
+            protocolVersion: 1,
+            messageId: crypto.randomUUID(), // Unique id per outbox packet
+            messageType: 'group_message',
+            conversationId: groupId,
+            senderAddress: this.address,
+            recipientAddress: member,
+            groupId,
+            createdAt: timestamp,
+            body: {
+              ciphertext,
+              iv,
+              dhPublic: 'group',
+              sequenceNumber: 0,
+              x3dhInfo: null,
+              vectorClock: null,
+              senderCounter: 0
+            }
+          };
+
+          this.socket.emit('sendMessage', envelope, (res) => {
             if (res.success) resolve(res);
             else reject(new Error(res.error));
           });
@@ -1885,14 +2059,26 @@ class DecentraChatClient extends EventEmitter {
     }
   }
 
-  // Derive a backup key from passphrase using scrypt
+  // Derive a backup key from passphrase using PBKDF2
   async deriveBackupKeyAsync(passphrase, salt) {
     const saltBuf = salt ? Buffer.from(salt, 'hex') : crypto.randomBytes(16);
     let key;
-    if (crypto.scryptAsync) {
-      key = await crypto.scryptAsync(passphrase, saltBuf, 32);
+    const iterations = 600000;
+    const keylen = 32;
+    const digest = 'sha256';
+
+    if (crypto.pbkdf2Async) {
+      key = await crypto.pbkdf2Async(passphrase, saltBuf, iterations, keylen, digest);
+    } else if (crypto.pbkdf2Sync) {
+      key = crypto.pbkdf2Sync(passphrase, saltBuf, iterations, keylen, digest);
     } else {
-      key = crypto.scryptSync(passphrase, saltBuf, 32);
+      // Node native fallback (asynchronous)
+      key = await new Promise((resolve, reject) => {
+        crypto.pbkdf2(passphrase, saltBuf, iterations, keylen, digest, (err, derivedKey) => {
+          if (err) reject(err);
+          else resolve(derivedKey);
+        });
+      });
     }
     return {
       key,
@@ -1944,10 +2130,23 @@ class DecentraChatClient extends EventEmitter {
     const { salt, iv, ciphertext } = JSON.parse(backupJSON);
     
     let key;
-    if (crypto.scryptAsync) {
-      key = await crypto.scryptAsync(passphrase, Buffer.from(salt, 'hex'), 32);
+    const saltBuf = Buffer.from(salt, 'hex');
+    const iterations = 600000;
+    const keylen = 32;
+    const digest = 'sha256';
+
+    if (crypto.pbkdf2Async) {
+      key = await crypto.pbkdf2Async(passphrase, saltBuf, iterations, keylen, digest);
+    } else if (crypto.pbkdf2Sync) {
+      key = crypto.pbkdf2Sync(passphrase, saltBuf, iterations, keylen, digest);
     } else {
-      key = crypto.scryptSync(passphrase, Buffer.from(salt, 'hex'), 32);
+      // Node native fallback (asynchronous)
+      key = await new Promise((resolve, reject) => {
+        crypto.pbkdf2(passphrase, saltBuf, iterations, keylen, digest, (err, derivedKey) => {
+          if (err) reject(err);
+          else resolve(derivedKey);
+        });
+      });
     }
     const combined = Buffer.from(ciphertext, 'base64');
 
