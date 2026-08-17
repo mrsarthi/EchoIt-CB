@@ -1,145 +1,68 @@
-# GunDB local storage (do not commit)
-radata/
-*.tmp
-radata-*.tmp
+# Dependency directories
+node_modules/
+.pnp
+.pnp.js
 
-# Test & Local Utility Scripts
-check-relays.js
-relay-server.js
-test-connection.js
-build-android-ota.js
-server/test_*.js
-
-# Electron build output
-release/
-electron/dist/
-
-# Android build output (native project is tracked, but build artifacts aren't)
-android/app/build/
-android/.gradle/
-android/capacitor-cordova-android-plugins/build/
-
-# Logs
-logs
+# Testing and debugging
+test-results/
+coverage/
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
+# Environment and Secrets (CRITICAL: Never commit keys or secrets)
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.secret
+
+# Signing material (CRITICAL: a leaked keystore cannot be revoked —
+# it lets anyone ship an update that impersonates the real app)
+*.jks
+*.keystore
+keystore.properties
+*.p12
+*.mobileprovision
+
+# Encrypted and plain local databases (CRITICAL: Enforce no disk leakage)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Build outputs & caches
+dist/
+.agents/
+dist-ssr/
+build/
+.next/
+.cache/
+.tauri/
+.expo/
+*.tsbuildinfo
 *.local
 
-# Editor directories and files
+# Rust / Tauri build output
+src-tauri/target/
+src-tauri/gen/
+
+# Staged binaries for hardware testing — 40 MB each, rebuilt on demand
+dist-laptop2/
+
+# Editor directories
 .vscode/*
 !.vscode/extensions.json
-.idea
-.DS_Store
+.idea/
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
 
-# Local Config & Secrets
-.env
-.env.*
-.npmrc
-
-# Local Build Scripts
-build-dist.js
-
-# Future Release Automation
-.github/workflows/release.yml
-
-# OS Generated Files
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
+# OS Metadata
+.DS_Store
 Thumbs.db
-
-# Android Signing Keys (Secrets)
-*.jks
-*.keystore
-
-# Firebase Push Notification Secrets
-server/serviceAccountKey.json
-android/app/google-services.json
-
-# Linter Caches
-.eslintcache
-.stylelintcache
-
-# Project Documentation & Agent Context
-Architecture.md
-Technical_Architecture.md
-.agents/
-
-# Server Databases & Loose Output Logs
-server/*.db
-server/*.sqlite
-*.db
-*.sqlite
-build_error*.*
-*.txt
-server/*.json
-!server/package.json
-!server/package-lock.json
-screenshot.js
-screenshot*.png
-
-# Duplicate/Separate Standalone Codebases
-media-relay-server/
-
-# SQLite Temp Files
-*.db-journal
-*.db-shm
-*.db-wal
-
-# Vite Config Temp Files
-vite.config.js.timestamp-*
-vite.config.ts.timestamp-*
-
-# Coverage Directory
-coverage/
-.nyc_output/
-
-# Playwright Test Output
-playwright-report/
-test-results/
-blob-report/
-
-# Local Test Scripts
-test_*.js
-*_test.js
-test-*.js
-e2e-*.mjs
-
-# Stitch MCP Exports
-stitch_*/
-
-# Landing Page (separate project)
-landing-page/
-
-# Temporary Git Dumps
-gitdiff.txt
-gitlog.txt
-
-# Privacy Policy Points
-privacy_policy_points.txt
-
-# Generated WASM Binaries
-public/*.wasm
-
-# Local Database Wipe Utility
-server/wipe_db.js
-
-# Playwright Tests & Config
-tests/
-playwright.config.js
-

@@ -1,103 +1,30 @@
-# Echo Developer Guide
+# EchoIt
 
-This guide provides technical instructions for setting up, running, and building the Echo signalling server, web client, desktop application, and mobile application.
+> **"Your messages stay on your phone. We can't read them. We don't want to."**
 
----
+EchoIt is a local-first, end-to-end encrypted messaging app designed as a privacy-respecting WhatsApp alternative for everyday users. Conversations live entirely on the device—no servers hold message history or metadata.
 
-## Prerequisites
-Ensure the following tools are installed on your machine:
-*   [Node.js](https://nodejs.org/) (v18.x or higher)
-*   [npm](https://www.npmjs.com/) (v9.x or higher)
-*   [PostgreSQL](https://www.postgresql.org/) (running locally or hosted database)
-*   [Android Studio & Android SDK](https://developer.android.com/studio) (required only for mobile builds)
+Built on the [Dicsussion protocol](https://github.com/mrsarthi/DicsussionProtocol) SDK, consumed from npm as [`@dicsussion/sdk`](https://www.npmjs.com/package/@dicsussion/sdk) (Apache-2.0). The protocol is developed separately and used here unmodified.
 
 ---
 
-## Environment Configuration
+## Documentation & Standing Rules
 
-### 1. Backend Signalling Server (`server/.env`)
-Create a `.env` file inside the `server/` directory:
-```env
-PORT=3009
-DATABASE_URL=postgresql://username:password@localhost:5432/echo_db
-ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,capacitor://localhost,decentrachat://app,decentrachat://
-```
-*(Note: `decentrachat://` is the internal custom protocol scheme used by the Electron packaging system).*
+Before contributing to or altering this project, you **must** read and abide by the standing rules in `.agents/`:
 
-### 2. Frontend Client (`.env`)
-Create a `.env` file in the root directory:
-```env
-VITE_RELAY_URL=http://localhost:3009
-```
+1. **[`.agents/AGENT_INSTRUCTIONS.md`](./.agents/AGENT_INSTRUCTIONS.md)**: The source of truth for architectural constraints, coding conventions, privacy requirements, and how to work within this repository.
+2. **[`.agents/PROGRESS.md`](./.agents/PROGRESS.md)**: The durable memory of the project. Current status, decisions and their reasoning, findings, and upstream requests.
+3. **[`.agents/IMPLEMENTATION_PLAN.md`](./.agents/IMPLEMENTATION_PLAN.md)**: The phased route from here to beta, with exit criteria per milestone and the open questions blocking progress.
+4. **[`.agents/ECHOIT_MASTER_PROMPT.md`](./.agents/ECHOIT_MASTER_PROMPT.md)**: The core product and technical specification defining scope and vision.
 
 ---
 
-## Running the Signalling Server
-The signalling server handles username routing, key bundle delivery, offline queues, and presence synchronization.
+## Current Status
 
-1. Navigate to the server folder:
-   ```bash
-   cd server
-   ```
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Run database migrations:
-   ```bash
-   npm run migrate
-   ```
-4. Start the server in development mode (nodemon hot-reloading):
-   ```bash
-   npm run dev
-   ```
-   *The server will start listening on port `3009`.*
+**Runtime decided: Tauri v2**, targeting Android, iOS, and desktop. Iroh compiles as an ordinary Rust dependency there, which is the only route that keeps iOS open — `@number0/iroh` publishes no iOS binary, so any approach running Node inside the app reaches Android but never iOS. The reasoning and rejected alternatives are recorded as decision D1 in `PROGRESS.md`.
 
----
+No application code exists yet, by design. The master prompt sets a hard gate: **no UI until one encrypted message has crossed between two real devices.** The spike that clears it runs in four stages (S0–S3), the first of which is testable on a desktop today.
 
-## Running the Web Client
-The web client runs inside standard modern browsers.
+Currently blocked on one upstream change — the SDK hardcodes its SQLite storage driver, so the browser-compatible `IndexedDbDriver` cannot be selected from a webview. Tracked as **SDK-1** in [`.agents/PROGRESS.md`](./.agents/PROGRESS.md).
 
-1. Navigate to the root directory:
-   ```bash
-   cd ..
-   ```
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Start the Vite development server:
-   ```bash
-   npm run dev
-   ```
-   *Open [http://localhost:5173](http://localhost:5173) in your browser.*
-
----
-
-## Running & Building the Desktop App (Electron)
-The desktop application is built with Electron.
-
-*   **Run Desktop App in Development Mode**:
-    ```bash
-    npm run electron:dev
-    ```
-*   **Build Production Installer (Windows/Mac/Linux)**:
-    ```bash
-    npm run electron:build
-    ```
-    *The built binaries and installer setup executables will be output to the `release/` directory.*
-
----
-
-## Building the Mobile App (Capacitor Android)
-The mobile app compiles using Capacitor.
-
-1. Build the production web bundle and sync assets:
-   ```bash
-   npm run android:build
-   ```
-2. Open the project in Android Studio to build and run the APK:
-   ```bash
-   npm run cap:open
-   ```
-   *From Android Studio, click **Run** to deploy to a connected device or emulator.*
+iOS is deferred until a Mac is available to build and sign. It is not abandoned; the runtime was chosen specifically so that adding it later is a build exercise rather than a rewrite.

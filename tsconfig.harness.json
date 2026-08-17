@@ -1,0 +1,22 @@
+{
+  // The harness is Node code; src/ is webview code. They need different libs
+  // and different globals, so they get separate programs rather than one
+  // merged `include` — which would let DOM types leak into Node code and
+  // `node:` types leak into the app.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["harness"]
+}

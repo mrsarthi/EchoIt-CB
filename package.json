@@ -1,139 +1,41 @@
 {
-  "name": "decentrachat",
+  "name": "echoit",
   "private": true,
-  "version": "4.2.0",
-  "description": "Decentralized end-to-end encrypted messaging app with blockchain identity",
-  "author": "DecentraChat",
-  "main": "electron/main.js",
+  "version": "0.1.0",
+  "description": "Local-first, end-to-end encrypted messaging. Your messages stay on your phone.",
+  "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "lint": "eslint .",
-    "test": "vitest run",
+    "build": "tsc && vite build",
     "preview": "vite preview",
-    "electron": "electron .",
-    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "electron:build": "node build-dist.js",
-    "electron:pack": "electron-builder --dir",
-    "dist": "node build-dist.js",
-    "cap:sync": "node -e \"process.argv=['node','capacitor','sync','android'];require('@capacitor/cli/bin/capacitor')\"",
-    "cap:open": "node -e \"process.argv=['node','capacitor','open','android'];require('@capacitor/cli/bin/capacitor')\"",
-    "cap:run": "node -e \"process.argv=['node','capacitor','run','android','-l'];require('@capacitor/cli/bin/capacitor')\"",
-    "android:build": "npm run build; npm run cap:sync",
-    "android:release": "node build-android-ota.js"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/mrsarthi/Dicsussion-app.git"
-  },
-  "build": {
-    "appId": "com.decentrachat.app",
-    "productName": "DecentraChat",
-    "asar": true,
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "dist/**/*",
-      "electron/**/*",
-      "package.json",
-      "node_modules/**/*"
-    ],
-    "win": {
-      "target": "nsis",
-      "icon": "public/icon.ico"
-    },
-    "mac": {
-      "target": "dmg",
-      "icon": "public/icon.png"
-    },
-    "linux": {
-      "target": "AppImage",
-      "icon": "public/icon.png"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "artifactName": "${productName}-Setup-${version}.${ext}"
-    },
-    "publish": [
-      {
-        "provider": "github",
-        "owner": "mrsarthi",
-        "repo": "Dicsussion-app"
-      }
-    ]
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.harness.json",
+    "tauri": "tauri",
+    "test:two-peer": "tsx harness/two-peer.mts",
+    "test:bridge": "tsx harness/two-peer-bridge.mts"
   },
   "dependencies": {
-    "@aparajita/capacitor-biometric-auth": "^10.0.0",
-    "@capacitor/android": "^8.4.1",
-    "@capacitor/app": "^8.0.1",
-    "@capacitor/app-launcher": "^8.0.1",
-    "@capacitor/browser": "^8.0.1",
-    "@capacitor/core": "^8.4.1",
-    "@capacitor/filesystem": "^8.1.2",
-    "@capacitor/haptics": "^8.0.1",
-    "@capacitor/keyboard": "^8.0.1",
-    "@capacitor/preferences": "^8.0.1",
-    "@capacitor/push-notifications": "^8.1.1",
-    "@capacitor/status-bar": "^8.0.1",
-    "@waku/sdk": "^0.0.36",
-    "argon2-browser": "^1.18.0",
+    "@dicsussion/core": "^0.3.0",
+    "@dicsussion/sdk": "^0.3.0",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2",
     "buffer": "^6.0.3",
-    "crypto-js": "^4.2.0",
-    "decentrachat-client-sdk": "file:./client",
-    "electron-updater": "^6.7.3",
-    "ethers": "^6.17.0",
-    "hash-wasm": "^4.12.0",
-    "localforage": "^1.10.0",
-    "lucide-react": "^1.16.0",
-    "node-forge": "^1.4.0",
-    "pinata-web3": "^0.5.4",
-    "prop-types": "^15.8.1",
-    "protobufjs": "^8.4.2",
-    "react": "^19.2.6",
-    "react-dom": "^19.2.6",
-    "react-quick-pinch-zoom": "^5.1.1",
-    "react-router-dom": "^7.13.0",
-    "simple-peer": "^9.11.1",
-    "socket.io-client": "^4.8.3",
-    "tweetnacl": "^1.0.3",
-    "tweetnacl-util": "^0.15.1",
-    "vite-plugin-node-polyfills": "^0.25.0",
-    "y-indexeddb": "^9.0.12",
-    "yjs": "^13.6.30"
+    "events": "^3.3.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
   },
   "devDependencies": {
-    "@axe-core/playwright": "^4.11.3",
-    "@capacitor/cli": "^8.1.0",
-    "@eslint/js": "^9.39.1",
-    "@playwright/test": "^1.61.1",
-    "@tailwindcss/container-queries": "^0.1.1",
-    "@tailwindcss/postcss": "^4.3.0",
-    "@types/react": "^19.2.5",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.1.1",
-    "@vitest/ui": "^4.1.5",
-    "autoprefixer": "^10.5.0",
-    "concurrently": "^9.2.1",
-    "electron": "^40.1.0",
-    "electron-builder": "^26.7.0",
-    "electron-squirrel-startup": "^1.0.1",
-    "eslint": "^9.39.1",
-    "eslint-plugin-react-hooks": "^7.0.1",
-    "eslint-plugin-react-refresh": "^0.4.24",
-    "globals": "^16.5.0",
-    "playwright": "^1.60.0",
-    "postcss": "^8.5.15",
-    "tailwindcss": "^3.4.17",
-    "terser": "^5.46.0",
-    "typescript": "^5.9.3",
-    "vite": "^7.2.4",
-    "vite-plugin-top-level-await": "^1.6.0",
-    "vite-plugin-wasm": "^3.6.0",
-    "vitest": "^4.1.5",
-    "wait-on": "^7.2.0"
+    "@tauri-apps/cli": "^2",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "tsx": "^4.23.12",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4",
+    "vite-plugin-wasm": "^3.6.0"
+  },
+  "overrides": {
+    "underscore": "^1.13.8"
   }
 }
