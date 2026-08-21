@@ -36,7 +36,6 @@ keystore.properties
 
 # Build outputs & caches
 dist/
-.agents/
 dist-ssr/
 build/
 .next/

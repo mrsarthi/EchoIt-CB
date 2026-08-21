@@ -1,0 +1,1848 @@
+# PROGRESS.md — EchoIt
+
+## Status at a glance
+
+*Last updated: 2026-08-19 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.3.2` · **🚪 GATE OPEN — two physical phones exchanged messages** · UI work unblocked*
+
+| Phase | Target / Deliverable | Status | Tests | Notes |
+|---|---|---|---|---|
+| **0. Groundwork** | Project context, standing rules, git hygiene | **Complete** | N/A | SDK surface validated by reading *and* by running it |
+| **0.5. Runtime decision** | Choose the app runtime | **Complete** | N/A | **Tauri v2**, phones + desktop. Reasoning in D1 |
+| **0.6. Scaffold** | Tauri v2 + React + Vite, SDK linked, webview shims | **Complete** | 0 | Typechecks, builds, `npm audit` clean. |
+| **0.7. npm migration** | Consume published `@dicsussion/*@0.1.0` instead of local paths | **Complete** | 1 | All 4 applicable verification steps pass |
+| **S0. SDK in a webview** | `DicsussionClient` boots in a Tauri webview, persists across restart | ✅ **PASSED** | 1 | Verified after a real process restart — see below |
+| **S1a. Two peers talk (headless)** | Protocol + SDK prove two users can converse | ✅ **PASSED** | 3 | Real Iroh/QUIC, two OS processes, path **direct** |
+| **S1b. Tauri transport bridge** | Rust Iroh plugin + bridged transport | ✅ **PASSED** | 1 | Two laptops, same network, both directions, **direct** |
+| **S2. Android — the gate** | One encrypted message between two physical devices | ✅ **PASSED** | 1 | Direct, 377 ms connect, 527 ms delivery. **UI work is unblocked** |
+| **S3. iOS readiness** | Paper check only — no Mac available | **Not Started** | 0 | Deferred by decision, not forgotten |
+| **1. Core Application (v1)** | Chats, local storage, recovery | **In progress** | 0 | Onboarding + navigation shell done & audited. **Next: pairing (2.3)** |
+| **Pre-UI hardening** | CSP locked down before the UI grows | ✅ **PASSED** | 2 | Strict policy, 0 violations, message flow intact — see below |
+
+## Reconnect on launch and resume (2026-08-20)
+
+**The gap that made background delivery unmeasurable.** MACCO found it; verified
+by hand: `client.connect()` was called in exactly **one** place — inside pairing
+— and never again.
+
+That matters because 0.3.2's outbox flushes from `drainAfterReconnect()`, which
+fires when a connection is established. Everything else already worked: queued
+messages persist across process death and rehydrate at boot. But **nothing ever
+created the reconnection the flush was waiting for**, so messages sat queued
+even with both devices awake and reachable.
+
+Also confirmed absent: any lifecycle handling at all. No `visibilitychange`,
+`pagehide`, `freeze` or `resume` listener in `src/`; `MainActivity.kt` overrides
+only `onCreate`; the manifest declares **only `INTERNET`** — no `<service>`, no
+`FOREGROUND_SERVICE`, no `WAKE_LOCK`.
+
+### What was built
+
+`src/services/reconnect.ts` — `reconnectKnownContacts()`, called from
+`AppContext` on launch and on `visibilitychange` / `focus`.
+
+- **Refreshes addresses once per sweep, before dialling.** A stored ticket
+  carries the addresses a peer had when it was made; those go stale and a dial
+  to a dead address fails looking like the network being down.
+- **30-second per-peer cooldown.** Resume fires far more often than expected —
+  every task-switch, every notification shade — and without it each one would
+  churn healthy connections.
+- **Failures swallowed per contact.** A peer who is genuinely offline *should*
+  fail to dial; that is the normal case, not an app error, and it must not stop
+  the other contacts being tried.
+- Skips blocked peers, self, and contacts with no stored ticket.
+
+### Verified end to end through the real UI
+
+Two app instances, paired by pasting a real 558-char ticket (relay + 4 direct
+addresses) into the Add Contact dialog — not the harness.
+
+| Event | Result |
+|---|---|
+| Reload (relaunch) | `attempted:1 connected:1` — **the re-dial works** |
+| Resume (`visibilitychange`) | `attempted:0 skipped:1` — cooldown suppresses the redundant dial |
+| Bridge harness | `STEP 1 PASSED`, `outbox=0` |
+
+### A bug found in my own first version
+
+The first attempt logged `attempted:0` on launch. Contacts load from storage in
+a **separate effect keyed on `did`**, which resolves *after* the client is
+ready — so the sweep ran against an empty list and dialled nobody. The failure
+looked exactly like having no contacts at all.
+
+Fixed by adding `contacts.length` to the effect's dependencies. Worth recording
+because the symptom was silence, and silence is indistinguishable from working.
+
+### Harness change
+
+`status()` now reports **`outbox=N`**. Without it, "queued and will arrive" and
+"vanished" are indistinguishable from outside — the exact ambiguity that left
+the 0.3.0 background run inconclusive. `client.outboxSize` already existed;
+nothing else needed adding.
+
+## ✅ Finding 16 — silent message loss — **FIXED in SDK 0.3.2** (2026-08-20)
+
+**Not a background-delivery bug. A foreground correctness bug**, found while
+asking MACCO about background delivery and then verifying by hand because its
+citation gate flagged its own output as mis-cited.
+
+0.3.1 fixed `detachConnection` — liveness is now derived from
+`connection.state`. That part works. But a second path with the same
+consequence was not fixed: **the sender is told a message was delivered when it
+was sent to nobody.**
+
+### The chain, every link read directly
+
+| Step | Code | Behaviour |
+|---|---|---|
+| 1 | `client.js:552` | `isOnline: () => this.online && this.peers.connectedCount > 0` — a **global** count |
+| 2 | `peer-registry.js:22` | `connectedCount` counts **every** live peer, `paired` or not |
+| 3 | `session-manager.js:90` | `publish()` iterates **`listPairedConnected()`** — paired peers only |
+| 4 | `session-manager.js:101` | `await Promise.all(sends)` — **an empty array resolves**. `publish()` cannot fail by sending to nobody |
+| 5 | `chat-service.js:108` | `if (isOnline()) { try { await publish(); published = true } catch {…} }` then `if (!published) enqueue` |
+
+Because step 4 never throws, step 5 sets `published = true` and **skips the
+outbox entirely**.
+
+### Two ways an ordinary user hits this
+
+1. **More than one contact.** Paired with A and B; A is connected, B is not.
+   `isOnline()` is true because of A. `publish()` sends to A. Nothing is queued
+   for B. The message to B is gone, reported as sent.
+2. **A stranger knocks.** An unpaired peer completing a handshake raises
+   `connectedCount` — step 2 does not filter on `paired`. With your only real
+   contact offline, `isOnline()` is true, `listPairedConnected()` is empty,
+   `publish()` resolves having sent nothing, and your message is dropped.
+
+**Path 2 interacts directly with the requests feature just specified** (§5,
+M2.3.5): strangers knocking is a designed, expected event. Someone can cause
+your outgoing messages to vanish by dialling you.
+
+### Why this was not caught
+
+Every test to date used **exactly one paired peer**. With a single contact the
+logic is sound — the peer is either connected (`publish` sends to it) or not
+(`connectedCount` is 0, so it queues). The bug needs a second peer, or a
+stranger, to appear. Beta testers will have both.
+
+### Resolved in 0.3.2 — verified link by link
+
+All three links re-read against the installed 0.3.2, not taken on trust:
+
+| Link | 0.3.1 | 0.3.2 |
+|---|---|---|
+| `isOnline()` | `peers.connectedCount > 0` — every live peer, paired or not | **`peers.listPairedConnected().length > 0`** — the same set `publish()` sends to |
+| `publish()` | `await Promise.all(sends)` — an empty fan-out resolved like a successful one | **`return sends.length`** |
+| `chat-service` | `published = true` on any resolve | **`published = (await deps.publish(payload)) > 0`** — zero recipients is not delivery, so it queues |
+
+The upstream comments name the exact failure: *"a node whose only live
+connection is an unpaired stranger would otherwise mark the message sent and
+never queue it."*
+
+### Correction to the original finding
+
+**Scenario 1 as written was wrong.** I claimed that with contacts A (online) and
+B (offline), the message to B was lost. It was not: `publish()` is a broadcast to
+all paired-connected peers with no per-recipient targeting, and a peer that was
+away catches up through `beginSync(connection)` on reconnect — CRDT document
+merge, not the outbox. The outbox is for when *nobody* received it.
+
+**Scenario 2 — the stranger — was real**, and is what 0.3.2 fixes. SDK-6 is
+closed by it.
+
+### Regression on 0.3.2
+
+| Check | Result |
+|---|---|
+| `npm run test:two-peer` | **3/3** — including "held while offline, then delivered on reconnect (flushed=1)" |
+| Bridge harness (two app instances) | `STEP 1 PASSED`, direct |
+| typecheck / build / `npm audit` | clean, 0 vulnerabilities |
+
+*Unrelated breakage the upgrade surfaced:* `src/services/identity.ts` imported
+`@scure/bip39/wordlists/english.js`, but that package's exports map has no `.js`
+form. The reinstall normalised `node_modules` and it began failing. Import
+corrected — nothing to do with 0.3.2 itself.
+
+### Upstream request — SDK-6 *(delivered in 0.3.2)*
+
+`isOnline()` must describe the same set `publish()` sends to. Either:
+
+- make `publish()` report what it actually delivered and have `ChatService`
+  queue when that set is empty or incomplete; or
+- make liveness per-recipient, so the decision is "is *this* peer reachable"
+  rather than "is anyone reachable".
+
+`connectedCount` should also exclude unpaired peers, or be named for what it
+counts — it is currently used as a proxy for "can we deliver", which it is not.
+
+### Until it lands
+
+The honest position for beta is that this is **not fixed by measurement** — no
+amount of phone testing makes it safe. Options: keep beta to one contact per
+tester (unrealistic), patch the app side by checking a specific peer's
+connection before send, or wait for the upstream fix.
+
+**This outranks the background-delivery retest.** That test now has a known
+confound: with a stranger connected or a second contact offline, loss is
+expected regardless of what backgrounding does.
+
+## Android release keystore generated (2026-08-20)
+
+The item with a real deadline attached, done before the first APK ships.
+
+**Why it could not wait:** Android refuses an update signed by a different key.
+Change the key later and every tester must uninstall — and uninstall wipes the
+app sandbox, including the SharedPreferences blob the Android keyring store uses
+and the local message store. There is no server copy (§3.1). The recovery phrase
+restores identity, **not history**. Generating this late would have cost every
+beta tester their conversations.
+
+| | |
+|---|---|
+| Keystore | `src-tauri/echoit-release.jks` — RSA 4096, valid to **Jan 2054** |
+| Alias | `echoit` · DN `CN=EchoIt, O=EchoIt` |
+| Secrets | `src-tauri/keystore.properties` |
+| **SHA-256 fingerprint** | `2F:F2:E8:96:68:F3:17:48:CC:2B:11:06:C8:17:4A:B6:2F:01:7B:BF:58:A5:19:49:24:2B:E3:7B:30:E1:99:BD` |
+
+The fingerprint is public and recorded here deliberately: any future release can
+be checked against it with `apksigner verify --print-certs`. A mismatch means the
+build would strand every existing install.
+
+**Both files are gitignored** (`*.jks`, `keystore.properties`) and must be backed
+up off this machine. They exist in exactly one place today.
+
+### Solving the durability problem
+
+MACCO flagged that `src-tauri/gen/` is gitignored and regenerated by
+`tauri android init`, so any Gradle signing edit is temporary by construction —
+it would vanish silently and the next release would be debug-signed.
+
+Fix: **`scripts/apply-android-signing.mjs`**, wired as `npm run android:sign`.
+Idempotent, committed, and it refuses to run with a clear message if
+`keystore.properties` is missing rather than letting a debug-signed release
+through. The generated project stays disposable; the script is the durable half.
+
+Run it after any `android init` and before any release build.
+
+### Verified, not assumed
+
+Built a real release APK (`tauri android build --apk --target aarch64`, 36 MB)
+and checked who signed it:
+
+```
+Signer #1 certificate DN: CN=EchoIt, O=EchoIt
+Signer #1 SHA-256: 2ff2e89668f31748cc2b1106c8174ab62f017bbf58a51949242be37b30e199bd
+```
+
+Identical to the keystore's own fingerprint. Configuration proven by output, not
+by reading the gradle file.
+
+*(One snag worth recording: the first script version matched the release
+buildType with a `'
+'` literal, which silently failed against the generated
+file's CRLF endings and reported "could not find the release buildType". Now a
+`
+?
+` regex.)*
+
+## Navigation shell built + audited — M2.1.3 / M2.1.4 (2026-08-19)
+
+Second agent brief delivered. Audited by running it, not reading it.
+
+### Verified
+
+| Check | Result |
+|---|---|
+| **Resize across 840px** (real OS window, not viewport emulation) | Crossover exactly between 844 and 824. Never both nav types, never neither, no horizontal overflow, returns correctly |
+| Chat on **wide** | Opens in the right pane, sidebar rail **stays** — correct per §2C |
+| Chat on **narrow** | Full height, bottom tabs hide — correct per §2B |
+| Escape | Closes the conversation, rail intact |
+| Four tabs | All reachable, real content |
+| CSP | 0 violations, 0 console errors |
+| Bridge harness | `STEP 1 PASSED`, still direct |
+| `bootStarted` guard, deferred reset, keychain contract | All three survived |
+| Token duplication / platform sniffing | None. `useBreakpoint` is `matchMedia` on width only |
+
+No new dependencies — the agent chose against a router, correctly for four
+destinations and one detail view.
+
+### Fixed during the audit
+
+1. **Security copy overstated protection, in 7 places.** "Hardware keychain",
+   "hardware security manager", "database key". **"Hardware" is false on
+   Windows** — Credential Manager decrypts transparently for the signed-in user
+   and is not hardware-backed. Now: "Device key storage", naming Windows
+   Credential Manager / Android Keystore plainly, **plus the limitation that was
+   missing entirely** — it protects against someone taking the device, not
+   against software already running as you.
+
+   Three of these were in `App.tsx` and `AppContext.tsx` and had survived the
+   *previous* audit, where the same wording was flagged and not fixed.
+2. `ChatView` tooltip said "Direct end-to-end encrypted connection" → "Messages
+   go straight from your device to theirs".
+3. **`HomeScreen.tsx` deleted** — dead after its contents moved to Profile and
+   Settings.
+
+### Testability gap worth remembering
+
+`INITIAL_CONVERSATIONS` and `INITIAL_CONTACTS` are empty — correct, no fake
+data — but that makes **`ChatView` unreachable**, so M2.1.4 and the keyboard
+shortcuts could not be exercised as delivered. Verified by temporarily seeding a
+conversation and rebuilding. The agent should have reported this rather than
+leaving it implicit.
+
+*(A first seed of mine omitted the required `peerDid` and silenced it with an
+`as` cast, producing a blank-screen crash that looked like an app bug. The stub
+rule applies to audit fixtures too.)*
+
+## Desktop layout specified — `DESIGN.md` §2C (2026-08-19)
+
+`DESIGN.md` §2A/§2B describe a phone; EchoIt ships to Windows too, and the doc
+was silent on it. Added §2C.
+
+**The call: switch on window width, never on operating system.** A desktop window
+dragged narrow gets the phone layout, and that is correct rather than a fallback.
+Branching on platform breaks the moment someone resizes, and a touch laptop is
+neither. Breakpoint **840px**.
+
+The difference is *modality*, not furniture: narrow is modal (one place at a
+time, a chat replaces the list); wide is simultaneous (list and conversation both
+present, a chat replaces nothing). Same components either way — only the shell
+composes them differently.
+
+§2C also covers the four things phones do not have: keyboard shortcuts, hover,
+density, and window chrome (native title bar for beta).
+
+**Scope note:** the shell is built responsive *from the start*, deliberately. The
+shell is precisely the part that differs between the two sizes, so building it
+mobile-only means building it twice. Responsive is also a superset — if desktop
+is later dropped, nothing is wasted.
+
+Next brief written to `.agents/UI_AGENT_PROMPT_2.md` (M2.1.3 + M2.1.4).
+
+## Design docs reconciled (2026-08-19)
+
+`DESIGN.md` was rewritten by hand and gained a screen architecture the code and
+the other docs did not know about. Swept every file; five real discrepancies.
+
+| # | Discrepancy | Resolution |
+|---|---|---|
+| 1 | `DESIGN.md` §2B delivery states were `Sending… → Sent → Delivered`, contradicting `PRODUCT.md` §5b (`Staged → Sent → Delivered → Read`) | **§5b wins** — Messenger-style avatar ladder kept, by decision. `DESIGN.md` now points at §5b rather than restating it, since restating is what let it drift |
+| 2 | Four of eight contrast figures were wrong, and the `--color-primary` row quoted the *button* pairing under a column headed "on `--color-bg`" | Recomputed all eight from the hex values. **Nothing failed its threshold** — the numbers were imprecise, not the palette |
+| 3 | `PRODUCT.md` §5 State 1 said outbox shows "Paused" or "Staged"; "Paused" is defined nowhere | Unified on **`Staged`** |
+| 4 | `PRODUCT.md` §5 State 2 still specified a "soft blue dot, notification banner" — contradicting the settled rule that nothing ever notifies, and naming a colour the palette does not contain | Clay dot + inline banner, **no notification**. Recorded that adding a cool accent is a system decision, not something to improvise per-screen |
+| 5 | Root `DESIGN.md`/`PRODUCT.md` duplicates had drifted from `design/` | Re-synced. **Still duplicated** — the drift will recur; deleting the root copies is the durable fix and is waiting on a decision |
+
+### Also corrected
+
+- **`DESIGN.md` no longer documents spacing, radii, elevation or motion** — those
+  sections were dropped in the rewrite. Added §6 pointing at `tokens.css` as the
+  sole source, so the omission reads as deliberate rather than lost.
+- **`UI_AGENT_PROMPT.md` marked historical.** Three of its statements are now
+  false (tokens imported, scaffold removed, token count), and it predates the
+  Home shell.
+- Recorded an accessibility edge the tables missed: `--color-success` on
+  `--color-surface` in dark is **4.95:1** — fine for an 8px dot, not for text.
+
+### What this cost in scope
+
+**M2.1 reopened.** `DESIGN.md` §2A adds a 4-tab bottom bar (Chats · Contacts ·
+Settings · Profile) that exists **only** on Home, and §2B a full-height chat view
+that hides it. The shell currently has no navigation at all — when M2.1.1 was
+marked complete I noted it was "not routing in the react-router sense, revisit
+when there are screens to route between". This is that moment.
+
+New: **M2.1.3** (Home tab bar) and **M2.1.4** (full-height chat). Both land
+**before** 2.3, because Contacts is where the requests list lives.
+
+## Pairing & anti-spam settled (2026-08-19) — Q17/Q18 closed
+
+### The finding that shaped everything
+
+`getTicket()` takes no arguments, and `transportKey` is HKDF-derived from the
+identity key. So **there is exactly one ticket per identity, permanently, with no
+expiry and no revocation.** Anyone who ever receives it can dial forever, and the
+only way to change it is to abandon the identity and every pairing with it.
+
+The compensating property is strong: `transportKey` is a 32-byte Ed25519 public
+key. It cannot be guessed, enumerated, or derived from the `did:key`. There is no
+equivalent of harvesting phone numbers.
+
+**Therefore mass spam is structurally impossible, and the real threat is targeted
+— one person who has your ticket and will not stop.** Every defence below follows
+from that, and none of them can be enforced at the protocol layer; they all live
+on the recipient's device, which is the only place we control.
+
+### Decisions
+
+- **Pairing screen: Option B, "Two Steps"** from the lab — an explicit checklist
+  of who has done what. The half-paired state is the dangerous one, and B is the
+  only option that cannot be skim-read wrong.
+- **Requests are three rules, not a system.** A stranger can only knock; knocks
+  wait in a list; nothing ever notifies. Accept, Ignore, or Block — all silent.
+- **Silence is the safety feature.** Any reply confirms the address is live and a
+  person saw it, which is what someone persistent is fishing for. A "try again
+  later" rule is also unenforceable without a server, and announcing one would
+  breach §4.2.
+- **Deliberately dropped:** invite-correlation windows, notification throttling,
+  timed cooldowns, strict mode. All existed to decide *whether to notify* — and
+  nothing notifies, so none of them earned their keep.
+- **Requests carry no content.** `PeerConnectedEvent` is `peerDid` + `paired`;
+  unpaired peers' messages are dropped by the protocol. Names arrive out of band
+  in the invite, as unverified claims.
+- **Read receipts** designed in `PRODUCT.md` §5b for later: Staged → Sent →
+  Delivered (desaturated avatar) → Read (full colour). **Blocked on a profile
+  layer that does not exist**, now tracked as M4.3.0.
+
+### Upstream request worth filing
+
+**Rotatable or per-contact tickets.** This is the single most valuable anti-abuse
+primitive the protocol could offer and we cannot build it ourselves. Today a
+leaked ticket is permanent. With scoped tickets, a leak expires on its own and
+correlation becomes cryptographic rather than a guess about timing.
+
+## UI: app shell + onboarding (2026-08-19)
+
+Built by a separate agent to `.agents/UI_AGENT_PROMPT.md`, then audited by
+running it rather than reading it. Scope was deliberately fenced to the shell
+and onboarding; chat, pairing, and settings were left out because they depend on
+decisions still parked (Q17/Q18).
+
+### What exists
+
+| Area | Files |
+|---|---|
+| Shell + client lifecycle | `src/App.tsx`, `src/context/AppContext.tsx` |
+| Onboarding | `src/screens/OnboardingScreen.tsx` (intro → phrase → 3-word verify → restore) |
+| Home | `src/screens/HomeScreen.tsx` |
+| Components | `src/components/ui/` — Button, Card, Input, Modal, AlertBanner, Badge, Icons |
+| Identity | `src/services/identity.ts` — BIP-39, key derivation |
+| Reset | `src/services/pending-reset.ts` |
+| Styles | `src/index.css` → `@import "../design/tokens.css"` |
+| Fonts | `public/fonts/*.woff2` — Literata, Geist, JetBrains Mono, latin-subset, 231 KB |
+
+**M2.2.2 is now complete.** The derivation half landed here: the storage key is
+derived from the recovery phrase (BIP-39 seed with the domain-separating
+passphrase `echoit:storage-key:v1`, first 32 bytes, base64) and passed to
+`DicsussionClient.init()`. The keychain caches it.
+
+### Verified by running
+
+| Check | Result |
+|---|---|
+| `npm run typecheck` / `build` / `npm audit` | clean · clean · **0 vulnerabilities** |
+| `npm run dev` **and** built app | both run — no dev/build divergence |
+| CSP violations in the real UI | **0**, and 0 console errors |
+| Onboarding end to end (CDP-driven) | intro → 12 words → 3-word verify → live client → reload unlocks |
+| Reset → fresh onboarding | database erased, new identity, clean state |
+| Bridge harness | **STEP 1 PASSED**, still direct |
+| Keychain self-check | **PASSED** |
+
+### Audit — 10 defects found, all fixed
+
+Nine were fixed on the first pass. Recorded because the reasoning matters more
+than the diffs:
+
+- **Two clients per launch.** The boot effect was unguarded under StrictMode, so
+  `createEchoItClient` ran twice over one IndexedDB and called `iroh_start`
+  twice — and `iroh_start` *replaces* the endpoint, leaving the first client's
+  transport dead but its listeners alive. The pre-UI `App.tsx` had a guard with
+  a comment naming this exact failure; it was lost in the rewrite. Fixed with a
+  `bootStarted` ref. **Measured, not inferred** — counted via injected logging.
+- **Reset did not reset.** See the section below; it took two passes.
+- **Four copy defects**, all now fixed: "Direct P2P Ready" and "(DID)" (banned
+  jargon), "Initializing encrypted database and peer transport" (banned *and*
+  false — it contradicted the app's own disclosure banner), and an invented
+  reassurance that secrets fall back to "local database memory" when no keychain
+  exists. There is no such fallback, by design.
+- **36px touch targets** on icon-only controls, below the 44px floor.
+- **Design tokens copied instead of imported**, creating a second source of
+  truth. Now `@import`ed; `design/tokens.css` is authoritative again.
+- **`window.confirm`** for destructive actions — replaced with an in-app modal,
+  which also removed an unverified Android risk (`onJsConfirm` support in the
+  wry chrome client was never confirmed).
+- Scaffold leftovers and the `Tauri + React + Typescript` window title.
+
+### The reset bug, and why it needed two attempts
+
+Worth keeping, because the second attempt looked correct and was not.
+
+**First state:** `resetApp` cleared the keychain key and closed the transport.
+It never touched the database. The confirm text promised otherwise.
+
+**Second state:** a `deleteDatabase` call was added — but nothing closes the
+SDK's IndexedDB connection, and the SDK exposes no way to (only
+`disconnect()`, which is transport). So the request fired `onblocked`, and the
+handler resolved as *success*:
+
+```ts
+req.onblocked = () => {
+  // If blocked by closing connections, proceed
+  resolve();
+};
+```
+
+`onblocked` means the database is still there. Measured:
+`[AUDIT] deleteDatabase -> ONBLOCKED` and `databases after: ["echoit-db"]`.
+The comment made it read as deliberate, which is what made it easy to miss.
+
+**Current state — `src/services/pending-reset.ts`.** The erase cannot happen
+in-place while the page holds the connection, so the reset records its intent in
+`localStorage`, reloads, and erases on the way back up in `main.tsx` **before
+React mounts** — nothing is holding the database at that point. `onblocked` is
+now treated as failure, the flag survives a failed erase so the next launch
+retries, and `main.tsx` logs loudly rather than swallowing it.
+
+Verified: `databases after: []`, flag cleared, fresh onboarding clean.
+
+**The general lesson, third time in this project:** a stub or fallback may
+return a value only when that value is one the caller is designed to receive.
+`resolve()` on `onblocked` is the same mistake as the `resolveArtifacts()`
+regression — reporting success for something that did not happen.
+
+### Known-good but unfinished
+
+- `keychainAvailable` is computed and exposed on the context but consumed by
+  nothing. A build with no keychain backend falls through to the generic error
+  screen with no specific explanation.
+- Loading copy still reads *"Checking local hardware keychain for your
+  encryption key"* — engineer-speak, and "hardware" is inaccurate on Windows,
+  where Credential Manager is not hardware-backed. Error heading is
+  *"Initialization Error"*.
+- Bundle is **1.1 MB (594 KB gzipped)**, past Vite's warning threshold. Not yet
+  a problem; worth watching before it ships to phones.
+- **None of this has run on Android.** Add it to the phone-session batch.
+
+## Keychain landed (2026-08-18) — M2.2.2, back half
+
+The storage layer for the at-rest key. **Not** the whole of M2.2.2: deriving the
+key from the recovery phrase and handing it to `DicsussionClient.init()` is
+still open, and belongs with onboarding.
+
+**Approach: `keyring-core` + per-platform stores**, not the `keyring` aggregator
+crate — its own docs say applications "should not be linking to this library at
+all" and should link `keyring-core` plus the stores they want. That also keeps
+unused backends out of the build.
+
+| Crate | Version | Why it's trustworthy |
+|---|---|---|
+| `keyring-core` | 1.x | `keyring` itself is 20.8M downloads, released 1 Aug 2026 |
+| `windows-native-keyring-store` | 1.1 | 900K downloads, MIT/Apache-2.0 |
+| `android-native-keyring-store` | 1.0 | 125K downloads, same org, MIT/Apache-2.0 |
+
+Rejected: **`tauri-plugin-keyring`**. Two unrelated projects share the name; the
+one that actually claims Android has **no LICENSE file**, which makes it legally
+unusable regardless of quality. It is also just a wrapper around the three
+crates above, so it buys nothing.
+
+### Files
+
+- `src-tauri/src/keychain.rs` — four commands: `keychain_set`, `keychain_get`,
+  `keychain_delete`, `keychain_available`
+- `src/keychain.ts` — typed webview wrapper, exports `STORAGE_KEY_ACCOUNT`
+- `src/keychain-selfcheck.ts` — runs inside the app, published on
+  `window.__echoitKeychain`. Deliberately a **separate global**: `window.__echoit`
+  is a contract the CDP drivers read field-by-field and must not gain surprises.
+
+### Verified
+
+| Check | Result |
+|---|---|
+| `cargo check` (Windows) | clean |
+| `cargo check --target aarch64-linux-android` | clean, built against the **API-24 sysroot** |
+| `cargo test --lib keychain` | 2/2 against the **real** Credential Manager — round-trip, overwrite, delete, delete-when-absent |
+| Self-check over IPC | `{"status":"PASSED","available":true}` |
+| Bridge harness regression | `STEP 1 PASSED`, still direct |
+
+The Rust test is not mocked on purpose: the entire value of the module is
+whether the OS store behaves, and a mock would pass on a machine where the real
+one is broken. It cleans up after itself.
+
+### Design decisions worth not re-litigating
+
+- **`get` returns `Ok(None)` for a missing entry, `Err` only for a real fault.**
+  First launch is the common path, not an error. A caller that cannot tell the
+  two apart will either re-derive over good data or loop on a genuine failure.
+- **`delete` of an absent entry succeeds**, so "make sure this is gone" needs no
+  existence check first.
+- **No fallback store.** A plaintext or in-memory stand-in would make a build
+  that cannot protect the key look exactly like one that can.
+- **The keychain is a cache, not the source of truth.** The key comes from the
+  recovery phrase; losing the keychain costs a re-derivation, not history.
+
+### Open
+
+- **Runtime on Android is unproven.** It compiles for `aarch64` and the upstream
+  README names Tauri as providing the `ndk-context` init it needs, but no device
+  has run it. The self-check is already wired into the bridge harness, so the
+  next phone session tests it for free — batch it with the 0.3.1
+  background-delivery retest and the Android CSP check.
+- **Honest scope of protection.** Windows Credential Manager decrypts
+  transparently for the signed-in user, so this does not defend against malware
+  running as that user — only against a stolen machine, another account, or a
+  careless backup. Android is stronger (Keystore-held wrapping key, app sandbox).
+  `PRODUCT.md` §4.1 copy must not overstate it.
+
+## CSP locked down (2026-08-18) — Q16 closed
+
+Done **before** the UI exists, deliberately: a CSP is cheap to adopt against a
+50-line harness and expensive against a finished app, because by then every
+violation is a feature someone has to go rewrite.
+
+Method: apply the strictest plausible policy first, relax only what actually
+breaks. Starting permissive and tightening later never converges — nothing forces
+you to discover what the slack was hiding.
+
+**Nothing broke.** Policy now in `src-tauri/tauri.conf.json`:
+
+```
+default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self';
+img-src 'self' data:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost;
+object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'
+```
+
+Verified twice on WebView2, violations captured over CDP (`Log.entryAdded`,
+`Runtime.exceptionThrown`, `Runtime.consoleAPICalled` — not just "it looked
+fine"):
+
+| Check | Result |
+|---|---|
+| Boot with reload | `BRIDGE READY did=z6MkvKp5UvdL relay=true` · **0 violations, 0 errors** |
+| Full message flow, two instances | pair → connect → send both directions · **STEP 1 PASSED**, `relayed=false` |
+
+Two things worth knowing about the policy:
+
+- **`'wasm-unsafe-eval'` is load-bearing.** Automerge is a 3.8 MB WASM blob;
+  without the token, storage does not initialize at all. It permits WASM
+  compilation only — it does not re-enable `eval()` or `new Function()` on
+  JavaScript, so the usual reason to distrust an `unsafe-` token does not apply
+  here.
+- **`connect-src` is the important line.** It admits only Tauri's own IPC
+  channels. No external origin is reachable from the webview, so every network
+  operation must go through Rust — a dependency that tries to phone home simply
+  cannot, which is precisely the property §3 wants.
+
+**Not yet verified:** Android's webview is a different engine. The policy should
+port (`wasm-unsafe-eval` is standard Chromium), but *should* is not *does*. Retest
+on the next Android session, alongside the 0.3.1 background-delivery retest.
+
+## S0 — PASSED (2026-08-12)
+
+Verified in the **Tauri webview**, after killing the process and relaunching:
+
+```
+S0 PASSED  tauri=true  priorRuns=3  init=40.3ms
+did:key:z6Mkh1xcfTJ1nfKhqRjobRMrGJiRrEvJzUTC87yFLUqHPibm
+ticketRoundTrips=true  messageLanded=true  persistedAcrossRestart=true
+```
+
+| Exit criterion | Result |
+| :--- | :--- |
+| Runs in the Tauri webview, not a browser | ✅ `inTauriWebview: true`, WebView2 / Chrome 151 |
+| `DicsussionClient.init()` resolves | ✅ 40–88 ms across runs |
+| Derives a valid `did:key` | ✅ same DID recovered after restart |
+| Ticket survives encode → decode | ✅ (the S1 pairing path) |
+| Message persists across an app restart | ✅ `priorRuns: 3` after a full process kill |
+
+**Corroborated from outside the app:** WebView2 wrote 6 files / 34,882 bytes to
+`%LOCALAPPDATA%\io.github.mrsarthi.echoit\EBWebView\Default\IndexedDB`. That is the
+storage engine committing to disk, observed independently rather than
+self-reported by the code under test.
+
+**Measurements.** `sdkInitMs` 40.3 ms; navigation→harness-complete ≈ 650 ms.
+Bundle: JS **1,074 kB**, WASM **3,858 kB**. Note the second figure is *not* app
+cold start — process launch and webview creation happen before any JavaScript
+exists to observe them. True cold start needs `adb shell am start -W` on
+Android (S2).
+
+**Caveat carried forward:** this run used `allowUnencryptedStorage: true`. S0
+proves the storage path works, not that it is protected. Keychain integration
+(M2.2.2) is now a hard prerequisite before any build that holds real data.
+
+---
+
+### The earlier "S0 Complete" claim was wrong — kept as a record
+
+**S0 status — corrected 2026-08-06.** The SDK genuinely boots: `DicsussionClient.init()`
+runs with `IndexedDbDriver` and `transport: 'local'`, derives a `did:key`, sends to
+itself, and data survives a reload. That retires the real risk in S0.
+
+But it was **run in a browser via `vite dev`, not in the Tauri webview**, and S0's exit
+criterion is the webview. Evidence: `src-tauri/target` and `src-tauri/gen` did not exist,
+so the app had never been compiled or launched. Three consequences:
+
+- **The 88.6 ms / 15 ms figures are browser numbers**, measuring
+  `DicsussionClient.init()` in a tab. The app's cold start additionally includes process
+  launch, Rust init, and webview creation — none of which JavaScript can observe. The
+  spike deliverable asks for the latter.
+- **IndexedDB lives in a different place.** In the app it is the webview's storage
+  partition under the app data directory, not a browser profile. Persistence across
+  restart is exactly the behaviour most likely to differ.
+- **`csp` is still `null`.** Tightening it later can break WASM instantiation
+  (`wasm-unsafe-eval`), and Automerge is a 3.8 MB WASM blob on the critical path.
+
+Bundle sizes are runtime-independent and stand: JS **1,055 kB** (577 kB gzip), WASM
+**3,858 kB** (1,187 kB gzip).
+
+**Harness hardened at the same time.** It previously compared history counts within a
+single session, which cannot demonstrate persistence. It now uses a fixed channel and
+database so the startup count equals the number of previous runs, reports `FIRST_RUN`
+when nothing has restarted yet, and only reports `PASSED` once data has survived the
+process dying. It also detects `__TAURI_INTERNALS__` and states plainly when it is
+running in a browser, so this distinction cannot be missed again.
+
+---
+
+## S1a — Two users can talk (2026-08-12)
+
+`npm run test:two-peer` — three scenarios, all passing. Two **separate OS
+processes**, each a real Dicsussion node over real Iroh/QUIC. Two processes
+rather than two clients in one heap is deliberate: peers sharing memory can
+appear to work for reasons that have nothing to do with the network.
+
+| Scenario | Result |
+| :--- | :--- |
+| Two paired peers exchange messages, both directions | ✅ `peerCount=1`, path **direct** — hole-punching worked, no relay |
+| One-sided pairing delivers nothing | ✅ sender reports "sent", receiver correctly gets nothing |
+| A message sent offline arrives on reconnect | ✅ withheld while offline, `flushed=1` on reconnect |
+
+**Why scenario 2 exists.** Since 0.1.0 pairing is mutual (D3), and an unpaired
+receiver drops inbound frames with **no error on either side** — `client.js:520`
+calls this out explicitly. The sender sees a successful send. That failure is
+invisible from the sending end, so it needs a test asserting a *non*-delivery.
+Left untested it surfaces later as "it says connected but nothing arrives",
+which is miserable to diagnose and worse to receive as a bug report.
+
+**Files:** `harness/peer.mts` (one headless node, JSON-Lines over stdio) and
+`harness/two-peer.mts` (orchestrator and assertions).
+
+**Scope — what this does and does not prove.** It proves the *protocol and the
+published SDK* let two users converse, including pairing, delivery both ways,
+CRDT sync, and the offline outbox. It does **not** exercise
+`TauriIrohTransport`: the harness runs in Node against the native Iroh module,
+not in the webview. Splitting S1 this way is intentional — when the bridge
+fails, we now know it is the bridge.
+
+### Harness was running untyped — fixed
+
+`tsconfig.json` includes only `src`, so `harness/` was never typechecked.
+Adding `tsconfig.harness.json` (Node lib and globals, separate program so DOM
+and Node types do not leak into each other) surfaced three errors immediately,
+including the upstream one in Finding 12. `npm run typecheck` now runs both.
+
+---
+
+## S1b — Rust half complete (2026-08-12)
+
+`src-tauri/src/iroh_bridge.rs`. Six commands and three events. Verified in the
+Tauri webview:
+
+```
+IROH PASSED  id=b97dee078c38…  addrs=4  bind=1105ms (6.4ms on reuse)
+relay: https://aps1-1.relay.n0.iroh.link
+```
+
+Four addresses were discovered including a **public** one (`42.108.16.29`)
+alongside the LAN and IPv6 addresses, so NAT reflection works; a relay was
+assigned as fallback. `cargo check` clean.
+
+| Command | Purpose |
+| :--- | :--- |
+| `iroh_start(secretKey)` | Bind with the SDK-derived transport secret, begin accepting |
+| `iroh_identity()` | Current `EndpointId` + addresses |
+| `iroh_connect(transportKey, directAddresses, relayUrl)` | Dial, open the byte pipe |
+| `iroh_send(connId, base64)` | Write bytes |
+| `iroh_disconnect(connId)` / `iroh_stop()` | Tear down |
+
+Events: `iroh://data`, `iroh://inbound`, `iroh://closed`.
+
+**Design decisions, all recorded in the module header:**
+
+- **The transport secret comes from JavaScript.** A ticket's `transportKey`
+  *is* the `EndpointId`, and the SDK derives it from the identity key by
+  one-way HKDF. An endpoint minting its own key would advertise an
+  `EndpointId` no peer could dial — and it would look like a network fault.
+- **Idempotent start.** A webview reload calls it again; rebinding would
+  strand peers mid-dial on the old address.
+- **`iroh_connect` takes the ticket's parts, not the ticket.** Decoding is the
+  SDK's job; duplicating a wire format across two languages is how the two
+  drift apart.
+- **Inbound reports `unverifiedTransportId`, never a `did:key`.** Iroh
+  authenticates the transport key during TLS, which says nothing about
+  identity ownership. Only the SDK handshake establishes that, so the field is
+  named for what is actually known.
+- **base64 on the wire.** A JSON array of numbers costs ~4× against ~1.33×.
+- **One stream per connection, not six** — decided deliberately, see below.
+
+### Accepted limitation: flat pipe weakens §6 preemption
+
+All six sub-streams share one bidirectional QUIC stream, with the SDK labelling
+frames — the same shape `WebSocketTransport` already uses.
+
+The cost: over six independent QUIC streams a large `0x02` frame cannot delay
+an urgent `0x03` revocation. Over one stream, priority degrades to send-queue
+ordering, and a frame already in flight still finishes first. With frames
+capped at 1 MB that is a bounded delay rather than a stall, and it does not
+affect the S1b or S2 gates.
+
+Taken knowingly to keep 0.2.0 small. If it needs fixing the change is confined
+to this module and the transport implementation above it — a note has been
+requested in the SDK docs so the trade does not quietly become "how it works".
+
+**Still blocked:** the TypeScript half needs `createBridgedTransport` from SDK
+0.2.0 (Finding 13). The Rust side is ready for it.
+
+---
+
+## S2 partial — the app runs on a physical Android phone (2026-08-16)
+
+Not the gate yet (no message has crossed between two devices), but the entire
+Android *risk surface* is retired. On an I2404, debug build:
+
+```
+S0 PASSED    tauri=true  priorRuns=1  init=83.6ms
+IROH PASSED  id=f265615c31a1…  addrs=3
+```
+
+| Question | Answer |
+| :--- | :--- |
+| Does our code compile for Android? | ✅ 347 MB ARM64 `.so`, NDK r27d, 135,726 `iroh` symbols linked |
+| Does it install and launch? | ✅ Both phones; displayed in 506 ms, ~530 ms median cold start over 3 runs |
+| Does the SDK boot in the phone's webview? | ✅ Identity derived, IndexedDB persisted across restart |
+| Does the Rust Iroh endpoint bind on a phone? | ✅ Three addresses discovered |
+
+**Method note.** Android WebView console output does not reach `logcat`, so the
+harness verdict is read the same way as on desktop — attach to the webview's
+devtools socket and read the page title:
+
+```bash
+adb -s <serial> forward tcp:9223 localabstract:webview_devtools_remote_<pid>
+curl -s http://localhost:9223/json
+```
+
+**Two Windows prerequisites**, both non-obvious and both costing a build cycle:
+
+- *Windows* Developer Mode must be on — distinct from *Android* developer
+  options despite the name. Tauri symlinks the built `.so` into the Android
+  project, and Windows blocks that without it.
+- Each phone must authorise this specific computer (`adb devices` shows
+  `unauthorized` until the on-device prompt is accepted).
+
+**Corruption, again.** The first Android build failed with 541 `memchr` NEON
+errors. The real cause was `found invalid metadata files for crate 'core'` —
+the `aarch64-linux-android` standard library was corrupt, and every intrinsic
+error cascaded from `core` being unloadable. Its manifest was zero-filled and
+dated **Aug 5 19:14 — the same minute as the corrupted cargo crates**. One
+event that evening damaged files across both `~/.cargo` and `~/.rustup`.
+Fixed by reinstalling the toolchain. **`~/.cargo` and `~/.rustup` should be
+excluded from real-time AV scanning**, or this recurs and keeps presenting as
+unrelated compiler bugs.
+
+---
+
+## Android toolchain — ready (2026-08-12)
+
+`npx tauri android init` succeeds. Nothing is left to discover when the phones
+are connected.
+
+Most of it was already installed via Android Studio — SDK, build-tools,
+platform-tools (`adb` 1.0.41), platforms, and a bundled JDK 21. The only
+missing piece was the **NDK**, which compiles Rust for the phone.
+
+| Component | State |
+| :--- | :--- |
+| NDK | **Installed** — r27d / `27.3.13750724` |
+| Rust targets | `aarch64-linux-android`, `armv7-linux-androideabi`, plus `i686`/`x86_64` added by `tauri android init` for emulators |
+| `ANDROID_HOME` / `NDK_HOME` / `JAVA_HOME` | Set persistently (user scope) |
+| Android project | Generated at `src-tauri/gen/android` (gitignored) |
+
+**r27d over the newer r28c** deliberately: it is the revision most widely used
+with Rust mobile builds today, so least likely to surprise us. Swapping costs
+only a download.
+
+**Download verified before installing.** Size and SHA-1 checked against
+Google's package index — 781,506,724 bytes, `56607cbc…`, both exact. A first
+attempt at verification reported a mismatch, which was my regex window picking
+up a neighbouring package's metadata; parsing the XML properly cleared it.
+Worth the second look given the 16 corrupted crates found in the cargo cache
+earlier this session.
+
+The NDK extracted as `android-ndk-r27d` and was renamed to `27.3.13750724`,
+the version-numbered layout `sdkmanager` produces and tooling expects.
+
+**Hardware confirmed available:** two Android phones, two laptops, and both
+same-network and cross-network testing. That clears the last non-code
+prerequisite for S2.
+
+---
+
+## ⏸ Background delivery — PARKED, with one finding that is not parked
+
+**Deliberately set aside 2026-08-17.** A design is being explored separately
+(store-and-forward on reconnect, possibly a blind mailbox). What follows is
+what testing established, so the decision is made on evidence.
+
+### Measured
+
+Both phones connected and delivering. B backgrounded with the HOME key, then
+three messages sent from A at increasing depths:
+
+```
+immediately backgrounded  → A: sent d6c588c2   A status: connected=true
+after 30s backgrounded    → A: sent bf79f798   A status: connected=true
+after 90s backgrounded    → A: <<eval-failed>> A status: connected=true
+
+B events: 14:10:58 closed — read error: connection lost
+delivered after foregrounding: 1/3
+```
+
+- **Nothing arrives while backgrounded.** B's webview was frozen by 90 s —
+  it stopped answering debugger requests entirely.
+- **At least one message was lost outright**, not merely delayed. (The count is
+  "at least one": the third send returned `<<eval-failed>>`, so it may never
+  have been issued. A clean re-run would settle it.)
+- **A reported `connected=true` throughout**, including after B's connection had
+  already died.
+
+### The finding that is NOT parked — an SDK bug
+
+The loss is **not** caused by Android suspending the app. It is caused by the
+sender never learning the connection died:
+
+| Fact | Consequence |
+| :--- | :--- |
+| `detachConnection()` is defined in `peer-registry.js:76` and **never called anywhere** in either package | A dead connection is never released |
+| `connectedCount` counts `if (peer.connection)` — existence, not state | A `Disconnected` connection still counts |
+| `listPairedConnected()` filters on `paired`, never on liveness | Dead peers are still publish targets |
+| `teardown()` calls `markClosed()`, which only mutates transport-internal state | The `PeerRegistry` never hears about it |
+
+So `isOnline()` stays true, `sendMessage` **never queues to the outbox**, and
+`publish()` writes into a dead connection and resolves successfully. The outbox
+— machinery built for exactly this — is bypassed.
+
+**This is a correctness bug well beyond backgrounding.** It fires on any dropped
+connection: wifi → mobile handover, a closed laptop lid, a weak signal. In every
+case the sender loses messages while showing success.
+
+**Suggested fix (upstream):** have `connectedCount`/`listConnected()` require
+`connection.state === ConnectionState.Connected`, *and* have `teardown()` reach
+`detachConnection(peerDid)`. The state check makes the count honest; the detach
+releases the reference.
+
+**It is a prerequisite for every offline-delivery design**, including a mailbox
+— without it the client keeps writing into a dead connection instead of falling
+back to anything.
+
+### For whatever design is chosen
+
+- The outbox **already persists to disk and hydrates on startup**, so the
+  storage half of store-and-forward exists. What is missing is the *trigger*:
+  `flushOutbox()` only runs from an explicit `goOnline()`, and nothing fires it
+  when a peer reconnects.
+- **A foreground service is what makes store-and-forward viable at all.**
+  Without one the app runs only while on screen, so delivery would need both
+  users to have EchoIt *open simultaneously* — near-never. With one, overlap is
+  the normal case.
+- A mailbox server would solve delivery outright but reverses §3.1. If taken,
+  a **blind mailbox** (rotating recipient pseudonyms the server cannot link) is
+  materially stronger than "we promise to delete" — the latter is policy, not
+  proof, and does not survive a subpoena.
+- **Undelivered state must be visible in the UI.** A tick that means "queued on
+  my phone" must not look like "delivered to theirs".
+
+---
+
+## 🚪 S2 PASSED — THE GATE IS OPEN (2026-08-17)
+
+**Two physical Android phones exchanged encrypted messages.** This is the
+condition the master prompt set before any UI may be built.
+
+```
+A  did:key:z6MknKLSuJa3NCwYdQzneCystZWbQTNbBagHaskqLVJuo3WZ   (I2404)
+B  did:key:z6Mkt2KJbgSvGoESY6YKeDuubxF5TN1x7b7K16Zx1TNcNhPT   (RMX3785)
+
+connect took 377ms
+A -> B: DELIVERED in 527ms
+B -> A: DELIVERED
+peers=1 paired=1 connected=true relayed=false
+```
+
+**Direct peer-to-peer, no relay.** Event log clean — one inbound, no closes, no
+retries. Same wifi.
+
+### The full ladder, every rung passed
+
+| Step | What it proved | Result |
+| :--- | :--- | :--- |
+| 0 | Bridged transport over a TCP pipe (Node) | ✅ 3/3 |
+| 1 | Two app instances, one machine | ✅ both ways, and on reconnect |
+| 2 | Two laptops, same network | ✅ direct |
+| 3 | Two laptops, **different** networks | ✅ works; slower first connect |
+| **S2** | **Two physical phones** | ✅ **direct, 377 ms connect, 527 ms delivery** |
+
+Building the ladder one variable at a time is what made each failure
+attributable. When step 1 broke, step 0 passing meant it was our IPC and not
+the protocol. When two laptops broke, step 1 passing meant it was the network
+layer and not the bridge.
+
+### Spike deliverables — all measured on real hardware
+
+| Metric | Value |
+| :--- | :--- |
+| Release APK | **33.3 MB** (13.6 MB via Play bundle) — target was <50 MB |
+| Cold start | **~530 ms** median, 506 ms to displayed |
+| SDK init on device | 83.6 ms |
+| Connect (same wifi) | **377 ms** |
+| First message delivery | **527 ms** |
+| Path | **direct**, no relay |
+
+Cross-network connections are noticeably slower to establish — hole-punching
+has to complete before traffic flows, and iroh may serve the first message over
+a relay while upgrading. **That first-connect delay is a UI problem, not just a
+number:** a user pairing with a friend will be staring at a screen wondering
+whether it worked, so the pairing flow must show progress rather than assume
+instant.
+
+### What S2 does NOT prove
+
+- **Background delivery.** Both phones were awake with the app in the
+  foreground. Android suspends backgrounded apps, and that remains the hardest
+  unsolved problem (Q8).
+- **Cross-network on phones.** Only same-wifi was tested; mobile data is next.
+- **That a human can do it.** The run was driven over `adb`. The bridge screen
+  was laid out for a desktop window and has not been used on a phone.
+
+---
+
+## S1b complete — two laptops exchange messages (2026-08-17)
+
+**Step 2 passed.** Two physical laptops on the same network, messages delivered
+both ways over `createBridgedTransport` on the Tauri bridge — `peers=1`,
+`connected=true`, **`relayed=false`** (direct peer-to-peer, no relay).
+
+The ladder that got us here, each rung isolating one variable:
+
+| Step | Result |
+| :--- | :--- |
+| **0** — bridged transport over a TCP pipe, in Node | ✅ 3/3 scenarios |
+| **1** — two app instances, one machine | ✅ both directions, and again on reconnect |
+| **2** — two laptops, same network | ✅ **direct**, both directions |
+| 3 — two laptops, different networks | next |
+
+### Three real bugs, none of which the automated tests could have found
+
+**1. `refreshAddresses()` was never called.** The bridged transport warms its
+address cache once at construction, fire-and-forget, and its own docs say
+callers *"still await `refreshAddresses()` first"*. At that instant the socket
+has only just bound: LAN addresses at best, no relay. `getTicket()` serves that
+cache, so every published ticket pointed nowhere useful off-LAN.
+
+My `waitForDialableAddress` polled *Rust* and correctly reported "Dialable
+Anywhere" — it was reporting on the wrong thing entirely, so the screen looked
+healthy while handing out unusable tickets.
+
+**2. Connection ids were derived from the peer's transport key.** That key is
+stable, so reconnecting to the same peer reused the same id;
+`connections.insert` then dropped the previous sender, whose writer emitted
+`closed` for that id, and the SDK tore down the channel it had just created.
+Every reconnection killed itself with the remains of the last one.
+
+**It only bites on the second connection between a pair**, which is why every
+automated test passed — each used fresh instances doing a single connect. Fixed
+with a monotonic counter.
+
+**3. A pasted ticket went back into the machine it came from.** User error, but
+one the code made invisible: pairing succeeded, `peers=1`, `connected=true`,
+and nothing was ever delivered because the only paired peer was itself. Now
+refused outright.
+
+### Diagnostics added, and why they mattered more than the fixes
+
+Every failure above initially presented as the same unhelpful string. What
+actually moved us forward:
+
+- **Transport event log with reasons.** Rust always sent a close reason; the
+  TypeScript discarded it, collapsing "network died", "peer hung up" and
+  "orderly teardown" into one message. Surfacing it is what exposed bug 2 —
+  the repeated identical connection ids were visible in the log.
+- **`paired=` alongside `peers=` in the status line.** `publish()` only sends
+  to peers that are connected **and** paired, but the status showed only
+  connected. `peers=1 paired=0` is total silent failure that looks identical to
+  success.
+- **Truncation detection on pasted tickets.** `decodeTicket` tolerates every
+  kind of whitespace mangling — verified against newlines, CRLF, email
+  soft-wrapping — so "malformed" almost always means truncated. The message now
+  says so and prints the length received.
+- **Self-pair refusal**, which caught bug 3 immediately.
+
+The pattern worth keeping: **three of these failures were invisible because a
+success signal was reporting on the wrong thing.** "Dialable Anywhere" described
+Rust rather than the ticket; `peers=` described connections rather than
+delivery; "sent" described local acceptance rather than transmission. Each one
+looked like health.
+
+---
+
+## Decisions
+
+### D1 — Runtime: Tauri v2 (2026-08-05)
+
+**Targets: phones and desktop.** Browsers remain out of scope for the app.
+
+**Reasoning.** The runtime is the one decision that is expensive to reverse, and
+the deciding factor was iOS. `@number0/iroh` publishes no iOS binary (Finding
+3), so any Node-in-the-app route — nodejs-mobile, React Native with the NAPI
+module — reaches Android but not iOS. Under Tauri, Iroh is an ordinary Rust
+dependency that compiles for `aarch64-apple-ios` like any other target, so the
+problem disappears at its source instead of being worked around.
+
+The cost is real and accepted: the TypeScript SDK runs in a webview rather than
+in Node, which means shimming a small set of Node built-ins and writing a
+transport bridge. That work is bounded and understood. Rebuilding the app shell
+after discovering iOS is impossible would not be.
+
+**iOS is deferred, not abandoned** — no Mac is available to build or sign. The
+point of choosing Tauri now is that adding iOS later becomes a build-and-sign
+exercise instead of a rewrite. A Mac is needed only to ship iOS, never to
+develop against it.
+
+**Rejected:**
+- *nodejs-mobile / React Native* — cheapest-looking route right until iOS enters
+  the picture, where there is no binary to load. Also inherits iOS's JIT ban.
+- *Node sidecar alongside Tauri* — works nicely on desktop, but Tauri cannot
+  spawn sidecar binaries on mobile, so it fails the platforms that matter most.
+- *Porting the SDK to Rust* — enormous, and discards a tested 422-test codebase.
+
+### D2 — QR pairing deprioritized (2026-08-05) — ⚠️ **REVERSED by D3**
+
+QR is one idea for discovery, not a requirement. Pairing during the spike is
+clipboard paste of an encoded ticket. This also demotes Finding 2 from a blocker
+to an ergonomic wrinkle.
+
+### D3 — Pairing is back on the critical path (2026-08-12)
+
+**`@dicsussion/sdk@0.1.0` makes pairing mandatory AND mutual**, which reverses
+D2. Both devices must call `addPeer()` with the other's X25519 key before any
+traffic flows:
+
+- the dialer must have paired, or `connect()` throws;
+- **the receiver must have paired, or every inbound frame is silently dropped**
+  — no messages, no CRDT sync, no vouchers.
+
+The rationale is sound: a completed handshake authenticates *a key*, not a
+relationship. `did:key` is self-asserted, so before this gate anyone holding a
+public ticket — and tickets are meant to be shared — could inject messages into
+a stranger's history.
+
+**Consequences for EchoIt.** Pairing becomes a two-sided flow, not a one-way
+paste, so it needs real UI design rather than a text box. A one-sided pairing
+must be *visibly* incomplete: the failure mode is a peer that shows as connected
+and silently receives nothing, and "it says connected but nothing sends" is a
+miserable bug report to receive and a worse one to diagnose.
+
+This effectively answers Q7 in the implementation plan. Ticket-carrying QR or a
+deep link is now the natural shape, since `getTicket()` already includes the
+encryption key.
+
+---
+
+## 1. Groundwork & Initialization (2026-08-04)
+
+### What was built
+- Extracted product and architectural constraints from `.agents/ECHOIT_MASTER_PROMPT.md` and the protocol's app strategy document.
+- Created `AGENT_INSTRUCTIONS.md` — standing engineering rules, privacy constraints, SDK boundary policy, v1 scope, reporting standards.
+- Created root `.gitignore` — blocks plaintext SQLite databases (`*.db`, `*.db-shm`, `*.db-wal`, `*.sqlite`), keys (`*.key`, `*.pem`, `*.secret`), and env files, enforcing `AGENT_INSTRUCTIONS.md` §3.4 and §3.5.
+- Created root `README.md` pointing at the standing documents.
+- `git init` on `main`. EchoIt is its own repository, per the master prompt.
+
+### Design decisions & reasoning
+- **Zero code before the runtime was chosen.** No `npm init`, no framework scaffold. Creating a `package.json` early would quietly pre-commit the decision the spike exists to make. *(That decision has now been made deliberately — see D1 — so scaffolding begins at S0.)*
+- **Defensive database gitignore, written before any storage layer exists.** Doing this after the first store is created is one bad `git add -A` too late.
+
+---
+
+## 2. Runtime verification (2026-08-05)
+
+### Verified by running it
+
+Measured on this machine — Windows 11, Node v24.11.1, npm 11.6.2 — not taken
+from the protocol's documentation.
+
+- **`tsc --noEmit` on the protocol is clean.** Exit 0, re-confirmed after the ZK changes landed.
+- **The SDK boots with real Iroh transport on Windows.** `npx tsx scripts/peer-cli.mts` came up, derived an identity, and printed a well-formed ticket carrying one IPv4 and two IPv6 direct addresses. Clean shutdown on `/quit`.
+- **The API quoted in the master prompt matches the code**, with one correction: `connect()` takes a `PeerTicket` **object**, not a string.
+
+**Not verified:** the protocol's 422-test count and `npm audit` status. Not run this session.
+
+---
+
+## Findings
+
+### Finding 1 — SDK packaging — ✅ **RESOLVED 2026-08-05**
+
+Was: no `package.json` under `packages/*`, root private with no entry point, so
+`@dicsussion/sdk` could not be installed and the no-deep-imports rule was
+unenforceable.
+
+Now: `@dicsussion/sdk` and `@dicsussion/core` are real packages with `exports`
+maps, and npm workspaces are configured. EchoIt can depend on them properly and
+the boundary rule is enforceable.
+
+---
+
+### Finding 2 — Ticket codec ergonomics — 🔽 **DOWNGRADED**
+
+`encodeTicket` / `decodeTicket` / `PeerTicket` are still absent from
+`@dicsussion/sdk`'s public surface. But `@dicsussion/core` now exposes a
+`./transport` entry point that exports them, so this is a **supported path**,
+not a reach into internals — the app depends on two packages instead of one.
+
+Combined with D2 (QR deprioritized), this stops being a blocker. Still worth an
+upstream ergonomics request eventually, since `client.connect()` takes a
+`PeerTicket` and every consumer must move one between devices somehow.
+
+**One UX consequence survives regardless of QR.** The ticket embeds *live direct
+socket addresses* — confirmed in the smoke test, which published a LAN IPv4 and
+two IPv6 addresses. Those go stale when a device changes network. Any pairing
+flow must tolerate a ticket whose addresses no longer dial and fall back to the
+relay path rather than failing outright.
+
+---
+
+### Finding 3 — No iOS binary for Iroh — ⚠️ **DROVE D1**
+
+`@number0/iroh` v1.1.0 publishes NAPI prebuilts for macOS arm64, Windows
+x64/arm64, Linux x64/arm64/armv7, and **Android arm64 + armv7**. There is no
+`aarch64-apple-ios` or `aarch64-apple-ios-sim` target — `aarch64-apple-darwin`
+is macOS desktop, not iOS.
+
+This is the finding that decided the runtime. See D1. It is resolved by
+architecture rather than by a fix: under Tauri, Iroh is a Rust crate and the
+missing NAPI binary is irrelevant.
+
+---
+
+### Finding 4 — ZK proofs on the message path — ✅ **RESOLVED 2026-08-05**
+
+Was: `sendMessage` and `ingestRemote` both hardcoded `proofValid: true`, no
+proof was generated, none verified, and `ZekPocProver` was never called from the
+SDK package.
+
+**Verified fixed this session.** `verifyRlnSignal` (`client.ts:714`) now
+rejects:
+
+- a missing RLN share,
+- a message index outside the rolling-window quota,
+- malformed field elements,
+- **a message that omits its proof on a channel that requires one**
+  (`client.ts:736-745`) — this closes the strip-the-proof bypass, which was the
+  one that mattered,
+- a proof present but failing verification.
+
+`ingestRemote` throws *before* `recordLocally`, so a rejected message never
+lands. Proof policy is per-channel (`groups.requiresProofs`), not per-node
+config, so a receiver cannot weaken enforcement by changing its own settings.
+The protocol's suites 3.3 and 3.4 cover this path; typecheck is clean.
+
+**Remaining nuances, none blocking:**
+
+- `zkProofs` defaults to `'off'`, and the only other value is `'anonymous'` — so
+  identified (`did:key`) messages never carry a proof. **This is the correct
+  design**: you rate-limit an identified sender by identity, and RLN exists for
+  the anonymous case where you cannot. It is the master prompt's *"every message
+  carries a proof"* phrasing that is inaccurate, not the code. **Do not repeat
+  that phrasing in user-facing copy.**
+- `verifiedTier` is hardcoded 0 and quota is always computed at tier 0, so WoT
+  tiers do not yet raise quotas. Acknowledged in-code.
+- `getHistory` still hardcodes `proofValid: true` and drops `zkProof`, so
+  replayed history cannot distinguish "verified against a proof" from "no proof
+  required" — the exact conflation `ingestRemote` added `zkProof` to solve.
+  Cosmetic, since invalid messages are never stored.
+
+---
+
+### Finding 7 — Webview bundling: three upstream blockers, measured — 🔴 **BLOCKS S0**
+
+*2026-08-05. Established empirically by bundling the SDK with Vite, not by
+reading code.* A throwaway probe (`src/probe.ts`) imports `DicsussionClient`
+and the ticket codec exactly as the app will; `vite build` then reports what
+actually reaches the bundle. Re-run instructions are in the file.
+
+**Solved on EchoIt's side** (committed in `vite.config.ts`):
+
+| Problem | Fix |
+| :--- | :--- |
+| Automerge ships WASM; Rollup cannot embed it natively | `vite-plugin-wasm`, with `build.target: "es2022"` for its top-level await |
+| `node:events` | Aliased to the `events` polyfill — faithful, EventEmitter behaves normally |
+| `@number0/iroh` unresolvable | Aliased to `src/shims/unavailable.ts`. The SDK already imports it *dynamically* (`iroh-transport.ts:144`) and that was deliberate — but Rollup still resolves dynamic imports at build time, so it must resolve to something. Dead code here: Iroh lives in Rust. |
+| `node:dgram` | Same stub. mDNS stays disabled. |
+
+`vite-plugin-top-level-await` was deliberately **not** used: its dependency tree
+pulls a vulnerable `uuid` and fails `npm audit`, which our own rules forbid.
+Targeting ES2022 gets top-level await natively instead.
+
+**Not solvable here — these are upstream, in `@dicsussion/core`:**
+
+1. **AES-GCM via `node:crypto`** — `crypto/encryption.js:22,48` uses
+   `createCipheriv`/`createDecipheriv`, which are **synchronous**. WebCrypto's
+   equivalent is async, so no shim can bridge them. A sync pure-JS backend
+   (`@noble/ciphers`, already in the noble family the project uses) is the way
+   out. *Medium effort, mechanical.*
+
+2. **RSA-2048 keygen via `generateKeyPairSync`** — `crypto/blind-signature.js:79`,
+   reached from `identity-service.ts:142` during **identity creation**, which
+   runs on every first `DicsussionClient.init()`. So this is on the S0 path, not
+   an optional WoT extra. WebCrypto cannot substitute: its RSA generation is
+   async and does not expose the raw private exponent the blind-signature math
+   needs. *Hardest of the three.* Options: a pure-JS RSA keygen, or make blind
+   keypair generation lazy and async so it never runs unless vouchers are used.
+
+3. **Storage — `SQLiteDriver` hardcoded** (SDK-1, already recorded). Confirmed
+   by the probe: `better-sqlite3` is pulled into the bundle graph and its
+   `node:fs`/`path` imports get externalized.
+
+**What this means for the plan.** S0 cannot pass until 1, 2, and 3 land
+upstream. That is now the critical path — not the Tauri work, which scaffolds
+and builds cleanly today. Sequencing the upstream fixes first is the difference
+between S0 taking a day and taking a week of workarounds that get thrown away.
+
+**Verified working today:** repo scaffolds, installs, typechecks (`tsc --noEmit`
+exit 0), builds (`vite build` exit 0), and `npm audit` is clean — with the probe
+unwired. The probe is what fails, and it fails for exactly the three reasons
+above.
+
+---
+
+### Finding 8 — npm migration: three dev-mode resolution failures — ✅ **RESOLVED 2026-08-12**
+
+Moving from local `file:` paths to published `@dicsussion/*@0.1.0` surfaced
+three distinct failures **that only appear in `vite dev`, never in
+`vite build`**. Each was invisible until the one before it was fixed, and none
+could have been caught by the earlier browser-based S0 run.
+
+The common cause: while the packages were symlinked, npm links are served as
+source. Registry packages get pre-bundled by esbuild instead, which is a
+completely different resolution pipeline from Rollup's.
+
+| # | Failure | Fix |
+| :--- | :--- | :--- |
+| 1 | `Export 'import_datagram_socket' is not defined in module` | `optimizeDeps.exclude` for both `@dicsussion` packages — esbuild does not apply `resolve.alias` |
+| 2 | `crc-32 does not provide an export named 'default'` | `optimizeDeps.include` for `crc-32`, `lz4js`, `poseidon-lite` — excluding the SDK also stopped CJS→ESM conversion for its CommonJS deps |
+| 3 | `does not provide an export named 'clearDatagramBuses'` | Rebuilt `src/shims/unavailable.ts` from the barrels' actual re-export lists; 0.1.0 exports four names the local build did not |
+
+**Lesson worth keeping: `vite build` passing is not evidence that `vite dev`
+works, and vice versa.** Both belong in the verification loop from here on.
+
+**One self-inflicted regression, recorded because the distinction is subtle.**
+While rebuilding the shim I made `resolveArtifacts()` throw, applying a
+"fail loudly" rule too broadly. It is *designed* to return `null` in any
+non-Node runtime, and `client.js` reads `null` as "no artifacts, skip ZK" — so
+throwing broke `DicsussionClient.init()` outright even with `zkProofs: 'off'`.
+Its sibling `requireArtifacts()` genuinely throws by contract.
+
+The rule now written into the shim: **a stub may return a value only when that
+value is one the caller is designed to receive.** Compare `isDevelopmentCeremony`,
+where `false` means "safe to proceed" — there the benign-looking return is the
+lie, and throwing is correct.
+
+---
+
+### Finding 10 — `browser: false` cannot satisfy named re-exports — ✅ **RESOLVED upstream in 0.1.1**
+
+`@dicsussion/core@0.1.1` and `@dicsussion/sdk@0.1.1` replaced the
+`browser: false` mappings with **`browser` export conditions pointing at real
+variant barrels**:
+
+| Package | Condition target |
+| :--- | :--- |
+| `@dicsussion/core/transport` | `dist/transport/index.browser.js` |
+| `@dicsussion/core/zk` | `dist/zk/index.browser.js` |
+| `@dicsussion/sdk` (root) | `dist/browser.js` |
+| `sdk/dist/engine-bootstrap.js` | `engine-bootstrap.browser.js` |
+
+The variants export the same names as throwing stubs, mirror the constants
+that lived inside Node-only modules (`CONTROL_STREAM_TAG = 0x00`,
+`DICSUSSION_ALPN`, `STREAM_PRIORITY`, `MDNS_*`), and are guarded by
+`tests/transport/browser-barrel-parity.spec.ts` so the duplication cannot
+silently drift. They also adopt the `resolveArtifacts` → `null` /
+`isDevelopmentCeremony` → throw distinction for the same reason we did.
+
+**Effect here:** `vite.config.ts` went from **19 aliases to 2** — only the
+`events` and `buffer` polyfills remain — and `src/shims/unavailable.ts` is
+deleted. Verified in **both** pipelines, since build and dev use different
+resolvers: `vite build` exit 0, and S0 in the Tauri webview reports
+`PASSED tauri=true priorRuns=5 init=71.7ms`.
+
+---
+
+### Finding 14 — `iroh` 1.0.3 does not compile alongside Tauri 2 on Windows — 🔴 **BLOCKS S1b (Rust half)**
+
+Adding `iroh = "1.0.3"` to `src-tauri` fails the build at 564/588 crates:
+
+```
+error[E0277]: the trait bound `IWbemObjectSink: windows_core::Interface` is not satisfied
+error[E0277]: the trait bound `QuerySink_Impl: core::unknown::IUnknownImpl` is not satisfied
+```
+
+**The failure is not in iroh.** It is a dependency-resolution conflict:
+
+```
+wmi 0.18.4 ← netwatch 0.19.1 ← iroh 1.0.3
+                             ← portmapper 0.19.1 ← iroh 1.0.3
+```
+
+`wmi 0.18.4` declares **both** of these with the same wide range:
+
+```toml
+windows      = ">=0.59, <0.63"
+windows-core = ">=0.59, <0.63"
+```
+
+A range spanning semver-*incompatible* 0.x versions lets cargo satisfy the two
+independently. Tauri pins `windows-core 0.61.2` through `tao` and
+`webview2-com`, so cargo unified wmi's `windows` down to **0.61.3** while its
+`windows-core` resolved to **0.62.2**. `IWbemObjectSink` then comes from the
+0.61 tree and `Interface` from the 0.62 tree, and the bound cannot hold.
+
+Without Tauri in the graph cargo would pick `windows 0.62.x` for wmi and it
+would compile — which is why this is specifically a **Tauri + iroh** conflict
+rather than a plain iroh bug.
+
+**Attempted and rejected:** adding a direct `windows = "0.62"` dependency does
+not help. Cargo reuses the `0.61.3` already in the graph because it satisfies
+wmi's range; a second version does not force re-unification.
+
+**No feature flag avoids it.** `wmi` is a mandatory
+`cfg(target_os = "windows")` dependency of `netwatch`, and `netwatch` is a
+mandatory dependency of `iroh`. Disabling iroh's `portmapper` feature removes
+one path to it but not the direct one.
+
+**Current state:** `iroh` has been removed from `src-tauri/Cargo.toml` so the
+app builds and S0 stays reproducible. The repository is left working, not
+half-migrated.
+
+**RESOLVED 2026-08-12 via `[patch.crates-io]`.** iroh 1.0.3 now compiles
+inside Tauri (1m 49s, binary 13.1 MB). Everything cheaper was tried first and
+failed for a specific, recorded reason:
+
+| Attempt | Outcome |
+| :--- | :--- |
+| Older iroh (0.93.2) | ❌ Clears `wmi`, then fails on `ed25519-dalek 3.0.0-pre.1` — `pkcs8::Error::KeyMalformed` went from a unit to a tuple variant. iroh 0.93.2 *requires* that pre-release, so it cannot be pinned to stable 2.x |
+| `cargo update -p windows-core --precise 0.61.2` | ❌ `netwatch` requires `windows ^0.62.2`, which needs `windows-core 0.62.x` — it will not go down |
+| Forcing `windows` up to 0.62 | ❌ Tauri's `tao` requires `^0.61` — it will not go up. The graph is pinned from both ends with `wmi` in between |
+| Adding a direct `windows = "0.62"` dep | ❌ Cargo reuses the `0.61.3` already in the graph; a second version does not force re-unification |
+| Disabling iroh features | ❌ `netwatch` is a mandatory, unfeatured dependency of `iroh` |
+
+Also checked: iroh **1.0.0 through 1.0.3 all show the identical split**, and all
+use `ed25519-dalek 3.0.0-rc.0`, which compiles. On the 1.0.x line `wmi` is the
+only blocker.
+
+**The patch is exactly two version strings.** `src-tauri/vendor/wmi` is
+`wmi 0.18.4` with `">=0.59, <0.63"` → `"0.62"` for both `windows` and
+`windows-core`, and nothing else changed. `Cargo.toml` carries the diagnosis
+and the removal condition.
+
+**Two caveats, deliberately not hidden:**
+
+- It puts 391 KB / 7.5k lines of third-party source in the repo. `vendor/` must
+  be committed — `[patch]` resolves by path, so a fresh clone will not build
+  without it. Verified it is not caught by `.gitignore`.
+- **`[patch.crates-io]` applies only to the root manifest.** It fixes *our*
+  build and does nothing for any downstream consumer. This is a workaround with
+  an expiry date, not a fix.
+
+**Still worth reporting upstream** for that second reason: `wmi` floating
+`windows` and `windows-core` independently across incompatible majors will hit
+every Tauri user who touches iroh. The ranges should move together. Not filed —
+opening an issue on a third-party repo is outward-facing and needs an explicit
+go-ahead.
+
+Worth noting this is independent of Finding 13. Even with the Rust side
+compiling, the TypeScript side still cannot construct a wire-compatible
+`ITransport`. **S1b needs both resolved.**
+
+---
+
+### Finding 13 — A custom `ITransport` cannot be built from the public API — ✅ **RESOLVED in SDK 0.2.0**
+
+`createBridgedTransport(pipe, options)` shipped, exported from **both** barrels
+including the browser one. The handshake, session-key derivation, framing, and
+priority all stay inside the SDK — nothing security-critical was pushed onto
+consumers, which was the whole argument.
+
+The shipped `BridgePipe` is **flat and connection-id keyed** — `connect`,
+`send`, `onData`, `onInbound`, `onClosed`, `disconnect`, `close` — rather than
+the per-connection pipe objects we had sketched. That maps almost 1:1 onto the
+Rust commands already built, so adapting *removed* code from our side.
+
+Two things we asked for landed as asked: the docs state the byte-stream
+contract explicitly (*"a host may split one `send` across several `onData`
+calls, or coalesce several sends into one; both are correct"*), and
+`BridgeInbound.unverifiedTransportId` keeps a host from being asked for a
+`did:key` it cannot know.
+
+`src/transport/tauri-bridge-pipe.ts` implements it and typechecks against the
+real types.
+
+**One gap remains, fixed in 0.2.1:** `createBridgedTransport` needs the identity
+keypair, but `DicsussionClient.init()` derives the identity internally and
+`ClientRuntimeOptions.transport` accepts an already-constructed instance —
+chicken and egg. A transport *factory* form (`transport: (identity) => ITransport`)
+resolves it and is confirmed to be landing in 0.2.1.
+
+---
+
+### Finding 13 (original) — A custom `ITransport` cannot be built from the public API
+
+The Tauri bridge was designed so Rust owns a dumb Iroh byte pipe while
+TypeScript performs the RFC 001 §5 handshake using core's own browser-safe
+primitives — reusing tested protocol code instead of reimplementing it. Most of
+what that needs *is* browser-safe: `frame-codec`, `frame-reader`, `handshake`,
+`priority-queue`, `transport-key`, `compression`, `ticket-codec`. Only the two
+NAPI wrappers are mapped out.
+
+**But the barrel withholds exactly the symbols the handshake needs.**
+`handshake.js` exports 12 symbols; `transport/index.js` re-exports 9. Reading
+`iroh-transport.js` `setUpDialer()` — the reference implementation — a
+wire-compatible dialer requires:
+
+| Symbol | Source | Exported? |
+| :--- | :--- | :--- |
+| `createHandshakeInit`, `verifyHandshakeChallenge`, `createHandshakeAck`, `calculateClockOffset`, `processHandshakeInit`, `verifyHandshakeAck` | `handshake.js` | ✅ |
+| **`deriveSessionKey`** | `handshake.js` | ❌ |
+| **`transcriptFor`** | `handshake.js` | ❌ |
+| **`HandshakeTag`** | `handshake.js` | ❌ |
+| **`encodeControlJson` / `decodeControlJson`** | `json-bytes.js` | ❌ — module not re-exported at all |
+| **`readStreamTag`** | `iroh-connection.js` | ❌ |
+| `CONTROL_STREAM_TAG` | `iroh-connection.js` | ⚠️ re-exported, but sourced from a browser-mapped-out module, so in a browser build it resolves to our shim rather than the real `0x00` |
+
+`deriveSessionKey` is not optional: `IrohConnection` takes a `sessionKey` and
+zeroes it on close, so without it no wire-compatible connection exists.
+
+**We are not reimplementing these.** Session-key derivation and transcript
+binding are security-critical and must be byte-exact — an approximation
+reconstructed from `dist/` would appear to work against our own code while
+being wrong, or insecure, against a real peer. That is precisely the kind of
+"reach into internals as a workaround" `AGENT_INSTRUCTIONS.md` §2 forbids.
+
+**Two ways upstream could unblock this, in order of preference:**
+
+1. **Export a bridged-transport factory** — something like
+   `createBridgedTransport(pipe)` in `@dicsussion/core/transport`, where `pipe`
+   is an abstract bi-directional byte channel. Any non-Node host needs exactly
+   this: Tauri, React Native with a Rust core, Electron. It keeps the handshake
+   inside the SDK where it is tested, and consumers supply only transport.
+2. **Export the missing primitives** — `deriveSessionKey`, `transcriptFor`,
+   `HandshakeTag`, the two `json-bytes` helpers, `readStreamTag`, and a
+   browser-safe `CONTROL_STREAM_TAG`. Cheaper for upstream, but it pushes
+   security-critical sequencing onto every consumer.
+
+**Not blocked meanwhile:** the Rust half — endpoint lifecycle, ALPN, bi-stream
+open/accept, and the IPC surface — is required under either resolution and is
+being built now. It also settles a separate unknown: the `iroh` crate has never
+been compiled into this Tauri app.
+
+*(Aside: our shim guessed `CONTROL_STREAM_TAG = 0`, and the real value is
+`0x00`. Correct by luck, not by knowledge — another reason not to reconstruct
+protocol constants from the outside.)*
+
+---
+
+### Finding 12 — SDK types reference `better-sqlite3` without depending on its types — ⚠️ **UPSTREAM**
+
+`@dicsussion/sdk` ships declaration files that import `better-sqlite3` types:
+
+```
+sdk/dist/storage/sqlite-driver.d.ts(7,22): error TS7016:
+  Could not find a declaration file for module 'better-sqlite3'
+sdk/dist/storage/migrations.d.ts(7,27): error TS7016: (same)
+```
+
+`better-sqlite3` ships no bundled types, and the SDK does not depend on
+`@types/better-sqlite3`, so **every TypeScript consumer of the root entry
+fails to typecheck** unless they install it themselves or hide the problem
+with `skipLibCheck`. Consumers of `@dicsussion/sdk/browser` are unaffected,
+since that entry never reaches the SQLite driver.
+
+Fix upstream by adding `@types/better-sqlite3` as a dependency (not a
+devDependency — it is needed to consume the published types). EchoIt installs
+it directly for now.
+
+Found only because `harness/` was brought under typecheck; it had been
+invisible while the harness ran unchecked.
+
+---
+
+### Finding 11 — Chat content at rest is NOT encrypted — 🔴 **PRODUCT DECISION NEEDED**
+
+Documented in the 0.1.0 migration notes: *"`storageKey` protects identity
+secrets; message bodies and Automerge snapshots are stored directly."*
+
+So `storageKey` — which the SDK now mandates — protects the identity seed, not
+the conversations. Anyone with filesystem access to the device reads message
+history in the clear.
+
+**This sits directly against `AGENT_INSTRUCTIONS.md` §3.4** ("no plaintext
+message content on disk outside the SDK's encrypted store"), because it turns
+out the SDK's store is not encrypted for bodies. It also constrains what EchoIt
+may claim: *"your messages stay on your phone"* remains true, but any stronger
+implication that they are protected *on* the phone would not be.
+
+Not a blocker for S1/S2. It **is** a blocker for marketing copy, the eventual
+threat-model write-up, and any "your data is safe if you lose your phone"
+claim. Options: accept and disclose plainly; encrypt at the app layer before
+handing content to the SDK; or request at-rest encryption upstream.
+
+Two related limits from the same notes, recorded so they are not rediscovered
+the hard way:
+
+- **Replicated CRDT changes are not individually authenticated.** Only paired
+  peers can write, but a peer you later block can still have written arbitrary
+  state — removing them from the UI does not retroactively invalidate it.
+  Relevant when block/report is built (M4.3.4).
+- **The WebSocket relay does not encrypt CRDT traffic.** Irrelevant to us —
+  EchoIt uses Iroh/QUIC — but recorded so nobody later adds a WebSocket
+  fallback "for flaky networks" and silently surrenders the protocol's main
+  property.
+
+---
+
+### Finding 9 — Published package ships a vulnerable transitive dep — ⚠️ **UPSTREAM**
+
+`npm install @dicsussion/sdk@0.1.0` brings 3 high-severity advisories:
+
+```
+@dicsussion/sdk → @dicsussion/core → snarkjs@0.7.6 → bfj → jsonpath → underscore@1.13.6
+```
+
+`underscore <=1.13.7` is GHSA-qpx9-hpmf-5gmw (unbounded recursion → DoS).
+
+The protocol repo already carries `"overrides": { "underscore": "^1.13.8" }`
+at its own root — but **npm `overrides` apply only from the root project and
+do not reach consumers**, so every downstream consumer inherits the
+vulnerability and must repeat the override. EchoIt now does; audit is clean.
+
+Upstream should bump `snarkjs`, or document the required override in the
+install instructions.
+
+---
+
+### Finding 10 — `browser: false` cannot satisfy named re-exports — ⚠️ **UPSTREAM**
+
+`@dicsussion/core` and `@dicsussion/sdk` map Node-only modules to `false` via
+the `browser` field. Under Rollup that substitutes an **empty** module — but
+their barrels re-export named symbols from exactly those modules:
+
+```js
+core/dist/transport/index.js: export { DICSUSSION_ALPN, IrohTransport } from './iroh-transport.js';
+core/dist/zk/index.js:        export { requireArtifacts, resolveArtifacts } from './artifact-paths.js';
+sdk/dist/engine-bootstrap.js: import { SQLiteDriver } from './storage/sqlite-driver.js';
+```
+
+An empty module has no named exports, so resolution fails before anything can
+yield `undefined`. The SDK's own guard (`typeof SQLiteDriver !== 'function'`)
+assumes a bundler behaviour Rollup does not provide.
+
+`@dicsussion/sdk/browser` only fixes the SDK barrel; `core/transport`,
+`core/zk`, and `engine-bootstrap` still require consumer-side named-export
+stubs. Any consumer bundling for a browser hits this. A browser-specific
+subpath for `core/transport` and `core/zk`, or stub modules exporting the same
+names, would remove the need.
+
+---
+
+### Finding 5 — Strategy doc and master prompt disagree on browsers
+
+`ECHOIL_APP_STRATEGY.md` lists "Works everywhere: Desktop, mobile, web browsers"
+as a product pillar. The master prompt says browsers are out of scope for
+EchoIt, with the SDK remaining browser-usable for third parties.
+
+**Resolved in favour of the master prompt.** Recorded so the next reader does
+not inherit the ambiguity. Mildly ironic given D1 — the SDK will now run in a
+webview regardless, but inside a native app shell, not as a website.
+
+---
+
+### Finding 6 — Protocol-side risks EchoIt inherits
+
+- ~~**The trusted setup is single-party and development-only.**~~ ✅ **RESOLVED
+  2026-08-11.** The ceremony completed with six parties, and the proving key
+  shipped in `@dicsussion/core@0.1.0` is the real output. **This removes the
+  absolute gate on public release.** `allowDevelopmentCeremony` is now dead
+  config — we never passed it, so there was nothing to delete, and it must not
+  be introduced: if a future build ever picked up a development key, that flag
+  is exactly what would let it through silently. Record:
+  https://github.com/mrsarthi/Ceremonial-Contributions
+- **RFC 003's "sub-50 ms prover on WASM" is unachievable** — measured ~1.1 s at
+  5,307 constraints. A native prover is the path to sub-100 ms. Relevant to
+  mobile if per-message proving is ever enabled.
+
+---
+
+## Upstream requests for DicsussionProtocol
+
+### SDK-1 — Storage driver is not selectable *(blocks S0)*
+
+`initStorage` in `packages/HLessEnd/src/engine-bootstrap.ts:58` hardcodes
+`new SQLiteDriver(storagePath)`. `IndexedDbDriver` exists and is exported from
+`storage/index.ts`, but there is no way to reach it through
+`DicsussionClient.init()`. `initIdentity` and the `client.ts` storage fields are
+also typed to the concrete `SQLiteDriver` rather than the `IStorageDriver`
+interface.
+
+**Why it blocks:** `better-sqlite3` is a Node NAPI module and cannot load in a
+webview. Without this seam the Tauri build has no way to persist anything, and
+S0 cannot start.
+
+**The change is mechanical.** Surveyed 2026-08-05: `SQLiteDriver` appears as a
+*concrete type* in exactly five places, and the only method it adds beyond
+`IStorageDriver` is `getDatabase()`, which **has no callers outside the driver
+itself**. Nothing in the SDK depends on SQLite-specific behaviour, so widening
+is a type change rather than a refactor.
+
+| Location | Change |
+| :--- | :--- |
+| `engine-bootstrap.ts:29` | `readonly driver: SQLiteDriver` → `IStorageDriver` |
+| `engine-bootstrap.ts:58` | Accept an injected driver; default to `new SQLiteDriver(storagePath)` |
+| `engine-bootstrap.ts:78` | `storage: SQLiteDriver \| null` → `IStorageDriver \| null` |
+| `client.ts:48` | Import `IStorageDriver` instead of `SQLiteDriver` |
+| `client.ts:111` | `private storage: SQLiteDriver \| null` → `IStorageDriver \| null` |
+
+Then add the seam to `ClientRuntimeOptions`, mirroring `transport` (which
+already accepts `'local' | 'iroh' | ITransport`):
+
+```ts
+/** Storage backend. Defaults to SQLite; pass a driver for non-Node hosts. */
+readonly storage?: IStorageDriver;
+```
+
+`IndexedDbDriver implements IStorageDriver` already, and its constructor takes
+`{ databaseName?, factory? }` — so the webview call becomes
+`DicsussionClient.init({}, { storage: new IndexedDbDriver(), transport })`.
+
+**Risk:** low. No behaviour changes for existing Node callers, and the
+protocol's suite should stay green unchanged.
+
+### SDK-2 — ZK artifact loading is filesystem-bound *(needed before proofs on mobile)*
+
+`packages/core/src/zk/artifact-paths.ts` and `zk/prover.ts` load the zkey and
+wasm via `node:fs` / `node:path` / `node:url`. A webview must fetch them as
+bundled assets. Not on the spike path (`zkProofs: 'off'`), but required before
+anonymous messaging works in the app.
+
+### SDK-3a — AES-GCM must not require `node:crypto` *(blocks S0)*
+
+`packages/core/src/crypto/encryption.ts` uses `createCipheriv` /
+`createDecipheriv`, which are **synchronous**. WebCrypto's AES-GCM is async, so
+this cannot be shimmed — a sync implementation is required.
+
+**Needed:** back it with `@noble/ciphers` (`gcm`), which is sync, pure JS, and
+from the same family as the `@noble/curves` / `@noble/hashes` the project
+already depends on. `randomBytes` → `crypto.getRandomValues`; `createHash` →
+`@noble/hashes`. Mechanical, and it removes the Node dependency for
+`transport/handshake.ts` and `crdt/state-root.ts` at the same time.
+
+*Measured, not assumed — see Finding 7.*
+
+### SDK-3b — RSA keygen runs on first init and cannot run in a webview *(blocks S0)*
+
+`crypto/blind-signature.ts:79` calls `generateKeyPairSync('rsa', …)`, reached
+from `identity-service.ts:142` during identity creation — so it fires on the
+**first `DicsussionClient.init()` of every install**, not only when vouchers are
+used. WebCrypto cannot substitute: its RSA generation is async and does not
+expose the raw private exponent the blind-signature math needs.
+
+**Two ways out, and the choice is the SDK's to make:**
+
+- *Make it lazy.* Generate the blind keypair on first voucher use rather than at
+  identity creation, and allow it to be async. Keeps identity creation cheap on
+  every platform — arguably the better design regardless of EchoIt, since most
+  users may never issue a voucher.
+- *Pure-JS RSA keygen.* Works everywhere but is slow (prime search) and adds a
+  dependency doing security-critical bignum work.
+
+We would prefer the lazy option, but it changes SDK semantics, so it is a
+protocol decision rather than an app one.
+
+### SDK-4 — Ticket codec ergonomics *(low priority)*
+
+Re-export `encodeTicket`, `decodeTicket`, `TICKET_PREFIX`, and `PeerTicket` from
+`@dicsussion/sdk`. Workaround exists via `@dicsussion/core/transport`.
+
+### SDK-5 — Fix the browsers line in `ECHOIL_APP_STRATEGY.md` *(doc)*
+
+---
+
+## Housekeeping
+
+- **This directory is named `Dicsussion-Rewrite`, but the project is EchoIt.**
+  EchoIt is not a rewrite of the protocol — it is an application on top of an
+  unmodified one. Renaming is cheap now and awkward once remotes and CI exist.
+  Left alone pending a decision, since it is the user's to make.
+- Standing documents live in `.agents/`. `README.md` and `.gitignore` are at the
+  repository root.
+- Git initialised on `main`. No commits yet, no remote configured.
+
+---
+
+## Next session starts here
+
+*Rewritten 2026-08-19. The spike is over, the gate is open, and the app shell +
+onboarding are built and audited. What follows is the road through Phase 2.*
+
+1. **Pairing UI (2.3)** — show my ticket, accept a pasted one, and handle the
+   three pairing states from `PRODUCT.md` §5. Blocked on Q17/Q18, which are
+   parked by choice.
+2. **One-to-one chat (2.4)** and **offline/outbox (2.5)** — the outbox needs the
+   `Staged` vs `Sent` distinction `PRODUCT.md` §6.2 asks for, so a half-paired
+   peer never shows "sent".
+3. **Q21 — updates.** Design the update mechanism **before the first GitHub
+   Release**. The first build users install must already know how to update
+   itself, or they are stranded on it.
+
+### Needs a phone (batch these into one session)
+- Background-delivery retest on **0.3.1**, which fixed the `detachConnection`
+  liveness bug. The previous verdict (messages lost while reporting success) was
+  measured against the broken build and is no longer trustworthy either way.
+- **CSP on Android** — verified on WebView2 only so far.
+- **The keychain on Android** — `android-native-keyring-store` compiles for
+  `aarch64` but no device has run it. The self-check is already wired into the
+  bridge harness, so this costs nothing extra.
+- **The UI on Android** — onboarding, fonts, safe-area insets, and the reset
+  flow have only been exercised on Windows.
+
+### Still open
+- **Q11** — bundle identifier and product name. Recommendation on the table:
+  `io.github.mrsarthi.echoit`, `productName: "EchoIt"`. Awaiting a decision.
+- **Q17 / Q18** — pairing design. Parked by choice until the above clears.
+- **Q20** — keep checking whether `wmi` fixed its version ranges upstream, so
+  the vendored patch in `src-tauri/vendor/wmi` can be dropped.
+
+### Verification & test count
+- **Harness tests:** 5 passing — `test:two-peer` (3), `test:bridge` (1), CSP
+  message flow (1). All exercise real Iroh/QUIC across real OS processes.
+- **Verified on hardware:** two laptops (direct); two phones on one network
+  (direct, 377 ms connect / 527 ms delivery); two phones on mobile data behind
+  double CGNAT (still direct, 1677 ms).
+- **Assumed, not verified:** the protocol's 422-test count and audit status.
+
+---
+
+## Brand Logo & Desktop 3-Zone Navigation (2026-08-21)
+
+### 1. Transparent 3D Logo Asset Integration
+- Added the official 3D clay/terracotta 'e' logo asset in transparent PNG state (`public/logo.png`, `src/assets/logo.png`).
+- Created reusable `<Logo size={...} />` component ([`src/components/ui/Logo.tsx`](file:///c:/Users/wfors/Desktop/Scripts/Dicsussion-Rewrite/src/components/ui/Logo.tsx)) ensuring full alpha-transparency with zero artificial background borders.
+- Integrated logo into all required brand touchpoints:
+  - **Desktop Nav Rail**: Top brand mark (`36px`).
+  - **Desktop Main Stage**: Hero resting stage illustration (`80px`).
+  - **Onboarding Intro**: Header identity mark (`36px`).
+  - **Chats Tab**: Stream header (`28px`) and empty state hero (`48px`).
+  - **Favicon**: Window / Tab icon in `index.html`.
+
+### 2. WhatsApp Web Style Desktop Navigation Refactor
+- Refactored wide layout ($\ge 840\text{px}$) from an awkward horizontal bottom-bar in the sidebar to a full 3-Zone desktop architecture:
+  - **Far-Left Nav Rail (60px)**: Top (Brand + Chats + Contacts), Bottom (Settings + Profile).
+  - **Active Sidebar (340px)**: 100% vertical scrollable stream for chats/contacts/settings.
+  - **Main Workspace (flex: 1)**: 1:1 active conversation or resting journal stage.
+- Mobile layout ($< 840\text{px}$) preserved with standard bottom navigation on Home and full-height chat.
+
