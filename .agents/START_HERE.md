@@ -101,9 +101,19 @@ bitten three times. Check both.
 
 ## Open decisions and known debts
 
-- **Requests badge.** The nav rail shows a count badge for pending connection
-  requests. `PRODUCT.md` §5 says knocks must produce **no badge**. Either drop
-  the badge or amend the rule — currently the code and the doc disagree.
+- ~~**Requests badge.**~~ **Resolved 2026-08-21.** Both navs now show an
+  unnumbered clay dot for pending requests; Chats keeps its unread count. The
+  entry above was a misreading on my part and is left here as a caution:
+  `PRODUCT.md` §5 State 2 *specifies* a dot and forbids only things that
+  **push** (notification, banner, app-icon badge), and `DESIGN.md` §1 designs
+  unread counts on Chats. The docs never disagreed with each other — the
+  summary of them did. Details in `PROGRESS.md`.
+- **A unilateral contact says "Connected directly"** — `PRODUCT.md` §5 State 3
+  copy shown in State 1. Found 2026-08-21, open, logged as **Finding 17**. This
+  is the silent-non-delivery failure §5 exists to prevent, and it gets worse the
+  moment the composer is wired.
+- **Unread counts are hardcoded to `0`** (`AppShell.tsx:38`, `:93`), so the
+  count branch in both navs and in `ChatsTab` has never rendered.
 - **388 KB logo**, shipped twice (bundle + favicon), displayed at 80px.
 - **Updater (Q21)** — designed in `IMPLEMENTATION_PLAN.md`, not built. Must exist
   **in the first release** or every tester is stranded.

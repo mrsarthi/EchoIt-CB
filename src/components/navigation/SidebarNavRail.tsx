@@ -16,11 +16,17 @@ export function SidebarNavRail({
   unreadChatsCount = 0,
   pendingRequestsCount = 0,
 }: SidebarNavRailProps) {
+  // `badge` is a count, `dot` is presence without a number, and knocks get the
+  // dot on purpose. PRODUCT.md §5 State 2 specifies a clay dot on the Contacts
+  // tab, and the request rules under it say a knock never interrupts you — a
+  // number is an interruption, because it asks to be cleared. Unread
+  // conversations are a different thing and do carry a count (DESIGN.md §1).
   const topTabs: Array<{
     id: AppTab;
     label: string;
     icon: React.ReactNode;
     badge?: number;
+    dot?: boolean;
   }> = [
     {
       id: "chats",
@@ -32,7 +38,7 @@ export function SidebarNavRail({
       id: "contacts",
       label: "Contacts",
       icon: <AddressBookIcon size={20} />,
-      badge: pendingRequestsCount,
+      dot: pendingRequestsCount > 0,
     },
   ];
 
@@ -58,6 +64,7 @@ export function SidebarNavRail({
     label: string;
     icon: React.ReactNode;
     badge?: number;
+    dot?: boolean;
   }) => {
     const isActive = activeTab === tab.id;
     return (
@@ -83,10 +90,23 @@ export function SidebarNavRail({
         role="tab"
         aria-selected={isActive}
         title={tab.label}
-        aria-label={tab.label}
+        aria-label={tab.dot ? `${tab.label} — new requests` : tab.label}
       >
         {tab.icon}
-        {tab.badge && tab.badge > 0 ? (
+        {tab.dot ? (
+          <span
+            aria-hidden="true"
+            style={{
+              position: "absolute",
+              top: 8,
+              right: 8,
+              width: 8,
+              height: 8,
+              borderRadius: "var(--radius-full)",
+              backgroundColor: "var(--color-primary)",
+            }}
+          />
+        ) : tab.badge && tab.badge > 0 ? (
           <span
             style={{
               position: "absolute",

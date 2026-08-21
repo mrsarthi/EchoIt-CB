@@ -16,11 +16,15 @@ export function BottomNav({
   unreadChatsCount = 0,
   pendingRequestsCount = 0,
 }: BottomNavProps) {
+  // See SidebarNavRail: knocks show an unnumbered clay dot (PRODUCT.md §5
+  // State 2), unread conversations show a count (DESIGN.md §1). Both navs
+  // render the same two tabs, so they must agree.
   const tabs: Array<{
     id: AppTab;
     label: string;
     icon: React.ReactNode;
     badge?: number;
+    dot?: boolean;
   }> = [
     {
       id: "chats",
@@ -32,7 +36,7 @@ export function BottomNav({
       id: "contacts",
       label: "Contacts",
       icon: <AddressBookIcon size={20} />,
-      badge: pendingRequestsCount,
+      dot: pendingRequestsCount > 0,
     },
     {
       id: "settings",
@@ -90,7 +94,25 @@ export function BottomNav({
           >
             <div style={{ position: "relative", display: "inline-flex" }}>
               {tab.icon}
-              {tab.badge && tab.badge > 0 ? (
+              {tab.dot ? (
+                // This button has no aria-label, so its accessible name comes
+                // from its contents — the dot has to carry a name of its own
+                // or a screen reader user is told nothing. No count, for the
+                // same reason it is not shown.
+                <span
+                  role="img"
+                  aria-label="new requests"
+                  style={{
+                    position: "absolute",
+                    top: -2,
+                    right: -6,
+                    width: 8,
+                    height: 8,
+                    borderRadius: "var(--radius-full)",
+                    backgroundColor: "var(--color-primary)",
+                  }}
+                />
+              ) : tab.badge && tab.badge > 0 ? (
                 <span
                   style={{
                     position: "absolute",

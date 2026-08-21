@@ -2,7 +2,7 @@
 
 ## Status at a glance
 
-*Last updated: 2026-08-19 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.3.2` · **🚪 GATE OPEN — two physical phones exchanged messages** · UI work unblocked*
+*Last updated: 2026-08-21 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.3.2` · **🚪 GATE OPEN — two physical phones exchanged messages** · UI work unblocked*
 
 | Phase | Target / Deliverable | Status | Tests | Notes |
 |---|---|---|---|---|
@@ -17,6 +17,94 @@
 | **S3. iOS readiness** | Paper check only — no Mac available | **Not Started** | 0 | Deferred by decision, not forgotten |
 | **1. Core Application (v1)** | Chats, local storage, recovery | **In progress** | 0 | Onboarding + navigation shell done & audited. **Next: pairing (2.3)** |
 | **Pre-UI hardening** | CSP locked down before the UI grows | ✅ **PASSED** | 2 | Strict policy, 0 violations, message flow intact — see below |
+
+## Requests badge → an unnumbered dot (2026-08-21)
+
+### The contradiction was not the one recorded
+
+`START_HERE.md` had it as *"`PRODUCT.md` §5 says knocks must produce **no badge**.
+Either drop the badge or amend the rule."* Read directly, §5 says neither of
+those things.
+
+§5 State 2 **specifies an indicator**: *"Clay dot (`--color-primary`) on the
+Contacts tab."* What it forbids is anything that **pushes** — *"no notification,
+no push, no badge on the app icon"*, and *"Nothing is ever pushed — no
+notification, no banner, no badge."* Separately, `DESIGN.md` §1 designs unread
+**counts** on Chats in as many words.
+
+So the code was not wrong to show something. It was wrong to show a **number**
+where the spec asks for a **dot**, and only on Contacts. Both documents were
+already consistent; the summary of them was not.
+
+### What was built
+
+| File | Change |
+|---|---|
+| `src/components/navigation/SidebarNavRail.tsx` | Tab descriptor gains `dot?: boolean` beside `badge?: number`. Contacts → `dot: pendingRequestsCount > 0`; Chats keeps `badge: unreadChatsCount` |
+| `src/components/navigation/BottomNav.tsx` | Same, so the two navs cannot drift |
+
+The dot is 8×8px, `--color-primary`, `--radius-full`. Callers are unchanged —
+both components still take `pendingRequestsCount` and derive the dot themselves.
+
+**The accessibility handling differs between the two navs, deliberately.** The
+rail's buttons carry `aria-label={tab.label}`, which overrides their contents, so
+there the dot is `aria-hidden` and the button's label becomes
+`"Contacts — new requests"`. `BottomNav`'s buttons have no `aria-label` and take
+their name from the visible text span, so there the dot carries
+`role="img" aria-label="new requests"` and joins the name. Writing the same code
+in both would have left one of them silent.
+
+Neither announces a count. Telling a screen-reader user "3 requests" while
+withholding that number visually would reintroduce exactly what §5 removes.
+
+### Design decision — why a dot rather than a count
+
+A number asks to be cleared. §5's request rules are *"Knocks wait in a list and
+never interrupt you"* and *"You look when you feel like looking"*; a count is an
+interruption wearing a small circle.
+
+Rejected, with reasons:
+
+- **Keep the count, amend §5.** The silence is the safety feature — §5 argues
+  this at length and it is a product promise, not a preference.
+- **Drop the indicator entirely.** §5 explicitly asks for a dot, and a knock
+  nobody notices is a pairing failure that presents as the network being down.
+- **Reuse `<Badge>`.** It is an inline pill with padding and a background that
+  requires children — wrong shape for an 8px overlay on a 44px icon button.
+
+The section header inside the Contacts tab still reads **"1 pending"**. Kept on
+purpose: it is only visible once you have chosen to look, which is precisely the
+behaviour §5 describes.
+
+### Verified by running — against a real knock, not a fixture
+
+Two app instances; the second added the first's 558-char ticket through the
+**Add Contact dialog**, and the first had never added it back. That is a genuine
+State 2 knock, produced by the app rather than seeded into it.
+
+| Check | Result |
+|---|---|
+| Nav dot on the knocked instance | 8×8px, `border-radius: 9999px`, `rgb(224, 133, 96)` — exactly `--color-primary` (`#E08560`, dark theme) |
+| Its `aria-label` | `"Contacts — new requests"` — **no number** |
+| Chats button, same moment | No badge span rendered at all |
+| Requests list | *"Device ending in ...AP2v5R wants to connect with you"*, with Accept / Ignore / Block — §5 State 2 stranger copy, name-less as specified |
+| CSP | **0 violations, 0 console errors** |
+| Bridge harness after the change | **`STEP 1 PASSED`**, `relayed=false`, `outbox=0` both ends |
+| `npm run test:two-peer` | **3/3**, run twice this session |
+| `npm run typecheck` / `npm audit` | Clean, **0 vulnerabilities** |
+
+`/echoit-guardrails` not run: this change touches no storage, transport, logging
+or config, and adds no dependency.
+
+### Deliberately left undone
+
+- **The Chats count branch is unexercised and cannot be exercised today.**
+  `unreadCount` is hardcoded `0` at `AppShell.tsx:38` and `:93`, so no count can
+  render. The branch is unchanged from before this work, but nothing here proves
+  it draws correctly. `ChatsTab.tsx:334` has a per-row count from the same
+  hardcoded source and the same status.
+- **Finding 17 is not fixed** — a separate defect in the same screen, found
+  while producing the knock.
 
 ## Reconnect on launch and resume (2026-08-20)
 
@@ -1176,6 +1264,34 @@ from the protocol's documentation.
 ---
 
 ## Findings
+
+### Finding 17 — a unilateral contact reports "Connected directly" — 🔴 **OPEN** *(found 2026-08-21)*
+
+Found while producing a real knock to test the requests dot.
+
+Instance B added instance A's ticket through Add Contact. A never added B back —
+textbook `PRODUCT.md` §5 **State 1, Unilateral — Waiting for Them**. B's contact
+row rendered:
+
+> **Connected directly**
+
+That is §5 **State 3**, the copy reserved for *bilateral* pairing, whose
+explanatory line is *"Messages are moving safely, directly between your
+phones."* State 1's required copy is *"Waiting for [Name] to connect back."*
+
+**What it would cause if shipped.** This is the exact failure §5 was written to
+prevent, quoted from its own opening: *"if only one person adds the other's
+ticket, the dialing device shows 'connected' but messages will never be
+delivered to the other side."* The transport genuinely is connected — that half
+is not a lie — but the user is shown the state that means "you can talk now"
+while the protocol drops everything they send. §5b compounds it: State 1 is
+supposed to force outbox entries to **`Staged`**, never `Sent`, and to disable
+the composer. Once the composer is wired, a user in this state would type into
+an enabled box, watch messages appear sent, and be silently unheard.
+
+Not fixed here — a different screen and a different rule from the badge, and
+folding it in would have buried it inside an unrelated change.
+
 
 ### Finding 1 — SDK packaging — ✅ **RESOLVED 2026-08-05**
 
