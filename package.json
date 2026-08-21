@@ -11,11 +11,13 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.harness.json",
     "tauri": "tauri",
     "test:two-peer": "tsx harness/two-peer.mts",
-    "test:bridge": "tsx harness/two-peer-bridge.mts"
+    "test:bridge": "tsx harness/two-peer-bridge.mts",
+    "android:sign": "node scripts/apply-android-signing.mjs"
   },
   "dependencies": {
-    "@dicsussion/core": "^0.3.0",
-    "@dicsussion/sdk": "^0.3.0",
+    "@dicsussion/core": "^0.3.2",
+    "@dicsussion/sdk": "^0.3.2",
+    "@scure/bip39": "^1.6.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
     "buffer": "^6.0.3",

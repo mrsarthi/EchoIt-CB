@@ -1,12 +1,12 @@
-/* EchoIt Design System Tokens */
+/* EchoIt Design System Tokens — "The Warm Tactile Journal" */
 
 :root {
-  /* Font Families */
+  /* --- Typography: Font Families --- */
   --font-family-headline: "Literata", "Georgia", serif;
-  --font-family-body: "Geist", "Inter", sans-serif;
-  --font-family-mono: "JetBrains Mono", monospace;
+  --font-family-body: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-family-mono: "JetBrains Mono", ui-monospace, monospace;
 
-  /* Font Sizes */
+  /* --- Typography: Modular Scale (1.25x Major Third) --- */
   --font-size-h1: 1.9375rem; /* 31px */
   --font-size-h2: 1.5625rem; /* 25px */
   --font-size-h3: 1.25rem;   /* 20px */
@@ -15,20 +15,20 @@
   --font-size-label: 0.75rem; /* 12px */
   --font-size-mono: 0.8125rem; /* 13px */
 
-  /* Font Weights */
+  /* --- Typography: Font Weights --- */
   --font-weight-regular: 400;
   --font-weight-medium: 500;
   --font-weight-semibold: 600;
   --font-weight-bold: 700;
 
-  /* Line Heights */
+  /* --- Line Heights --- */
   --line-height-heading: 1.2;
   --line-height-heading-sub: 1.25;
   --line-height-body: 1.5;
   --line-height-body-sm: 1.45;
   --line-height-meta: 1.4;
 
-  /* Spacing Scale */
+  /* --- Spacing Scale (4px Baseline) --- */
   --space-xs: 4px;
   --space-sm: 8px;
   --space-md: 12px;
@@ -38,18 +38,18 @@
   --space-3xl: 48px;
   --space-4xl: 64px;
 
-  /* Corner Radii */
+  /* --- Corner Radii --- */
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 16px;
   --radius-full: 9999px;
 
-  /* Motion & Transitions */
-  --motion-ease: cubic-bezier(0.16, 1, 0.3, 1); /* easeOutExpo */
+  /* --- Motion & Transitions (easeOutExpo) --- */
+  --motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
   --motion-duration-sm: 150ms;
   --motion-duration-md: 300ms;
 
-  /* Light Theme Colors (Default) */
+  /* --- Light Palette: "Warm Sand & Charcoal Ink" (Default) --- */
   --color-bg: #FAF6F0;
   --color-surface: #FFFFFF;
   --color-surface-dim: #F0EAE1;
@@ -57,16 +57,26 @@
   --color-text-muted: #506570;
   --color-border: #E0D9CD;
   --color-primary: #9E492B;
+  --color-primary-hover: #833C22;
+  --color-primary-subtle: #F6EBE5;
   --color-success: #226040;
+  --color-success-subtle: #E8F2EC;
   --color-warning: #B54831;
+  --color-warning-subtle: #FAECE8;
 
-  /* Elevation Shadows */
+  /* --- Elevation & Shadows (Restrained Paper Depth) --- */
   --shadow-none: none;
   --shadow-low: 0 1px 2px rgba(31, 36, 33, 0.05);
   --shadow-high: 0 8px 24px -4px rgba(31, 36, 33, 0.08);
+
+  /* --- Platform Safe Areas --- */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
 }
 
-/* Dark Theme Overrides (System Preference & Data Attribute) */
+/* --- Dark Palette: "Soft Obsidian & Muted Paper" --- */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --color-bg: #171916;
@@ -76,8 +86,12 @@
     --color-text-muted: #A39E93;
     --color-border: #333732;
     --color-primary: #E08560;
+    --color-primary-hover: #EB9B7A;
+    --color-primary-subtle: #2C201A;
     --color-success: #5C9E7B;
+    --color-success-subtle: #1C2821;
     --color-warning: #D6765E;
+    --color-warning-subtle: #2B1D19;
 
     --shadow-low: 0 1px 2px rgba(0, 0, 0, 0.2);
     --shadow-high: 0 8px 24px -4px rgba(0, 0, 0, 0.4);
@@ -92,9 +106,32 @@
   --color-text-muted: #A39E93;
   --color-border: #333732;
   --color-primary: #E08560;
+  --color-primary-hover: #EB9B7A;
+  --color-primary-subtle: #2C201A;
   --color-success: #5C9E7B;
+  --color-success-subtle: #1C2821;
   --color-warning: #D6765E;
+  --color-warning-subtle: #2B1D19;
 
   --shadow-low: 0 1px 2px rgba(0, 0, 0, 0.2);
   --shadow-high: 0 8px 24px -4px rgba(0, 0, 0, 0.4);
+}
+
+:root[data-theme="light"] {
+  --color-bg: #FAF6F0;
+  --color-surface: #FFFFFF;
+  --color-surface-dim: #F0EAE1;
+  --color-text: #1F2421;
+  --color-text-muted: #506570;
+  --color-border: #E0D9CD;
+  --color-primary: #9E492B;
+  --color-primary-hover: #833C22;
+  --color-primary-subtle: #F6EBE5;
+  --color-success: #226040;
+  --color-success-subtle: #E8F2EC;
+  --color-warning: #B54831;
+  --color-warning-subtle: #FAECE8;
+
+  --shadow-low: 0 1px 2px rgba(31, 36, 33, 0.05);
+  --shadow-high: 0 8px 24px -4px rgba(31, 36, 33, 0.08);
 }

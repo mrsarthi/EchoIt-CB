@@ -25,6 +25,13 @@ serde_json = "1"
 iroh = "1.0.3"
 tokio = { version = "1.53.1", features = ["rt", "sync"] }
 base64 = "0.23.1"
+# ─── OS keychain (M2.2.2) ─────────────────────────────────────────────────
+#
+# `keyring-core` plus per-platform stores, rather than the `keyring`
+# aggregator crate: keyring's own docs say applications "should not be linking
+# to this library at all" and should link keyring-core and the specific stores
+# they want. That also keeps unused platform backends out of the build.
+keyring-core = "1"
 
 
 # `wmi 0.18.4` declares both `windows` and `windows-core` as ">=0.59, <0.63",
@@ -43,3 +50,13 @@ base64 = "0.23.1"
 # else. Remove this the moment wmi tightens its ranges upstream.
 [patch.crates-io]
 wmi = { path = "vendor/wmi" }
+
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1.1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Stores the ciphertext in SharedPreferences under a key held by the Android
+# Keystore. Requires `ndk-context` to be initialised, which Tauri Mobile does
+# for us — no Kotlin shim needed (upstream README names Tauri explicitly).
+android-native-keyring-store = "1"

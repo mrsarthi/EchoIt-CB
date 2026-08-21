@@ -4,6 +4,7 @@ import {
   createEchoItClient,
   waitForDialableAddress,
 } from './transport/create-client.js';
+import { runKeychainSelfCheck, KeychainSelfCheck } from './keychain-selfcheck';
 
 /**
  * Step 1 of the transport ladder — two app instances on one machine.
@@ -58,6 +59,17 @@ interface Harness {
 const CHANNEL = 'echoit-bridge-harness';
 
 export async function installBridgeHarness(): Promise<void> {
+  // Separate global on purpose: `window.__echoit` is a contract the CDP
+  // drivers depend on field-by-field, so nothing is added to it here.
+  const keychainTarget = globalThis as unknown as {
+    __echoitKeychain?: KeychainSelfCheck | { status: 'RUNNING' };
+  };
+  keychainTarget.__echoitKeychain = { status: 'RUNNING' };
+  void runKeychainSelfCheck().then((result) => {
+    keychainTarget.__echoitKeychain = result;
+    console.log('[Keychain Self-Check]: ' + JSON.stringify(result));
+  });
+
   const target = globalThis as unknown as { __echoit?: Harness };
 
   const state: Harness = {
@@ -190,9 +202,14 @@ export async function installBridgeHarness(): Promise<void> {
       // peers, and messages only go to peers that are connected **and**
       // paired. `peers=1 paired=0` is the silent-delivery failure, and
       // without both numbers it is indistinguishable from working.
+      // `outbox` is what makes a background-delivery run conclusive. Without
+      // it, "the message queued and will arrive" and "the message vanished"
+      // look identical from outside — which is exactly what left the 0.3.0
+      // run unable to say which had happened.
       return (
         `peers=${s.peerCount} paired=${state.pairedWith.length} ` +
-        `connected=${s.connected} relayed=${s.relayActive}`
+        `connected=${s.connected} relayed=${s.relayActive} ` +
+        `outbox=${client.outboxSize}`
       );
     };
 

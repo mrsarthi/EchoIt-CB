@@ -1,7 +1,9 @@
 import { Buffer } from "buffer";
 import React from "react";
 import ReactDOM from "react-dom/client";
+import "./index.css";
 import App from "./App";
+import { runPendingReset } from "./services/pending-reset";
 
 if (typeof window !== "undefined") {
   const origFrom = Buffer.from.bind(Buffer);
@@ -28,8 +30,25 @@ if (typeof window !== "undefined") {
   (window as unknown as { Buffer: typeof Buffer }).Buffer = Buffer;
 }
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+/**
+ * A pending erase must complete before React mounts, because mounting is what
+ * opens the database — and an open connection is exactly what blocks the
+ * delete. Awaiting here is the whole mechanism, not a precaution.
+ */
+async function start() {
+  const reset = await runPendingReset();
+  if (reset.error) {
+    // Left deliberately visible. The user was told their history was cleared;
+    // if it was not, that is not something to swallow. The flag survives, so
+    // the next launch tries again.
+    console.error("[EchoIt] pending reset did not complete: " + reset.error);
+  }
+
+  ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>,
+  );
+}
+
+void start();

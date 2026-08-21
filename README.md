@@ -2,7 +2,7 @@
 
 > **"Your messages stay on your phone. We can't read them. We don't want to."**
 
-EchoIt is a local-first, end-to-end encrypted messaging app designed as a privacy-respecting WhatsApp alternative for everyday users. Conversations live entirely on the device—no servers hold message history or metadata.
+EchoIt is a local-first, end-to-end encrypted messaging app designed as a privacy-respecting WhatsApp alternative for everyday users. Conversations live entirely on the device — no server holds message history, contacts, or metadata about who talks to whom. The only thing EchoIt asks a server is whether there's a new version.
 
 Built on the [Dicsussion protocol](https://github.com/mrsarthi/DicsussionProtocol) SDK, consumed from npm as [`@dicsussion/sdk`](https://www.npmjs.com/package/@dicsussion/sdk) (Apache-2.0). The protocol is developed separately and used here unmodified.
 

@@ -1,83 +1,178 @@
-import { useEffect, useRef, useState } from "react";
-import { runS0Harness, S0TestResult } from "./s0-harness";
-import { runIrohProbe, IrohProbeResult } from "./iroh-probe";
+import { useEffect, useState } from "react";
 import { installBridgeHarness } from "./bridge-harness";
 import { BridgeScreen } from "./bridge-screen";
+import { AppProvider, useApp } from "./context/AppContext";
+import { OnboardingScreen } from "./screens/OnboardingScreen";
+import { AppShell } from "./screens/AppShell";
+import { Card } from "./components/ui/Card";
+import { Button } from "./components/ui/Button";
+import { Modal } from "./components/ui/Modal";
+import { ShieldIcon, RefreshIcon } from "./components/ui/Icons";
 
 /**
- * Set `VITE_HARNESS=bridge` to run the two-instance transport test instead of
- * the S0/Iroh diagnostics. Two separate modes rather than one combined run:
- * S0 deliberately uses `transport: 'local'` to isolate storage, and starting
- * a real endpoint alongside it would blur what a failure means.
+ * `VITE_HARNESS=bridge` runs the headless/bridge diagnostic regression harness.
+ * Preserved byte-for-byte for external automated testing.
  */
 const BRIDGE_MODE = import.meta.env.VITE_HARNESS === "bridge";
 
-const COLOR: Record<S0TestResult["status"], string> = {
-  PASSED: "#4ade80",
-  FIRST_RUN: "#fbbf24",
-  FAILED: "#f87171",
-};
+function AppContent() {
+  const { state, error, resetApp } = useApp();
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
-const VERDICT: Record<S0TestResult["status"], string> = {
-  PASSED: "S0 PASSED — data survived a restart",
-  FIRST_RUN: "FIRST RUN — relaunch to prove persistence",
-  FAILED: "S0 FAILED",
-};
+  if (state === "checking" || state === "unlocking") {
+    return (
+      <div
+        style={{
+          height: "100vh",
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          backgroundColor: "var(--color-bg)",
+          padding: "var(--space-lg)",
+        }}
+      >
+        <Card
+          elevation="low"
+          style={{
+            maxWidth: 380,
+            width: "100%",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            textAlign: "center",
+            gap: "var(--space-md)",
+          }}
+        >
+          <div
+            style={{
+              width: 48,
+              height: 48,
+              borderRadius: "var(--radius-full)",
+              backgroundColor: "var(--color-primary-subtle)",
+              color: "var(--color-primary)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <ShieldIcon size={24} />
+          </div>
+          <div>
+            <h3 style={{ fontSize: "var(--font-size-h3)", fontFamily: "var(--font-family-headline)", margin: 0 }}>
+              {state === "checking" ? "Opening EchoIt..." : "Unlocking your storage..."}
+            </h3>
+            <p style={{ color: "var(--color-text-muted)", fontSize: "var(--font-size-body-sm)", marginTop: 6 }}>
+              {state === "checking"
+                ? "Getting your key from this device's secure storage."
+                : "Opening your local journal and connecting your device directly."}
+            </p>
+          </div>
+        </Card>
+      </div>
+    );
+  }
 
-function App() {
-  const [result, setResult] = useState<S0TestResult | null>(null);
-  const [irohResult, setIrohResult] = useState<IrohProbeResult | null>(null);
+  if (state === "error") {
+    return (
+      <div
+        style={{
+          height: "100vh",
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          backgroundColor: "var(--color-bg)",
+          padding: "var(--space-lg)",
+        }}
+      >
+        <Card
+          elevation="low"
+          style={{
+            maxWidth: 420,
+            width: "100%",
+            display: "flex",
+            flexDirection: "column",
+            gap: "var(--space-md)",
+          }}
+        >
+          <h3 style={{ fontSize: "var(--font-size-h3)", color: "var(--color-warning)", margin: 0 }}>
+            Initialization Error
+          </h3>
+          <p style={{ fontSize: "var(--font-size-body-sm)", color: "var(--color-text)", lineHeight: 1.5 }}>
+            {error || "An unexpected error occurred while starting EchoIt."}
+          </p>
+          <div style={{ display: "flex", gap: "var(--space-sm)", marginTop: "var(--space-sm)" }}>
+            <Button
+              variant="secondary"
+              fullWidth
+              onClick={() => window.location.reload()}
+              icon={<RefreshIcon size={16} />}
+            >
+              Retry
+            </Button>
+            <Button
+              variant="danger"
+              fullWidth
+              onClick={() => setResetConfirmOpen(true)}
+            >
+              Reset Session
+            </Button>
+          </div>
+        </Card>
 
-  const started = useRef(false);
+        {/* Accessible In-App Reset Confirmation Modal (avoiding window.confirm) */}
+        <Modal
+          isOpen={resetConfirmOpen}
+          onClose={() => setResetConfirmOpen(false)}
+          title="Reset Local Session?"
+          subtitle="This removes every conversation from this device and deletes the stored key. You will need your recovery phrase to get your identity back."
+          footer={
+            <>
+              <Button variant="ghost" onClick={() => setResetConfirmOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                loading={resetting}
+                onClick={async () => {
+                  setResetting(true);
+                  try {
+                    await resetApp();
+                    setResetConfirmOpen(false);
+                  } catch {
+                    // error handled in context
+                  } finally {
+                    setResetting(false);
+                  }
+                }}
+              >
+                Yes, Reset Everything
+              </Button>
+            </>
+          }
+        >
+          <p style={{ fontSize: "var(--font-size-body-sm)", color: "var(--color-text-muted)" }}>
+            Make sure you have written down your 12-word recovery phrase before proceeding.
+          </p>
+        </Modal>
+      </div>
+    );
+  }
 
+  if (state === "onboarding") {
+    return <OnboardingScreen />;
+  }
+
+  return <AppShell />;
+}
+
+export default function App() {
   useEffect(() => {
-    // StrictMode invokes effects twice in development. Without this guard two
-    // DicsussionClient instances open the same IndexedDB concurrently, each
-    // reads the history before the other writes, and both report the same
-    // priorRuns — which silently corrupts the persistence signal this harness
-    // exists to produce.
-    if (started.current) return;
-    started.current = true;
-
     if (BRIDGE_MODE) {
       void installBridgeHarness();
-      return;
     }
-
-    // The verdict goes into document.title as well as the DOM. Tauri does not
-    // forward webview console output to the terminal on Windows, but a title
-    // is readable from outside via the WebView2 remote-debugging target list
-    // — which makes the result observable without a human reading the window.
-    const publish = (text: string) => {
-      document.title = `S0 ${text}`;
-    };
-    publish("RUNNING");
-
-    runS0Harness()
-      .then(async (res) => {
-        setResult(res);
-        // Stringified, not passed as an object: a remote-debugging console
-        // renders an object argument as "Object" with no contents.
-        console.log("[S0 Harness Result]: " + JSON.stringify(res));
-
-        // S1b runs after S0 so a failure is unambiguous: S0 covers the SDK in
-        // the webview, this covers the Rust Iroh endpoint. They share nothing.
-        const iroh = await runIrohProbe();
-        setIrohResult(iroh);
-        console.log("[Iroh Probe Result]: " + JSON.stringify(iroh));
-
-        publish(
-          res.status === "FAILED"
-            ? `FAILED ${res.error ?? "unknown"}`
-            : `${res.status} tauri=${res.inTauriWebview} priorRuns=${res.priorRuns} init=${res.sdkInitMs}ms` +
-                ` | IROH ${iroh.status}${iroh.endpointId ? ` id=${iroh.endpointId.slice(0, 12)}… addrs=${iroh.directAddresses?.length ?? 0}` : ""}` +
-                `${iroh.error ? ` err=${iroh.error}` : ""}`,
-        );
-      })
-      .catch((err: unknown) => {
-        // A throw here means the harness itself broke, not the SDK under test.
-        publish(`HARNESS-THREW ${err instanceof Error ? err.message : String(err)}`);
-      });
   }, []);
 
   if (BRIDGE_MODE) {
@@ -85,83 +180,8 @@ function App() {
   }
 
   return (
-    <div
-      style={{
-        padding: 24,
-        fontFamily: "ui-monospace, monospace",
-        background: "#121212",
-        color: "#e0e0e0",
-        minHeight: "100vh",
-      }}
-    >
-      <h2 style={{ marginTop: 0 }}>Stage S0 — SDK in webview</h2>
-
-      {!result ? (
-        <p>Running…</p>
-      ) : (
-        <>
-          <p style={{ color: COLOR[result.status], fontSize: 18, fontWeight: 700 }}>
-            {VERDICT[result.status]}
-          </p>
-
-          <p style={{ color: result.inTauriWebview ? "#4ade80" : "#fbbf24" }}>
-            {result.inTauriWebview
-              ? "Running in the Tauri webview."
-              : "Running in a browser — this does NOT satisfy S0."}
-          </p>
-
-          <pre
-            style={{
-              background: "#1e1e1e",
-              padding: 15,
-              borderRadius: 5,
-              overflowX: "auto",
-            }}
-          >
-            {JSON.stringify(result, null, 2)}
-          </pre>
-
-          <h2>Stage S1b — Rust Iroh endpoint</h2>
-          {!irohResult ? (
-            <p>Running…</p>
-          ) : (
-            <>
-              <p
-                style={{
-                  color:
-                    irohResult.status === "PASSED"
-                      ? "#4ade80"
-                      : irohResult.status === "SKIPPED"
-                        ? "#fbbf24"
-                        : "#f87171",
-                  fontSize: 18,
-                  fontWeight: 700,
-                }}
-              >
-                {irohResult.status === "PASSED"
-                  ? "Endpoint bound and reported its identity"
-                  : `IROH ${irohResult.status}`}
-              </p>
-              <p style={{ color: "#9ca3af" }}>
-                Bound with a random key, so this endpoint is not dialable by any
-                peer — it proves the endpoint exists, not that it is reachable.
-              </p>
-              <pre
-                style={{
-                  background: "#1e1e1e",
-                  padding: 15,
-                  borderRadius: 5,
-                  overflowX: "auto",
-                }}
-              >
-                {JSON.stringify(irohResult, null, 2)}
-              </pre>
-            </>
-          )}
-        </>
-      )}
-    </div>
+    <AppProvider>
+      <AppContent />
+    </AppProvider>
   );
 }
-
-export default App;

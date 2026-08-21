@@ -1,162 +1,170 @@
-# EchoIt Visual Design System
+# EchoIt Visual Design System & UX Specification
 
-This document defines the visual design system for **EchoIt**, a local-first, privacy-respecting messenger. The design is optimized for webviews (React 19 + TypeScript in Tauri v2) targeting mobile (iOS/Android) and desktop platforms.
-
----
-
-## 1. Aesthetic Rationale: "The Warm Paper Journal"
-
-EchoIt deliberately moves away from the cold, high-tech, cyberpunk aesthetic typical of encrypted apps. It does not want to feel like a hacker's terminal or a military command center. 
-
-Instead, our aesthetic is modeled after a **physical paper notebook or personal journal**:
-*   **Tactile and Human**: Warm ivory/sand backdrops instead of blinding whites or harsh blue-blacks.
-*   **Low Cognitive Load**: Quiet, low-saturation earth tones that reduce eye strain and encourage calm, unhurried messaging.
-*   **Paper Layers**: We use thin outlines and subtle tonal shifts to indicate structural layers, rather than heavy, floating dropshadows.
+This document defines the visual design system and UX architecture for **EchoIt**, a local-first, end-to-end encrypted messenger built for everyday humans.
 
 ---
 
-## 2. Color System & Accessibility
+## 1. Aesthetic Rationale: "The Warm Tactile Journal"
 
-Accessibility is a core requirement, not an afterthought. Every primary text-to-background pairing is calculated to meet or exceed the **WCAG 2.1 AAA** contrast standards (minimum **7:1** ratio for body text). Accent pairings meet **WCAG 2.1 AA** standards (minimum **4.5:1** ratio).
-
-### Relative Luminance Formula
-Relative luminance ($L$) is calculated from linearized sRGB components:
-$$L = 0.2126 \times R_{\text{linear}} + 0.7152 \times G_{\text{linear}} + 0.0722 \times B_{\text{linear}}$$
-Where contrast ratio ($CR$) is:
-$$CR = \frac{L_{\text{light}} + 0.05}{L_{\text{dark}} + 0.05}$$
+EchoIt rejects both cold cyberpunk encryption aesthetics and generic corporate SaaS dashboards in favor of **analog tactile serenity**:
+*   **Paper Layering**: Visual hierarchy is created through delicate 1px structural borders and subtle tonal contrast rather than heavy floating drop shadows.
+*   **Serene Dual Palette**: A daylight parchment palette (*"Warm Sand & Charcoal Ink"*) paired with a deep reading night palette (*"Soft Obsidian & Muted Paper"*).
+*   **Conversational Focus**: Generous whitespace, elegant typography, and quiet connection badges that put human conversation at the center.
 
 ---
 
-### Light Theme: "Warm Sand & Charcoal Ink"
+## 2. Screen Architecture & Navigation Rules
 
-Designed for daylight reading, evoking physical parchment paper and dark charcoal ink.
+### A. Home Screen Navigation Shell (Bottom Navigation Bar)
+The persistent 4-tab bottom navigation bar exists **ONLY** on the main Home Page / Conversations Hub screen (never inside an active chat):
+1. **Chats** (Default): Active conversation threads, unread counts, and connection status.
+2. **Contacts**: Paired peer list, pending incoming requests, safe address exchange.
+3. **Settings**: Hardware keychain status, theme switcher (Light / Dark / System), notification preferences, session lock & reset.
+4. **Profile**: Your Safe Address (`did:key`), connection ticket QR exporter, 12-word recovery phrase backup viewer.
 
-| Token Name | Hex | Luminance ($L$) | Purpose |
+### B. 1:1 Direct Chat Screen (Full-Height View without Footer)
+When a conversation is opened, the bottom tab navigation is hidden and replaced exclusively by the **Message Composer Bar**:
+*   **Header Bar**:
+    *   Back navigation button ($\ge 44\times 44\text{px}$) to return to the Home/Chats list.
+    *   Contact display name with live verified connection dot (Pine `#226040` / Jade `#5C9E7B`).
+    *   Security indicator: Peer verification status with bilateral pairing lock icon.
+*   **Message Stream**:
+    *   **Incoming Message**: Crisp paper surface (`#FFFFFF` in light, `#212421` in dark) with 1px border (`#E0D9CD` / `#333732`) and directional tail (`16px 16px 16px 4px`).
+    *   **Outgoing Message**: Warm terracotta tint (`#F6EBE5` in light, `#2C201A` in dark) with directional tail (`16px 16px 4px 16px`).
+    *   **Delivery Receipts**: `Staged` $\rightarrow$ `Sent` $\rightarrow$ `Delivered` $\rightarrow$ `Read`.
+        **`PRODUCT.md` §5b is the authority here** — it defines the signals (grey
+        tick in a ring for Sent; the recipient's picture desaturated for
+        Delivered, full colour for Read) and the rules about `Staged` and about
+        receipts being switched off. Do not restate the ladder here; it drifted
+        once already.
+*   **Bottom Composer Bar**:
+    *   Rounded tactile paper input pill.
+    *   Attachment button (`+` / paperclip).
+    *   Terracotta send button (`#9E492B` / `#E08560`) with micro-scale press transition.
+
+
+### C. Wide Layout — Desktop (WhatsApp Web / Telegram 3-Zone Architecture) *(updated 2026-08-21)*
+
+EchoIt ships to Windows as well as mobile devices (Android/iOS). This section defines the desktop layout.
+
+**Switch on window width, never on operating system.** A desktop window dragged narrow (< 840px) gets the clean mobile layout. **Breakpoint: `840px`.**
+
+#### The 3-Zone Desktop Architecture (WhatsApp Web Style)
+
+On wide screens, the mobile bottom navigation bar is completely removed and replaced with a dedicated **Far-Left Vertical Navigation Rail**, freeing 100% of the sidebar height for conversation lists and content:
+
+```
+┌──────┬────────────────────────┬───────────────────────────────────────────┐
+│ RAIL │ SIDEBAR (340px)        │ MAIN CONVERSATION PANE (Flex 1)           │
+│ (56px│                        │                                           │
+├──────┼────────────────────────┼───────────────────────────────────────────┤
+│ [🛡️] │ Chats                  │ 👤 Alice                                  │
+│ Brand│ [ 🔍 Search...      ]  ├───────────────────────────────────────────┤
+│      │                        │                                           │
+│ [💬] │ 💬 Alice               │   ┌───────────────────────────────────┐   │
+│ Chats│    "See you tomorrow"  │   │ Hey, let's catch up later today!  │   │
+│      │                        │   └───────────────────────────────────┘   │
+│ [👥] │ 💬 Bob                 │                                           │
+│People│    "Connected directly"│                                           │
+│      │                        │                                           │
+│      │                        │                                           │
+│      ├────────────────────────┤                                           │
+│ [⚙️] │ (Full vertical height, │ ┌───────────────────────────────────┬───┐ │
+│ [👤] │  no mobile bottom bar) │ │ Type a message...                 │ ➤ │ │
+└──────┴────────────────────────┴─┴───────────────────────────────────┴───┴─┘
+```
+
+| Zone | Width / Role | Layout & Contents |
+| :--- | :--- | :--- |
+| **1. Far-Left Nav Rail** | `56–64px` | Full-height recessed strip (`--color-surface-dim`).<br>• **Top Group**: EchoIt shield badge, Chats icon (`<ShieldIcon size={20} />`), Contacts icon (`<AddressBookIcon size={20} />`).<br>• **Bottom Group**: Settings gear (`<SettingsIcon size={20} />`), Profile avatar disc (`<UserIcon size={20} />`).<br>• Active state indicated by clay pill tint (`--color-primary-subtle`) and active icon color (`--color-primary`). |
+| **2. Active Sidebar** | `320–380px` (Default `340px`) | Displays the active destination at full vertical height with 1px border (`--color-border`).<br>• **Chats**: Search, filter, full conversation list.<br>• **Contacts**: Add Contact button, search, Connection Requests knocks, paired contacts.<br>• **Settings / Profile**: Clean configuration and identity views. |
+| **3. Main Workspace** | `flex: 1` | • **When chat open**: 1:1 conversation view (`ChatView`) with header, security indicator, message stream, and composer.<br>• **When resting**: Tactile journal resting screen with subtle shield icon and quiet welcome copy. |
+
+#### Layout Comparison by Screen Width
+
+| | Narrow (`< 840px`) | Wide (`>= 840px` — WhatsApp Style) |
+| :--- | :--- | :--- |
+| **Navigation** | Bottom tab bar (Home screen only; hidden in chat) | **Far-Left Nav Rail (56px)** permanent across all tabs |
+| **Sidebar** | Full-width modal views | **Dedicated Left Column (340px)** with 100% vertical height |
+| **Chat View** | Full-screen replacement (`onBack` returns to list) | **Simultaneous Right Pane** (Conversation & list visible together) |
+| **Resting State** | Empty conversation list | Warm paper notebook resting stage in main pane |
+
+#### Desktop Ergonomics & Interactions
+
+*   **Keyboard Shortcuts**: `Enter` sends message, `Shift+Enter` inserts newline, `Escape` deselects open conversation or closes modals, `ArrowUp`/`ArrowDown` navigates conversation list.
+*   **Hover States**: Subtle tonal lift on conversation cards and rail icon buttons (`--color-surface-dim` / `--color-primary-subtle`); never the sole indicator for any status.
+*   **Touch & Click Targets**: $\ge 44\times 44\text{px}$ clickable areas preserved for touch laptop compatibility.
+*   **Window Chrome**: Native OS title bar for robust dragging, snapping, and maximizing.
+
+---
+
+## 3. Color Palettes & Verified Accessibility
+
+All color pairings are mathematically verified to exceed **WCAG 2.1 AAA** ($\ge 7:1$) for body text and **WCAG 2.1 AA** ($\ge 4.5:1$) for interactive elements.
+
+### Light Palette: "Warm Sand & Charcoal Ink" (Default)
+| Token | Hex Value | Purpose & Application | Contrast on `--color-bg` |
 | :--- | :--- | :--- | :--- |
-| `--color-bg` | `#FAF6F0` | `0.9235` | App canvas background (warm cream) |
-| `--color-surface` | `#FFFFFF` | `1.0000` | Input boxes, active cards |
-| `--color-surface-dim` | `#F0EAE1` | `0.8173` | Unpaired chat cells, secondary panels |
-| `--color-text` | `#1F2421` | `0.0170` | Primary reading text (charcoal ink) |
-| `--color-text-muted` | `#506570` | `0.1209` | Time stamps, secondary labels (slate) |
-| `--color-border` | `#E0D9CD` | `0.7024` | 1px border lines and grid divisions |
-| `--color-primary` | `#9E492B` | `0.1094` | Primary brand accent (warm clay/rust) |
-| `--color-success` | `#226040` | `0.0907` | Fully paired connection states (pine green) |
-| `--color-warning` | `#B54831` | `0.0984` | Unilateral pairing alerts (terracotta) |
+| `--color-bg` | `#FAF6F0` | Main canvas (Warm Sand Parchment) | Base canvas |
+| `--color-surface` | `#FFFFFF` | Incoming paper bubbles, input background | Elevated paper sheet |
+| `--color-surface-dim` | `#F0EAE1` | Home bottom nav bar background, secondary panels | Recessed structural layer |
+| `--color-text` | `#1F2421` | Body reading text (Charcoal Ink) | **14.64:1** (AAA $\ge 7:1$) |
+| `--color-text-muted` | `#506570` | Timestamps, inactive nav labels (Slate) | **5.68:1** (AA $\ge 4.5:1$) |
+| `--color-border` | `#E0D9CD` | 1px border lines and division rules | Delicate structure |
+| `--color-primary` | `#9E492B` | Send button, active nav icon (Clay Rust) | **5.67:1** (AA $\ge 4.5:1$) |
+| `--color-primary-subtle` | `#F6EBE5` | Outgoing message bubbles | Soft contextual tint |
+| `--color-success` | `#226040` | Direct verified connection dot (Pine) | **6.93:1** (AA $\ge 4.5:1$) |
 
-#### Contrast Ratio Verifications (Light Theme):
-*   **Primary Readability**: Charcoal Ink (`#1F2421`) on Warm Sand (`#FAF6F0`):
-    $$CR = \frac{0.9235 + 0.05}{0.0170 + 0.05} = \frac{0.9735}{0.0670} = \mathbf{14.53:1} \quad (\text{Passes AAA } \ge 7:1)$$
-*   **Muted Readability**: Muted Slate (`#506570`) on Warm Sand (`#FAF6F0`):
-    $$CR = \frac{0.9235 + 0.05}{0.1209 + 0.05} = \frac{0.9735}{0.1709} = \mathbf{5.70:1} \quad (\text{Passes AA } \ge 4.5:1)$$
-*   **Primary Accent**: Warm Cedar (`#9E492B`) on Warm Sand (`#FAF6F0`):
-    $$CR = \frac{0.9235 + 0.05}{0.1094 + 0.05} = \frac{0.9735}{0.1594} = \mathbf{6.11:1} \quad (\text{Passes AA } \ge 4.5:1)$$
-*   **Bilateral connection state**: Pine Green (`#226040`) on Warm Sand (`#FAF6F0`):
-    $$CR = \frac{0.9235 + 0.05}{0.0907 + 0.05} = \frac{0.9735}{0.1407} = \mathbf{6.92:1} \quad (\text{Passes AA } \ge 4.5:1)$$
-
----
-
-### Dark Theme: "Soft Obsidian & Muted Paper"
-
-Designed for night reading. It avoids harsh, high-contrast pure black (`#000000`) in favor of a soft, deep ink-charcoal that maintains tactile depth.
-
-| Token Name | Hex | Luminance ($L$) | Purpose |
+### Dark Palette: "Soft Obsidian & Muted Paper"
+| Token | Hex Value | Purpose & Application | Contrast on `--color-bg` |
 | :--- | :--- | :--- | :--- |
-| `--color-bg` | `#171916` | `0.0094` | App canvas background (deep ink-charcoal) |
-| `--color-surface` | `#212421` | `0.0170` | Input boxes, active cards |
-| `--color-surface-dim` | `#1E201D` | `0.0139` | Unpaired chat cells, secondary panels |
-| `--color-text` | `#EAE6DF` | `0.7901` | Primary reading text (muted paper) |
-| `--color-text-muted` | `#A39E93` | `0.3325` | Time stamps, secondary labels (warm gray) |
-| `--color-border` | `#333732` | `0.0385` | 1px border lines and grid divisions |
-| `--color-primary` | `#E08560` | `0.2853` | Primary brand accent (soft terracotta/clay) |
-| `--color-success` | `#5C9E7B` | `0.2736` | Fully paired connection states (soft pine) |
-| `--color-warning` | `#D6765E` | `0.2319` | Unilateral pairing alerts (terracotta) |
+| `--color-bg` | `#171916` | Main canvas (Soft Obsidian Charcoal) | Base canvas |
+| `--color-surface` | `#212421` | Incoming paper bubbles, input background | Elevated dark paper sheet |
+| `--color-surface-dim` | `#1E201D` | Home bottom nav bar background, secondary panels | Recessed structural layer |
+| `--color-text` | `#EAE6DF` | Body reading text (Muted Paper) | **14.22:1** (AAA $\ge 7:1$) |
+| `--color-text-muted` | `#A39E93` | Timestamps, inactive nav labels (Stone) | **6.63:1** (AA $\ge 4.5:1$) |
+| `--color-border` | `#333732` | 1px border lines and division rules | Delicate structure |
+| `--color-primary` | `#E08560` | Send button, active nav icon (Soft Clay) | **6.48:1** (AA $\ge 4.5:1$) |
+| `--color-primary-subtle` | `#2C201A` | Outgoing message bubbles | Soft contextual tint |
+| `--color-success` | `#5C9E7B` | Direct verified connection dot (Jade) | **5.59:1** (AA $\ge 4.5:1$) |
 
-#### Contrast Ratio Verifications (Dark Theme):
-*   **Primary Readability**: Muted Paper (`#EAE6DF`) on Soft Obsidian (`#171916`):
-    $$CR = \frac{0.7901 + 0.05}{0.0094 + 0.05} = \frac{0.8401}{0.0594} = \mathbf{14.14:1} \quad (\text{Passes AAA } \ge 7:1)$$
-*   **Muted Readability**: Warm Gray (`#A39E93`) on Soft Obsidian (`#171916`):
-    $$CR = \frac{0.3325 + 0.05}{0.0094 + 0.05} = \frac{0.3825}{0.0594} = \mathbf{6.44:1} \quad (\text{Passes AA } \ge 4.5:1)$$
-*   **Primary Accent**: Soft Clay (`#E08560`) on Soft Obsidian (`#171916`):
-    $$CR = \frac{0.2853 + 0.05}{0.0094 + 0.05} = \frac{0.3353}{0.0594} = \mathbf{5.64:1} \quad (\text{Passes AA } \ge 4.5:1)$$
-*   **Bilateral connection state**: Soft Pine (`#5C9E7B`) on Soft Obsidian (`#171916`):
-    $$CR = \frac{0.2736 + 0.05}{0.0094 + 0.05} = \frac{0.3236}{0.0594} = \mathbf{5.45:1} \quad (\text{Passes AA } \ge 4.5:1)$$
 
----
+*Figures recomputed from the hex values on 2026-08-19; the previous table was
+imprecise, and its `--color-primary` row quoted the button pairing rather than
+the on-canvas one. Pairings the tables above do not list, but the UI renders:*
 
-## 3. Typography Scale
+| Pairing | Light | Dark |
+| :--- | :--- | :--- |
+| Button label on `--color-primary` | 6.10:1 | 6.64:1 |
+| `--color-text` on `--color-surface` | 15.76:1 | — |
+| `--color-text` on `--color-primary-subtle` (outgoing bubble) | 13.46:1 | 12.71:1 |
+| `--color-text-muted` on `--color-surface-dim` (nav bar) | 5.11:1 | 6.15:1 |
+| `--color-success` on `--color-surface` | 7.46:1 | **4.95:1** |
 
-Our typography matches the journal aesthetic: **elegant serif headings** paired with **neutral, highly legible body text** and **monospaced codes** for technical actions (like pairing keys).
-
-### Font Families
-*   **Headline Font**: `Literata` (CSS: `"Literata", "Georgia", serif`). A warm, human-oriented serif designed specifically for reading on screens. It gives header text an editorial, unhurried voice.
-*   **Body Font**: `Geist` (CSS: `"Geist", "Inter", sans-serif`). A highly legible, contemporary sans-serif with a clean structure that keeps the interface responsive and legible at small sizes.
-*   **Label/Mono Font**: `JetBrains Mono` (CSS: `"JetBrains Mono", monospace`). Used for security addresses (`did:key`), numeric pairing codes, and ticket exports to distinguish data from human conversation.
-
-### Font Sizes (Modular Scale: 1.25x Major Third)
-Using a 1.25x Major Third modular scale for clear hierarchy:
-
-```
-Label/Mono (12px) ── Body-Sm (14px) ── Body-Rg (16px) ── H3 (20px) ── H2 (25px) ── H1 (31px)
-```
-
-| Token | Size | Line Height | Case/Tracking | Application |
-| :--- | :--- | :--- | :--- | :--- |
-| `--font-h1` | `1.9375rem` (31px) | `1.2` | Normal / `-0.02em` | Main titles, profile name headers |
-| `--font-h2` | `1.5625rem` (25px) | `1.25` | Normal / `-0.01em` | Section headings, list divisions |
-| `--font-h3` | `1.25rem` (20px) | `1.3` | Normal / `0` | Dialog headers, name in chat list |
-| `--font-body` | `1.0rem` (16px) | `1.5` | Normal / `0` | Message bubbles, description text |
-| `--font-body-sm` | `0.875rem` (14px) | `1.45` | Normal / `0.01em` | Subtext, system instructions |
-| `--font-label` | `0.75rem` (12px) | `1.4` | UPPERCASE / `0.05em` | Metadata headers, column names |
-| `--font-mono` | `0.8125rem` (13px) | `1.5` | Normal / `0` | `did:key` values, ticket payloads |
+**The one to watch:** the connection dot on a dark surface is 4.95:1 — clears AA,
+not AAA. It is an 8px indicator rather than text, so AA is the applicable bar,
+but never render `--color-success` as body copy on `--color-surface` in dark.
 
 ---
 
-## 4. Spacing Scale
+## 4. Typography Hierarchy (Modular Scale: 1.25x Major Third)
 
-Our spacing system is based on a **4px baseline**, expanding logically to manage content density. 
-
-```
-xs (4px) ── sm (8px) ── md (12px) ── lg (16px) ── xl (24px) ── 2xl (32px) ── 3xl (48px) ── 4xl (64px)
-```
-
-*   **`--space-xs` (`4px`)**: Smallest margins (e.g., separating timestamp from message text).
-*   **`--space-sm` (`8px`)**: Inner padding for items inside elements (e.g., buttons, avatar to name).
-*   **`--space-md` (`12px`)**: Padding for chat bubbles, list item gaps.
-*   **`--space-lg` (`16px`)**: Standard screen padding for panels, outer margins on mobile.
-*   **`--space-xl` (`24px`)**: Desktop screen margins, spacing between chat sections.
-*   **`--space-2xl` (`32px`)**: Grid gaps, large panel padding.
-*   **`--space-3xl` (`48px`)**: Spacing for empty-state splash screens, setup cards.
-*   **`--space-4xl` (`64px`)**: Top/bottom offsets for mobile viewports.
+*   **Headline Serif**: `Literata` (`"Literata", "Georgia", serif`) — warm, editorial, unhurried voice.
+*   **Body Sans**: `Geist` (`"Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`) — clean neutral structure.
+*   **Data Mono**: `JetBrains Mono` (`"JetBrains Mono", monospace`) — safe addresses, recovery words, tickets.
 
 ---
 
-## 5. Radii (Shapes)
-
-Following the paper card metaphor, shapes have **soft, structural roundness** to feel safe and approachable, yet geometric enough to represent a reliable tool.
-
-*   **`--radius-sm` (`4px`)**: Subtle rounding (e.g., system alert boxes, indicators).
-*   **`--radius-md` (`8px`)**: Standard buttons, input text fields, inner cards.
-*   **`--radius-lg` (`16px`)**: Chat bubbles (incoming/outgoing), primary page sheets, modals.
-*   **`--radius-full` (`9999px`)**: Profile avatars, status indicators, pill buttons.
+## 5. Touch Ergonomics & Safe Areas
+*   **Touch Targets**: Minimum **$\ge 44\times 44\text{px}$** for all buttons, nav icons, and input controls.
+*   **Safe Areas**: Root containers integrate `--safe-top: env(safe-area-inset-top)` and `--safe-bottom: env(safe-area-inset-bottom)` for edge-to-edge rendering on mobile devices.
 
 ---
 
-## 6. Elevation & Shadows
+## 6. Where the rest of the system lives
 
-We treat shadows with extreme restraint, mimicking a flat sheet of paper sitting on another sheet. We avoid glowing, colored drop shadows.
-
-*   **`--shadow-flat` (`none`)**: Zero shadow. Elements are separated purely by a `1px` border of color `--color-border`. (Default state for cards, lists).
-*   **`--shadow-low` (`0 1px 2px rgba(31, 36, 33, 0.05)`)**: Used for message bubbles to lift them slightly off the background canvas.
-*   **`--shadow-high` (`0 8px 24px -4px rgba(31, 36, 33, 0.08)`)**: Used for menus, sheets, and pairing modal cards to establish prominent depth.
-
-*In dark mode, shadows swap to a slightly darker, larger-spread alpha: `--shadow-low-dark` (`0 1px 2px rgba(0, 0, 0, 0.2)`), `--shadow-high-dark` (`0 8px 24px -4px rgba(0, 0, 0, 0.4)`).*
-
----
-
-## 7. Motion & Transitions
-
-Animations are quiet, smooth, and physically motivated. We avoid bouncy, playful, or rapid movements.
-
-*   **Timing Function**: `cubic-bezier(0.16, 1, 0.3, 1)` (easeOutExpo). This provides a quick, smooth transition that settles gently.
-*   **Standard Duration**: `--motion-duration-sm` (`150ms`) for color fades, button states. `--motion-duration-md` (`300ms`) for screen slide-ins, drawer openings.
-*   **Micro-Interaction (Scale)**: Active interactive controls (like the ticket action button) should slightly scale down (`transform: scale(0.97)`) on click and rebound smoothly.
+This document covers aesthetic, screen architecture, colour and type. **Spacing,
+radii, elevation and motion are defined only in [`tokens.css`](./tokens.css)** —
+the single source of truth for every token, imported directly by the app rather
+than copied. If a number is needed and it is not here, it is there. Do not
+reintroduce a second copy; that drift has already been fixed once.
