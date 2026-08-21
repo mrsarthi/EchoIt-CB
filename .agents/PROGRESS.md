@@ -1265,6 +1265,65 @@ from the protocol's documentation.
 
 ## Findings
 
+### Finding 18 — the relay and discovery servers are undisclosed, and unchosen — 🔴 **OPEN** *(found 2026-08-21)*
+
+`PRODUCT.md` §1 states the product's most load-bearing sentence:
+
+> *"The only thing EchoIt asks a server is whether there's a new version.
+> Everything else goes straight between your device and theirs."*
+
+§1 calls this *"deliberately checkable — anyone can watch the network and
+confirm it."* Watching the network does not confirm it.
+
+**The word "relay" appears zero times in `PRODUCT.md`.** It appears throughout
+the code: every ticket embeds a relay URL, `bridge-harness.ts:119` waits for
+*"STUN and the relay"* before a ticket can be built, `status()` reports
+`relayed=`, and `ProfileTab` renders **"Connected (Relay)"** as a live state.
+
+**What is actually running.** `src-tauri/src/iroh_bridge.rs:170` is
+`Endpoint::builder(presets::N0)`, and the next line is `endpoint.online().await`
+— which blocks until that infrastructure answers, on every launch. Read from
+`iroh-1.0.3/src/endpoint/presets.rs`, the preset wires two n0 services:
+
+| Service | Endpoint | Contacted |
+|---|---|---|
+| Relay (introduction; carries traffic only on fallback) | `use1-1` / `usw1-1` / `euc1-1` / `aps1-1` `.relay.n0.iroh.link` | Every launch |
+| Discovery — **publishes** this device's ID and addresses | `https://dns.iroh.link/pkarr` | Every launch |
+
+Nobody chose this; it is the library default.
+
+**What it does *not* mean.** The hardware measurements stand. Every test
+reported `relayed=false`, which means messages went device to device and no
+server carried them. Hole punching worked. Encryption is unaffected — a relay
+cannot read end-to-end encrypted content.
+
+**What it does mean.**
+
+1. **The §1 claim is false as written**, and false in the one way §1 itself
+   warns about: *"a small false claim is what makes people doubt the large true
+   ones."* Number 0 can see a device ID, an IP, and roughly when someone is
+   online. Whether they can also observe which device IDs reach for each other
+   at setup is likely but **not verified here**.
+2. **It is an availability dependency.** If n0 retires or rate-limits those
+   relays, EchoIt cannot introduce peers and new connections stop working.
+   There is no arrangement with them.
+
+**Fix, in two halves.** The urgent half is copy — §1 and §4 need to describe the
+connection helper honestly, and that is rule #4's territory, so the exact
+wording is the user's to set. Something in the shape of: *"EchoIt uses a
+connection helper to find the other person's device; messages then go straight
+between you. If a direct path is not possible, that helper passes the encrypted
+messages along — it can never read them."*
+
+The unhurried half is owning the infrastructure — specified as **Phase 7** in
+`IMPLEMENTATION_PLAN.md`, with a provider study. Explicitly not beta work: every
+direct-connection measurement in this file was taken through n0's introducers,
+and swapping them invalidates all of it.
+
+**Do not describe anything we host as "zero knowledge."** True of content, false
+of metadata, and §4.2 forbids claiming protection we do not have.
+
+
 ### Finding 17 — a unilateral contact reports "Connected directly" — 🔴 **OPEN** *(found 2026-08-21)*
 
 Found while producing a real knock to test the requests dot.

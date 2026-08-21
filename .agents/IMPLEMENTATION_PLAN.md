@@ -303,6 +303,141 @@ Q6; it absolutely blocks public release.
 
 ---
 
+## Phase 7 — Future: owning the connection layer *(post-beta)*
+
+*Added 2026-08-21. Not beta work — see "Why not before beta" at the end.*
+
+### 7.0 What we found
+
+`src-tauri/src/iroh_bridge.rs:170` builds the endpoint with
+`Endpoint::builder(presets::N0)`. Read from the crate source on this machine
+(`iroh-1.0.3/src/endpoint/presets.rs`), that preset is documented as *"the
+default relay servers provided by Number 0"* plus *"the DNS Address Lookup
+service ... publishes to and resolves from the n0.computer dns server
+`iroh.link`."*
+
+Nobody chose this. It is the library default, and it means **two** dependencies
+on infrastructure operated by the company that makes Iroh:
+
+| Service | What it does | Where it points today | How to replace |
+|---|---|---|---|
+| **Relay** | Introduces two peers so hole punching can land; carries encrypted traffic **only** when a direct path cannot be made | `use1-1`, `usw1-1`, `euc1-1`, `aps1-1` `.relay.n0.iroh.link` | `RelayMode::Custom(RelayMap)` |
+| **Discovery (pkarr)** | Publishes a signed record of this device's ID and addresses; resolves other peers' | `https://dns.iroh.link/pkarr` | `PkarrPublisher::builder(url)` / `PkarrResolver::builder(url)` |
+
+**Replacing only the relay leaves half the exposure in place** — the publisher
+still writes to n0 on every launch. Both must move together.
+
+Iroh supports this as a first-class path: `iroh-relay` 1.0.3 ships a real server
+binary (`[[bin]] name = "iroh-relay"`, behind the `server` feature).
+
+### 7.0.1 Correct the mental model
+
+The relay is **not** a fallback-only service. It is contacted on **every
+launch**, by every user, because introduction is its main job. Carrying traffic
+is the rare part — every hardware test to date reported `relayed=false`.
+
+This is good news for cost: the frequent work (registration, introduction) is
+tiny; the expensive work (relaying bytes) is rare.
+
+### 7.1 Provider study *(researched 2026-08-21)*
+
+Requirements: **always on** (a sleeping relay makes introductions fail, which
+presents to a user as "can't connect" — indistinguishable from the network being
+down), **a UDP listener** (`ServerConfig.quic` is the QUIC address-discovery
+half; without it hole punching degrades and more sessions fall back to relaying,
+which costs more bandwidth), and **egress headroom**.
+
+#### Free, and actually viable — Oracle Cloud Always Free
+
+| | |
+|---|---|
+| Compute | 2 OCPU / 12 GB ARM Ampere A1 — **halved** from 4/24 on 2026-06-15, enforced 2026-08-18. Plus 2 × AMD micro VMs |
+| **Egress** | **10 TB / month** |
+| UDP | Full VM with root and your own security lists — not a PaaS, so yes |
+| Cost | $0. A credit card is required for identity verification and is not charged unless you upgrade |
+
+**The UDP caveat, and why it probably does not bite us.** Oracle's network
+firewall drops *fragmented* UDP datagrams when ingress rules are restricted to
+specific ports — a 1000-byte datagram passes, 1200 fails. The documented fix is
+to allow **all** UDP ports in the ingress rule rather than a range. Separately,
+QUIC deliberately keeps datagrams at or below ~1200 bytes precisely to avoid IP
+fragmentation, so an iroh relay should sit under the threshold by design.
+**Verify with a real relay before relying on this** — it is reasoning from two
+facts, not a measurement.
+
+**The real risk is idle reclamation.** Oracle deems a compute instance idle if
+95th-percentile CPU is under 20% across 7 days, and idle Always Free instances
+*may* be reclaimed. A relay for a small beta is close to the definition of idle.
+Oracle's own documentation is not consistent here — one page says Always Free
+resources are not reclaimed, another says idle ones may be. **Treat reclamation
+as likely rather than settled**, and budget for the paid fallback below.
+Accounts idle 30 days may also be suspended.
+
+#### Free, and not viable
+
+| Option | Why not |
+|---|---|
+| **Google Cloud `e2-micro` always free** | **1 GB/month egress.** Oracle gives 10 TB. A single relayed conversation could exhaust the month |
+| **Render / Fly / Railway and PaaS generally** | HTTP/TCP oriented, no arbitrary UDP listener, and free tiers sleep. Render was the original idea and is the wrong shape for this |
+
+#### Cheapest sound paid option — Hetzner CX22
+
+**€4.35/month** (~$4.59) for 2 vCPU, 4 GB RAM, 40 GB NVMe, full root, UDP
+unrestricted. Hetzner raised some plan prices on 2026-04-01, so check current
+figures at purchase. Netcup's RS 1000 G12 is stronger per euro on raw
+performance if that ever matters; for a relay it will not.
+
+#### Recommendation
+
+Try **Oracle Always Free** first — 10 TB of egress is the number that matters and
+nothing else free comes close. Expect to need the **Hetzner CX22 at €4.35** if
+idle reclamation or ARM capacity shortages bite, and treat that €4.35 as the real
+budget rather than a surprise.
+
+### 7.2 Milestones
+
+- **M7.2.1** Stand up `iroh-relay` with both halves configured — `relay`
+  (HTTPS) and `quic` (UDP address discovery). Confirm a real client reaches it.
+- **M7.2.2** Stand up a pkarr publish/resolve endpoint, or accept that discovery
+  stays with n0 and **say so in the disclosure**. Half a migration described as
+  a whole one is worse than not migrating.
+- **M7.2.3** Point the app at both: `RelayMode::Custom`,
+  `PkarrPublisher::builder(url)`, `PkarrResolver::builder(url)`. This replaces
+  `presets::N0`, so the crypto provider must be set explicitly — copy what the
+  `N0` preset does rather than reinventing it.
+- **M7.2.4** Measure again on real hardware. Every direct-connection figure in
+  `PROGRESS.md` was taken through n0's introducers; none of it carries over.
+  Two phones, mobile data, `relayed=false` or the migration is not done.
+- **M7.2.5** **Custom relay URL in Settings** — the bring-your-own-relay idea, as
+  an advanced setting rather than a default. It is what makes the hosted default
+  trustworthy: *"we run one so it works; point it at your own if you'd rather."*
+  Asking an ordinary user to run a relay cannot be the default — that is the
+  audience EchoIt explicitly is not built for.
+- **M7.2.6** Disclosure copy in `PRODUCT.md` §1 and §4. See Finding 18.
+
+### 7.3 Verbal rule for whatever we host
+
+**Never call it "zero knowledge".** It is true of content — messages are
+end-to-end encrypted and a relay cannot read them. It is false of metadata: a
+relay must see IP addresses, device IDs and timing, because that is the job.
+§4.2 forbids claiming protection we do not have, and this would be the same
+overclaim the audits already caught with "hardware keychain" and "Initializing
+encrypted database".
+
+Call it a **connection helper**, and say what it sees.
+
+### Why not before beta
+
+The transport layer is the one part of EchoIt with real hardware proof behind
+it — two phones, mobile data, double CGNAT, direct, 1677 ms. Every one of those
+measurements was taken with n0 doing introduction. Swapping that out invalidates
+all of them and puts the only proven layer at risk days before a beta.
+
+The urgent half of this is **one paragraph of copy** (Finding 18), not a
+migration.
+
+---
+
 ## Critical path
 
 ```
