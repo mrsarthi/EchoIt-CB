@@ -12,6 +12,7 @@
     "tauri": "tauri",
     "test:two-peer": "tsx harness/two-peer.mts",
     "test:bridge": "tsx harness/two-peer-bridge.mts",
+    "test:three-peer": "tsx harness/three-peer-privacy.mts",
     "android:sign": "node scripts/apply-android-signing.mjs"
   },
   "dependencies": {

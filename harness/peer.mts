@@ -93,18 +93,25 @@ async function handle(msg: Record<string, unknown>): Promise<void> {
     }
 
     case 'send': {
+      const channelId = String(msg.channelId ?? CHANNEL);
       const sent = await client.chat.sendMessage({
-        channelId: CHANNEL,
+        channelId,
         content: String(msg.content),
       });
-      emit({ type: 'sent', id: sent.id, content: sent.content });
+      emit({ type: 'sent', id: sent.id, channelId, content: sent.content });
       return;
     }
 
     case 'history': {
-      const history = await client.chat.getHistory(CHANNEL);
+      // `channelId` is optional so the existing two-peer scenarios, which
+      // never send one, keep reading the default channel. The docblock at the
+      // top of this file always claimed both commands took a channel; until
+      // now the code ignored it and used the constant regardless.
+      const channelId = String(msg.channelId ?? CHANNEL);
+      const history = await client.chat.getHistory(channelId);
       emit({
         type: 'history',
+        channelId,
         count: history.length,
         contents: history.map((m) => m.content),
       });

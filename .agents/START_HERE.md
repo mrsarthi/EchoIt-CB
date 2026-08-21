@@ -34,6 +34,11 @@ beta — no groups.
 **Not built:** sending and receiving messages (the composer is not wired),
 groups, read receipts, the updater.
 
+**Blocked, not merely unbuilt:** wiring the composer (M2.4) needs a channel per
+conversation, and **Finding 19** proves a channel is readable by every paired
+contact, not just its two participants. Measured with three real peers, not
+inferred. Read that finding before designing anything on top of channels.
+
 **The one thing blocking beta:** background delivery has never been measured on
 0.3.2. Everything needed to measure it now exists — see "How to verify".
 
@@ -77,6 +82,12 @@ Each was a real bug once. Removing any of them silently reintroduces it.
 value only when that value is one the caller is designed to receive.* A
 plausible-looking fake produces a bug that looks real.
 
+**The second rule, learned twice:** *two peers is not enough to test a
+messenger.* Findings 16 and 19 were both invisible with exactly two peers and
+both appear the moment a third exists — one as a message that vanishes, one as a
+message delivered to someone who should never have seen it. Beta testers will
+have three.
+
 ---
 
 ## How to verify anything
@@ -90,6 +101,7 @@ version:
 ```bash
 npm run typecheck && npm run build     # necessary, nowhere near sufficient
 npm run test:two-peer                  # 3 scenarios, real QUIC, two OS processes
+npm run test:three-peer                # does a 1:1 channel stay 1:1? (currently FAILS)
 node harness/cdp/drive-bridge.mjs      # two app instances exchange messages
 node harness/cdp/csp-check.mjs 9222    # CSP violations + console errors
 ```
@@ -108,6 +120,9 @@ bitten three times. Check both.
   **push** (notification, banner, app-icon badge), and `DESIGN.md` §1 designs
   unread counts on Chats. The docs never disagreed with each other — the
   summary of them did. Details in `PROGRESS.md`.
+- **Finding 19 blocks M2.4** — a channel is readable by every paired contact.
+  Needs an upstream fix (SDK-7), app-layer encryption, or a scope change.
+  **This is a decision, not a task.**
 - **A unilateral contact says "Connected directly"** — `PRODUCT.md` §5 State 3
   copy shown in State 1. Found 2026-08-21, open, logged as **Finding 17**. This
   is the silent-non-delivery failure §5 exists to prevent, and it gets worse the

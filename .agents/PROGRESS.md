@@ -1265,6 +1265,99 @@ from the protocol's documentation.
 
 ## Findings
 
+### Finding 19 — every paired contact receives every conversation, in plaintext — 🔴 **BLOCKS M2.4** *(found 2026-08-21)*
+
+**Measured, not read.** `npx tsx harness/three-peer-privacy.mts`, three real
+processes over real QUIC:
+
+```
+bob's copy of the channel   : 1 message(s) ["private-to-bob-1787324837174"]
+carol's copy of the channel : 1 message(s) ["private-to-bob-1787324837174"]
+
+FAIL — carol holds the plaintext of a conversation she is not part of.
+```
+
+Alice is paired with Bob and with Carol. Bob and Carol are strangers to each
+other. Alice sends one message to a channel derived from Alice's and Bob's
+did:keys. **Carol was never told that channel id and never wrote to it**, and
+Carol ends up holding its plaintext.
+
+### The chain, read directly
+
+| Step | Code | Behaviour |
+|---|---|---|
+| 1 | `session-manager.js:61` | `beginSync` refuses unpaired peers — so **strangers are not the problem**. Contacts are |
+| 2 | `sync-engine.js:100` | A root mismatch is answered with `generateAllDocumentMessages(peerId)` |
+| 3 | `sync-engine.js:141` | That iterates `documents.listDocuments()` — **every local document** — with no reference to who the peer is |
+| 4 | `sync-engine.js:127` | `handleSendDelta` calls `ensureSyncDocument(docId)`: a receiver **creates** any document a peer pushes, with no check that it should have it |
+| 5 | `chat-service.js:307` | `recordLocally` writes `content` into the document **as plaintext** |
+
+Step 5 is what makes this a disclosure rather than a metadata leak. The
+transport is encrypted and the envelope path (`0x02`) is per-recipient; the
+document path (`0x01`) carries the message bodies themselves.
+
+`MembershipSyncEngine` (`core/dist/crdt/membership-sync.js`) already models
+per-channel member sets. **`sync-engine.js` never references it** — zero matches
+for "membership" in the file. This reads as wiring that was never completed
+rather than a deliberate design.
+
+### What it would cause if shipped
+
+EchoIt's entire proposition is private 1:1 messaging. With two or more contacts
+— the ordinary case, and the case beta testers will be in on day one — **every
+contact silently receives every conversation you have, and can read it.** No
+warning, nothing visible in the UI, and it is worse the longer the app is used
+because sync is retroactive: a contact added today receives conversations held
+before they existed.
+
+This is not the same shape as Finding 16. That was a message failing to arrive.
+This is a message arriving somewhere it should never have gone.
+
+### Why no earlier test caught it
+
+Every test to date used **exactly two peers.** With two peers, "sync everything
+to every paired contact" and "sync this conversation to its participant" are the
+same behaviour. The bug needs a third party to exist, and `PROGRESS.md` recorded
+the identical blind spot for Finding 16 in almost the same words. **Two peers is
+not enough to test a messenger** — `harness/three-peer-privacy.mts` exists so
+that this class of defect has somewhere to be caught.
+
+### Effect on M2.4
+
+Channel-per-pair, derived from both did:keys, is the natural design and the one
+M2.4 was going to use. **It cannot be built as the SDK stands.** Options, none
+free:
+
+1. **Upstream fix — correct, and blocking.** See SDK-7 below.
+2. **Encrypt content in the app before `sendMessage`**, with a key only the pair
+   holds, so a leaked document is ciphertext. The channel id still discloses
+   *that* Alice talks to Bob (both did:keys are in it), plus timestamps and
+   message counts — hashing the id reduces that but does not remove it. It also
+   puts real cryptography in the app layer, which is what the SDK exists to
+   provide, and doing it badly is worse than not doing it.
+3. **One contact per tester for beta.** Unrealistic; rejected for the same
+   reason under Finding 16.
+
+### Upstream request — SDK-7
+
+`CrdtSyncEngine` must scope documents to peers entitled to them. Concretely:
+
+- `generateAllDocumentMessages(peerId)` (`sync-engine.js:141`) should filter
+  `documents.listDocuments()` by a per-document participant set rather than
+  offering all of them. `MembershipSyncEngine` already holds that set.
+- `handleSendDelta` (`sync-engine.js:127`) needs the mirror check. Filtering
+  only the send side still lets a peer **push** a document into someone who
+  should not hold it, and `ensureSyncDocument` will happily create it.
+- `stateRoot()` is computed over the whole manager, so two peers who share one
+  channel out of several will always mismatch and always fall through to the
+  document loop. A per-peer or per-document root would make the common case
+  cheaper as well as correct.
+
+Until this lands, a channel is effectively readable by every paired peer, and
+that should be stated in the SDK's documentation — the current wording implies
+per-channel scoping.
+
+
 ### Finding 18 — the relay and discovery servers are undisclosed, and unchosen — 🔴 **OPEN** *(found 2026-08-21)*
 
 `PRODUCT.md` §1 states the product's most load-bearing sentence:
