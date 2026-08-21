@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { SearchIcon, PlusIcon, ShieldIcon } from "../../components/ui/Icons";
+import { SearchIcon, PlusIcon } from "../../components/ui/Icons";
 import { Logo } from "../../components/ui/Logo";
 import { Badge } from "../../components/ui/Badge";
 

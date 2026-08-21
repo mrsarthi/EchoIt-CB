@@ -7,7 +7,6 @@ import { ContactsTab } from "./tabs/ContactsTab";
 import { SettingsTab } from "./tabs/SettingsTab";
 import { ProfileTab } from "./tabs/ProfileTab";
 import { ChatView } from "./chat/ChatView";
-import { ShieldIcon } from "../components/ui/Icons";
 import { Logo } from "../components/ui/Logo";
 import { useApp } from "../context/AppContext";
 

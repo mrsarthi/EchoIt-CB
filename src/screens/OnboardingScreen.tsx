@@ -9,7 +9,6 @@ import { Card } from "../components/ui/Card";
 import { Textarea } from "../components/ui/Input";
 import { AlertBanner } from "../components/ui/AlertBanner";
 import {
-  ShieldIcon,
   KeyIcon,
   CopyIcon,
   CheckIcon,
