@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import wasm from "vite-plugin-wasm";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // @ts-expect-error process is a nodejs global
@@ -9,10 +10,23 @@ const host = process.env.TAURI_DEV_HOST;
 const shim = (name: string) =>
   fileURLToPath(new URL(`./src/shims/${name}`, import.meta.url));
 
+// The version the update check compares against, read from the same file the
+// bundler reads. Hardcoding it in the frontend would let a release whose
+// tauri.conf.json was bumped, but whose constant was not, tell every tester
+// they are up to date while a version behind — a silent failure of the one
+// mechanism that exists to un-strand them.
+const appVersion: string = JSON.parse(
+  readFileSync(fileURLToPath(new URL("./src-tauri/tauri.conf.json", import.meta.url)), "utf8"),
+).version;
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   // Automerge ships as WASM; the plugin is what lets Rollup embed it.
   plugins: [react(), wasm()],
+
+  define: {
+    __APP_VERSION__: JSON.stringify(appVersion),
+  },
 
   build: {
     // Automerge's WASM glue uses top-level await, which is ES2022. Targeting

@@ -123,15 +123,23 @@ bitten three times. Check both.
 - **Finding 19 blocks M2.4** — a channel is readable by every paired contact.
   Needs an upstream fix (SDK-7), app-layer encryption, or a scope change.
   **This is a decision, not a task.**
-- **A unilateral contact says "Connected directly"** — `PRODUCT.md` §5 State 3
-  copy shown in State 1. Found 2026-08-21, open, logged as **Finding 17**. This
-  is the silent-non-delivery failure §5 exists to prevent, and it gets worse the
-  moment the composer is wired.
+- ~~**A unilateral contact says "Connected directly"**~~ **Fixed 2026-08-22**
+  (Finding 17). `event.paired` is a local flag; the connection *direction* is
+  what proves the other side added us. Fixing it also made §5b's composer gate
+  reachable for the first time.
 - **Unread counts are hardcoded to `0`** (`AppShell.tsx:38`, `:93`), so the
   count branch in both navs and in `ChatsTab` has never rendered.
 - **388 KB logo**, shipped twice (bundle + favicon), displayed at 80px.
-- **Updater (Q21)** — designed in `IMPLEMENTATION_PLAN.md`, not built. Must exist
-  **in the first release** or every tester is stranded.
+- ~~**Updater (Q21)**~~ **Built 2026-08-22.** Check is one Rust command on both
+  platforms; Windows installs in place, Android opens the Releases page. The
+  **in-place download has never run** — there is no published release to update
+  to, so that half is unproven until a second release exists.
+- **A second unrecoverable secret now exists.** `src-tauri/echoit-updater.key`
+  plus `updater.properties`. Lose either and no existing install can ever be
+  updated. Back it up with the keystore.
+- **`PRODUCT.md` §4.3's Settings copy contains a false sentence** — *"It's the
+  only time the app talks to a server"* (Finding 18). The clause is omitted in
+  the shipped UI rather than reworded, because rule #4 makes the wording yours.
 - **Both copies of the Android keystore need backing up off-machine.** Losing it
   means testers must uninstall, and uninstalling destroys their message history.
 - **Android**: keychain and CSP have never been exercised on a device.

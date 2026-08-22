@@ -2,7 +2,7 @@
 
 ## Status at a glance
 
-*Last updated: 2026-08-21 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.3.2` · **🚪 GATE OPEN — two physical phones exchanged messages** · UI work unblocked*
+*Last updated: 2026-08-22 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.3.2` · **🚪 GATE OPEN — two physical phones exchanged messages** · UI work unblocked*
 
 | Phase | Target / Deliverable | Status | Tests | Notes |
 |---|---|---|---|---|
@@ -17,6 +17,144 @@
 | **S3. iOS readiness** | Paper check only — no Mac available | **Not Started** | 0 | Deferred by decision, not forgotten |
 | **1. Core Application (v1)** | Chats, local storage, recovery | **In progress** | 0 | Onboarding + navigation shell done & audited. **Next: pairing (2.3)** |
 | **Pre-UI hardening** | CSP locked down before the UI grows | ✅ **PASSED** | 2 | Strict policy, 0 violations, message flow intact — see below |
+
+## Finding 17 fixed, §5b composer gate reached, updater built (2026-08-22)
+
+Three items. The first two turned out to be one fix.
+
+### Finding 17 — a one-sided contact claimed "Connected directly"
+
+**Root cause.** `client.js:248` emits
+`paired: this.peers.getPeer(peerDid)?.paired === true` — a **purely local**
+flag meaning *we* added *them*. `AppContext` read it as mutual and promoted the
+contact to `bilateral_connected` the moment our own dial succeeded.
+
+**The fix is the direction, not the flag.** Dialling someone requires their
+ticket, and `client.connect()` self-pairs from a ticket carrying an encryption
+key — so an **inbound** connection is proof the other side added us. An
+outbound one proves only that we can reach them, which is precisely §5 State 1.
+
+| Path | Before | After |
+|---|---|---|
+| We dial them | `bilateral_connected` | `unilateral_waiting` — correct |
+| They dial us | `bilateral_connected` | `bilateral_connected` — correct, and now earned |
+| We accept a knock | `unilateral_waiting` | `bilateral_connected` — the knock **is** the evidence |
+
+That last row needed `markBilateral()`, kept separate from `pairAndConnect`
+because the two answer different questions: one knows we added them, the other
+knows they added us. Only the second makes a conversation deliverable.
+
+The knock branch also had to gain `!event.paired`. Once the branch above tests
+direction, a paired peer we dialled would otherwise fall through and be filed as
+a stranger knocking on our own door.
+
+### §5b — the composer gate was already built, just unreachable
+
+`ChatView` derives everything from `pairingState` and already disabled the
+composer, refused to send, and showed "Pairing required". None of it could ever
+run, because the state was always promoted to bilateral. **Fixing Finding 17
+delivered §5b's composer requirement with no new code.**
+
+The State 1 microcopy was already verbatim from §5 too. The words were right;
+the state was wrong.
+
+### Verified through the real UI, against a real one-sided pairing
+
+Instance B added instance A's 554-char ticket through Add Contact. A never added
+B back.
+
+| Check | Result |
+|---|---|
+| B's contact row | *"Waiting for them"*, *"Waiting for Instance A to connect back."*, *"You've added Instance A, but they haven't added you yet…"* — §5 State 1, verbatim |
+| B's composer | `disabled: true`, placeholder *"Composer paused until connection is complete"* |
+| B's send + attach buttons | `disabled: true` |
+| B's banner | *"Pairing required"* · *"Messages will be delivered once both sides complete connection."* |
+| A's requests dot | Still `rgb(224,133,96)`, 8px, `aria-label="Contacts — new requests"` — no regression |
+
+### Updater — Q21, both tracks
+
+| | Windows | Android |
+|---|---|---|
+| Check | `updates::check_for_update` (Rust) | same command, same release |
+| Install | `tauri-plugin-updater`, in place | Releases page via `opener`; reinstall the APK |
+
+**The check is one Rust command on every platform**, so the two tracks cannot
+disagree about what the latest version is.
+
+- `src-tauri/src/updates.rs` — the command, plus `is_newer`, which compares
+  numerically. Lexically **"0.10.0" sorts before "0.9.0"**, so a tester on 0.9.0
+  would never be told about 0.10.0. Two unit tests cover it; `cargo test --lib`
+  is **4 passed**.
+- `src/services/updates.ts` — opt-out (default on, §4.3), and a lazy import of
+  the updater plugin so Android's bundle does not carry a call to a plugin that
+  is not registered there.
+- `SettingsTab` — an UPDATES section with the toggle, version, and a manual
+  check.
+
+**The CSP was not touched.** `connect-src 'self' ipc: http://ipc.localhost` is
+byte-identical, asserted in the config patch itself. The request lives in Rust
+precisely so Q16 stays closed. `reqwest` was already in the tree via iroh, so
+declaring it added an honest graph edge and no new compilation.
+
+**A failed check is never shown as success.** `UpdateStatus.error` is separate
+from `available: false`, because "we could not tell" and "you are up to date"
+are different things and only one of them leaves a tester stranded.
+
+#### Verified by running
+
+Clicked **Check now** in the real app. The command made a real HTTPS request
+from Rust and returned:
+
+```
+{"available":false,"current":"0.1.0","latest":null,
+ "error":"release feed returned 404 Not Found"}
+```
+
+The 404 is correct — `EchoIt-CB` has no published releases yet; `curl` returns
+404 too. So the path works end to end and reported the failure honestly rather
+than claiming the app was current.
+
+*(First draft of the failure copy said "you may be offline". It does not know
+that — a 404 means no release exists. Now: "Couldn't check for updates just now.
+Your app still works — try again later.")*
+
+#### The signing key — a second unrecoverable secret
+
+`src-tauri/echoit-updater.key` (minisign, generated 2026-08-22) and
+`src-tauri/updater.properties` hold its password. Both gitignored; the **public**
+half is committed in `tauri.conf.json`.
+
+**Lose either and no existing install can ever be updated again.** This now
+joins the release keystore as something that exists in exactly one place and
+must be backed up off-machine.
+
+#### One deliberate copy omission
+
+§4.3 specifies the Settings copy verbatim, including *"It's the only time the
+app talks to a server."* **That sentence is false** — Finding 18. Rule #4 makes
+the approved wording the user's to set, so the clause is **omitted** rather than
+rewritten. Everything shipped is accurate; §4.3 still needs amending.
+
+### Regression — all green
+
+| Check | Result |
+|---|---|
+| `npm run test:two-peer` | **3/3** |
+| Bridge harness | **`STEP 1 PASSED`**, `relayed=false`, `outbox=0` |
+| `csp-check` with the updater UI | **0 violations, 0 console errors** |
+| `cargo test --lib` | **4 passed** |
+| `npm run typecheck` / `build` / `audit` | clean, **0 vulnerabilities** |
+
+### Not done
+
+- **M2.4 remains blocked** by Finding 19. Nothing here unblocks it.
+- **§5b's `Staged → Sent → Delivered → Read` ladder** is not built — it needs
+  messages to exist, which is M2.4.
+- **The desktop in-place update path has never been exercised**, because there
+  is no published release to update *to*. `installInPlace()` falls back to the
+  Releases page when the plugin finds nothing, so the button always does
+  something — but the actual download-and-replace is unproven until a second
+  release exists. Say so rather than implying it works.
 
 ## Requests badge → an unnumbered dot (2026-08-21)
 

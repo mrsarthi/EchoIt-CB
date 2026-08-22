@@ -161,7 +161,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const isBlocked = blockedPeers.some((b) => b.peerDid === peerDid);
       if (isBlocked) return;
 
-      if (event.paired) {
+      // `event.paired` is a purely LOCAL flag — the SDK emits
+      // `paired: this.peers.getPeer(peerDid)?.paired === true`, which only
+      // says *we* added *them*. It says nothing about whether they added us,
+      // and reading it as mutual is what made a one-sided contact display
+      // "Connected directly" (Finding 17).
+      //
+      // The direction is the evidence. Dialling us requires our ticket, and
+      // `client.connect()` self-pairs from a ticket that carries an
+      // encryption key — so an INBOUND connection proves the other side has
+      // added us. An outbound one proves only that we can reach them, which
+      // is exactly the state §5 calls "Waiting for them to connect back".
+      const theyReachedForUs = event.direction === "inbound";
+
+      if (event.paired && theyReachedForUs) {
         // Both sides are paired — update or create contact as bilateral_connected
         setContacts((prev) => {
           const existingIndex = prev.findIndex((c) => c.peerDid === peerDid);
@@ -191,8 +204,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
           saveRequests(did, updated);
           return updated;
         });
-      } else if (event.direction === "inbound") {
+      } else if (!event.paired && theyReachedForUs) {
         // Stranger knock: record in pendingRequests (NO notification, NO toast, NO badge)
+        //
+        // `!event.paired` matters now that the branch above also tests
+        // direction: without it a paired peer we dialled would fall through
+        // to here and be filed as a stranger knocking on our own door.
         setPendingRequests((prev) => {
           if (prev.some((r) => r.peerDid === peerDid)) return prev;
           const updated = [
@@ -343,6 +360,33 @@ export function AppProvider({ children }: { children: ReactNode }) {
     } else {
       throw new Error("Paste the peer's connection ticket to complete pairing.");
     }
+
+    // A request only exists because they dialled us, so by the time we accept
+    // one, both sides have added each other. `pairAndConnect` cannot know
+    // that — it is also the path for adding someone cold — so it opens every
+    // contact as `unilateral_waiting` and the knock is what settles it here.
+    markBilateral(peerDid);
+  };
+
+  /**
+   * Record that pairing is mutual.
+   *
+   * Kept separate from `pairAndConnect` because the two answer different
+   * questions: that function knows we added them, this one knows they added
+   * us. Only the second makes a conversation deliverable, and §5b gates the
+   * composer on it.
+   */
+  const markBilateral = (peerDid: string) => {
+    if (!did) return;
+    setContacts((prev) => {
+      const updated = prev.map((c) =>
+        c.peerDid === peerDid && c.pairingState !== "bilateral_connected"
+          ? { ...c, pairingState: "bilateral_connected" as const }
+          : c
+      );
+      saveContacts(did, updated);
+      return updated;
+    });
   };
 
   // Ignore an inbound request (silent: removes locally, reappears if they knock again)

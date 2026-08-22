@@ -1,15 +1,53 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useApp } from "../../context/AppContext";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { Badge } from "../../components/ui/Badge";
 import { Modal } from "../../components/ui/Modal";
 import { SettingsIcon, ShieldIcon, SunIcon, MoonIcon, LockIcon } from "../../components/ui/Icons";
+import {
+  APP_VERSION,
+  checkForUpdate,
+  installInPlace,
+  openReleasePage,
+  setUpdateChecksEnabled,
+  updateChecksEnabled,
+  type UpdateStatus,
+} from "../../services/updates";
 
 export function SettingsTab() {
   const { theme, setTheme, resetApp, keychainAvailable } = useApp();
   const [resetModalOpen, setResetModalOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [updatesOn, setUpdatesOn] = useState(true);
+  const [checking, setChecking] = useState(false);
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
+
+  // Read once on mount rather than during render: `updateChecksEnabled` touches
+  // localStorage, which throws in some webview configurations, and a render
+  // that can throw is a blank screen.
+  useEffect(() => {
+    setUpdatesOn(updateChecksEnabled());
+  }, []);
+
+  const runCheck = async () => {
+    setChecking(true);
+    try {
+      setUpdate(await checkForUpdate());
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const getUpdate = async () => {
+    if (!update) return;
+    // Windows replaces itself; Android cannot, and neither can a desktop build
+    // whose updater artifacts are missing. Falling back to the page means the
+    // button always does something rather than appearing inert.
+    if (!(await installInPlace())) {
+      await openReleasePage(update.releasePage);
+    }
+  };
 
   return (
     <div
@@ -141,6 +179,81 @@ export function SettingsTab() {
                 System
               </Button>
             </div>
+          </Card>
+        </section>
+
+        {/* Updates — Q21 / PRODUCT.md §4.3 */}
+        <section style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
+          <span
+            style={{
+              fontSize: "var(--font-size-label)",
+              fontWeight: "var(--font-weight-semibold)",
+              color: "var(--color-text-muted)",
+              letterSpacing: "0.04em",
+            }}
+          >
+            UPDATES
+          </span>
+          <Card style={{ display: "flex", flexDirection: "column", gap: "var(--space-md)" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--space-md)" }}>
+              <div>
+                <div style={{ fontWeight: "var(--font-weight-semibold)" }}>Check for updates</div>
+                <div style={{ fontSize: "var(--font-size-label)", color: "var(--color-text-muted)" }}>
+                  You are on version {APP_VERSION}
+                </div>
+              </div>
+              <Badge variant={updatesOn ? "success" : "muted"} dot>
+                {updatesOn ? "On" : "Off"}
+              </Badge>
+            </div>
+
+            {/*
+              PRODUCT.md §4.3 specifies this copy, including the sentence
+              "It's the only time the app talks to a server." That sentence is
+              not true: iroh_bridge.rs:170 binds with `presets::N0`, so the app
+              contacts Number 0's relay and discovery services on every launch
+              (Finding 18). Rule #4 makes the approved wording the user's to
+              set, so the false clause is omitted here rather than reworded —
+              everything below is accurate as written.
+            */}
+            <p style={{ fontSize: "var(--font-size-label)", color: "var(--color-text-muted)", lineHeight: 1.5, margin: 0 }}>
+              EchoIt asks GitHub once a day whether a newer version is available.
+              It sends nothing about you or your conversations. You can turn this
+              off, but then you&apos;ll need to check for new versions yourself.
+            </p>
+
+            <div style={{ display: "flex", gap: "var(--space-sm)", flexWrap: "wrap" }}>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  const next = !updatesOn;
+                  setUpdatesOn(next);
+                  setUpdateChecksEnabled(next);
+                }}
+              >
+                {updatesOn ? "Turn off update checks" : "Turn on update checks"}
+              </Button>
+              <Button variant="secondary" onClick={runCheck} disabled={checking}>
+                {checking ? "Checking…" : "Check now"}
+              </Button>
+              {update?.available && <Button onClick={getUpdate}>Get version {update.latest}</Button>}
+            </div>
+
+            {/*
+              Three outcomes, three messages. "Could not check" must never be
+              shown as "up to date": the whole point of the feature is that a
+              tester is not stranded, and a failed check reported as success is
+              indistinguishable from being on the newest build.
+            */}
+            {update && (
+              <p style={{ fontSize: "var(--font-size-label)", margin: 0, color: update.error ? "var(--color-warning)" : "var(--color-text-muted)" }}>
+                {update.error
+                  ? "Couldn't check for updates just now. Your app still works — try again later."
+                  : update.available
+                    ? `Version ${update.latest} is available.`
+                    : "You're on the latest version."}
+              </p>
+            )}
           </Card>
         </section>
 

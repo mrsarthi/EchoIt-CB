@@ -23,7 +23,24 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 iroh = "1.0.3"
-tokio = { version = "1.53.1", features = ["rt", "sync"] }
+tokio = { version = "1.53.1", features = ["rt", "sync", "time"] }
+
+# ─── Update checks (Q21) ──────────────────────────────────────────────────
+#
+# `reqwest` is already in the tree — iroh pulls it in through netwatch, built
+# with rustls and serde_json — so declaring it directly adds no new
+# compilation, only an honest edge in the dependency graph. Default features
+# off so this cannot be what drags in native-tls.
+#
+# The request lives in Rust rather than the webview on purpose: the CSP
+# (`connect-src 'self' ipc: http://ipc.localhost`) would block a frontend
+# fetch to github.com, and widening it to allow one would give up the property
+# that makes "the app cannot phone home" checkable. Q16 is closed; it stays
+# closed.
+reqwest = { version = "0.13", default-features = false, features = [
+  "json",
+  "rustls",
+] }
 base64 = "0.23.1"
 # ─── OS keychain (M2.2.2) ─────────────────────────────────────────────────
 #
@@ -51,6 +68,12 @@ keyring-core = "1"
 [patch.crates-io]
 wmi = { path = "vendor/wmi" }
 
+
+# Tauri v2 ships no Android updater, so the in-place updater is desktop-only.
+# Android's half of Q21 is `updates::check_for_update` plus `opener`, which
+# work on every platform.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store = "1.1"

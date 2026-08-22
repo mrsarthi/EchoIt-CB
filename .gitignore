@@ -24,6 +24,9 @@ yarn-error.log*
 *.jks
 *.keystore
 keystore.properties
+# Updater signing password. The private key itself is caught by *.key above.
+# Losing either means no existing install can ever be updated again.
+updater.properties
 *.p12
 *.mobileprovision
 
