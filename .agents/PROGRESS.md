@@ -18,6 +18,65 @@
 | **1. Core Application (v1)** | Chats, local storage, recovery | **In progress** | 0 | Onboarding + navigation shell done & audited. **Next: pairing (2.3)** |
 | **Pre-UI hardening** | CSP locked down before the UI grows | ✅ **PASSED** | 2 | Strict policy, 0 violations, message flow intact — see below |
 
+## Three unblocked cleanups (2026-08-22)
+
+Small, and all three were things flagged earlier in the session and left. None
+of them needed a decision, so they are done rather than carried.
+
+### 1. Storage failures were silent — `src/services/pairing-store.ts`
+
+Every save and load was wrapped in `} catch { // ignore }`. A failed write meant
+the contact list looked saved and was gone after a restart: data loss with no
+cause, and nothing anywhere to say it had happened.
+
+Now each reports which store failed. **The name only, never the contents** —
+constraint §3.3 rules out anything carrying contacts, and the point is to make
+the failure visible, not to log the data. `csp-check.mjs` already collects
+console errors, so this class of failure now shows up in tooling that runs on
+every UI change.
+
+Found by MACCO's scalability pass; the mechanism was verified by reading the
+file rather than taken on trust. Its framing was that this bites at
+localStorage's ~5 MB ceiling. That is the smaller half — **a swallowed write is
+a bug at ten contacts**, because a failure at any size is invisible.
+
+### 2. A badge claimed a connection that did not exist — `ProfileTab`
+
+```tsx
+const isRelayed = Boolean(client?.endpoint?.relayUrl && !client?.endpoint?.directAddresses?.length);
+<Badge variant="success" dot>{isRelayed ? "Connected (Relay)" : "Direct connection ready"}</Badge>
+```
+
+`isRelayed` is about whether **this device** discovered a direct address for
+itself. It says nothing about a connection to anyone. Both branches rendered a
+green success badge with a live-status dot, and one of them said **"Connected"**
+on a fresh install with zero contacts and nothing connected.
+
+This is Finding 17's shape exactly: asserting a state from a signal that does
+not carry it. Renamed to `hasDirectAddress`, and the badge now describes
+reachability rather than a connection — `"Ready to connect directly"` when a
+direct address exists, `"Ready to connect"` otherwise, with the muted variant so
+a capability does not read as a live success.
+
+Deliberately avoids naming the relay. That wording is bound up with Finding 18
+and is the user's to set; inventing a term here would pre-empt it.
+
+### 3. A desktop app called the machine a phone — `ProfileTab`
+
+The at-rest disclosure said *"stored locally on this phone"* and *"access to
+your phone"*, on a build that ships to Windows. Now "this device".
+
+### Verified by running
+
+| Check | Result |
+|---|---|
+| Profile on a fresh install, zero contacts | **"Ready to connect directly"** — `rgb(92,158,123)` on `rgb(28,40,33)`, no "Connected" claim |
+| At-rest copy | "stored locally on **this device**" |
+| Console errors | **0** — the new error paths correctly did not fire |
+| `csp-check` | **0 violations, 0 console errors** |
+| `npm run test:two-peer` | **3/3** |
+| `typecheck` / `build` / `audit` | clean, **0 vulnerabilities** |
+
 ## Finding 17 fixed, §5b composer gate reached, updater built (2026-08-22)
 
 Three items. The first two turned out to be one fix.
@@ -1589,11 +1648,29 @@ cannot read end-to-end encrypted content.
    There is no arrangement with them.
 
 **Fix, in two halves.** The urgent half is copy — §1 and §4 need to describe the
-connection helper honestly, and that is rule #4's territory, so the exact
-wording is the user's to set. Something in the shape of: *"EchoIt uses a
-connection helper to find the other person's device; messages then go straight
-between you. If a direct path is not possible, that helper passes the encrypted
-messages along — it can never read them."*
+connection helper honestly. Rule #4 makes the exact wording the user's to set,
+so what follows is a **draft awaiting approval, not an applied change.** §1 is
+untouched.
+
+> **Draft replacement for the §1 claim**
+>
+> *"Two phones have no fixed address, so EchoIt uses a connection helper to
+> introduce your device to your friend's. After the introduction, messages go
+> straight between you. If a direct path can't be made, the helper passes the
+> encrypted messages along — it can never read them. The only other server
+> EchoIt talks to is the one it asks whether there's a new version."*
+>
+> **Draft replacement for the §4.3 Settings line** — currently *"It's the only
+> time the app talks to a server"*, which is false and is **omitted** from the
+> shipped UI rather than reworded:
+>
+> *"EchoIt asks GitHub once a day whether a newer version is available. It sends
+> nothing about you or your conversations."*
+
+Both drafts hold to §3's no-jargon rule (no "relay", no "NAT", no "hole
+punching") and neither makes an absolute claim. Whether the helper is Number 0's
+or ours changes the honest wording again, so this is worth settling **with** the
+Phase 7 decision rather than before it.
 
 The unhurried half is owning the infrastructure — specified as **Phase 7** in
 `IMPLEMENTATION_PLAN.md`, with a provider study. Explicitly not beta work: every

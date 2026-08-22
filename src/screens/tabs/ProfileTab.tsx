@@ -68,7 +68,12 @@ export function ProfileTab() {
     }
   };
 
-  const isRelayed = Boolean(client?.endpoint?.relayUrl && !client?.endpoint?.directAddresses?.length);
+  // Whether this device found a direct address for itself. It describes
+  // *reachability*, not a live connection to anyone -- the previous badge read
+  // "Connected (Relay)" with nobody connected, and showed a green success dot
+  // on a brand-new install with zero contacts. Same family as Finding 17:
+  // asserting a state from a signal that does not carry it.
+  const hasDirectAddress = Boolean(client?.endpoint?.directAddresses?.length);
 
   return (
     <div
@@ -140,8 +145,8 @@ export function ProfileTab() {
             >
               YOUR SAFE ADDRESS
             </span>
-            <Badge variant="success" dot>
-              {isRelayed ? "Connected (Relay)" : "Direct connection ready"}
+            <Badge variant={hasDirectAddress ? "success" : "muted"} dot>
+              {hasDirectAddress ? "Ready to connect directly" : "Ready to connect"}
             </Badge>
           </div>
 
@@ -226,8 +231,8 @@ export function ProfileTab() {
 
         {/* Mandatory At-Rest Disclosure Notice */}
         <AlertBanner variant="info" title="Local Storage Security Notice">
-          Your chat history is stored locally on this phone. Because message files are not
-          encrypted on your device&apos;s disk, someone who gains physical access to your phone might
+          Your chat history is stored locally on this device. Because message files are not
+          encrypted on your device&apos;s disk, someone who gains physical access to it might
           be able to read them. We recommend keeping a strong lock screen password or PIN enabled.
         </AlertBanner>
       </div>

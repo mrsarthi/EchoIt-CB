@@ -77,6 +77,7 @@ export function loadContacts(myDid: string | null): Contact[] {
     const raw = localStorage.getItem(getStorageKey("contacts", myDid));
     return raw ? JSON.parse(raw) : [];
   } catch {
+    console.error("EchoIt: could not read contacts from local storage");
     return [];
   }
 }
@@ -85,7 +86,10 @@ export function saveContacts(myDid: string | null, contacts: Contact[]): void {
   try {
     localStorage.setItem(getStorageKey("contacts", myDid), JSON.stringify(contacts));
   } catch {
-    // ignore
+    // Not silent. A failed write means the contacts list looks saved and is
+    // gone after a restart, which reads to the user as data loss with
+    // no cause. The name only -- never the contents (constraint §3.3).
+    console.error("EchoIt: could not persist contacts to local storage");
   }
 }
 
@@ -94,6 +98,7 @@ export function loadRequests(myDid: string | null): InboundRequest[] {
     const raw = localStorage.getItem(getStorageKey("requests", myDid));
     return raw ? JSON.parse(raw) : [];
   } catch {
+    console.error("EchoIt: could not read requests from local storage");
     return [];
   }
 }
@@ -102,7 +107,10 @@ export function saveRequests(myDid: string | null, requests: InboundRequest[]): 
   try {
     localStorage.setItem(getStorageKey("requests", myDid), JSON.stringify(requests));
   } catch {
-    // ignore
+    // Not silent. A failed write means the requests list looks saved and is
+    // gone after a restart, which reads to the user as data loss with
+    // no cause. The name only -- never the contents (constraint §3.3).
+    console.error("EchoIt: could not persist requests to local storage");
   }
 }
 
@@ -111,6 +119,7 @@ export function loadBlockedPeers(myDid: string | null): BlockedPeer[] {
     const raw = localStorage.getItem(getStorageKey("blocked", myDid));
     return raw ? JSON.parse(raw) : [];
   } catch {
+    console.error("EchoIt: could not read blocked peers from local storage");
     return [];
   }
 }
@@ -119,7 +128,10 @@ export function saveBlockedPeers(myDid: string | null, blocked: BlockedPeer[]): 
   try {
     localStorage.setItem(getStorageKey("blocked", myDid), JSON.stringify(blocked));
   } catch {
-    // ignore
+    // Not silent. A failed write means the blocked peers list looks saved and is
+    // gone after a restart, which reads to the user as data loss with
+    // no cause. The name only -- never the contents (constraint §3.3).
+    console.error("EchoIt: could not persist blocked peers to local storage");
   }
 }
 
@@ -128,6 +140,7 @@ export function loadActiveInvites(myDid: string | null): ActiveInvite[] {
     const raw = localStorage.getItem(getStorageKey("invites", myDid));
     return raw ? JSON.parse(raw) : [];
   } catch {
+    console.error("EchoIt: could not read active invites from local storage");
     return [];
   }
 }
@@ -136,6 +149,9 @@ export function saveActiveInvites(myDid: string | null, invites: ActiveInvite[])
   try {
     localStorage.setItem(getStorageKey("invites", myDid), JSON.stringify(invites));
   } catch {
-    // ignore
+    // Not silent. A failed write means the active invites list looks saved and is
+    // gone after a restart, which reads to the user as data loss with
+    // no cause. The name only -- never the contents (constraint §3.3).
+    console.error("EchoIt: could not persist active invites to local storage");
   }
 }
