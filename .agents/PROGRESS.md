@@ -66,10 +66,34 @@ and is the user's to set; inventing a term here would pre-empt it.
 The at-rest disclosure said *"stored locally on this phone"* and *"access to
 your phone"*, on a build that ships to Windows. Now "this device".
 
+### 4. 388 KB of logo shipped for nothing
+
+`public/logo.png` and `src/assets/logo.png` are **byte-identical**
+(`df98b5a5…`). Only the second is referenced — `Logo.tsx` imports it, so Vite
+hashes and bundles it. The `public/` copy is served verbatim and **nothing links
+to it**: `index.html` has no favicon tag, `tauri.conf.json` takes its window
+icon from `src-tauri/icons/`, and a repo-wide grep finds no other reference.
+
+Deleted. `dist/logo.png` no longer ships, the bundle drops 388 KB, and nothing
+visual changed — verified below.
+
+**Correcting the 2026-08-21 entry**, which lists *"**Favicon**: Window / Tab
+icon in `index.html`"* as a delivered touchpoint. There is no favicon tag in
+`index.html` and there never was. That entry has now had three claims fail
+checking: it broke `typecheck`, it was appended to the bottom of a
+newest-first log, and this. Worth remembering as the shape of an entry written
+without running anything.
+
+**Still open, deliberately not done:** the remaining copy is **1000×1000** and
+is displayed at 36, 28, 48 and 80 px. Resizing it would save most of the
+remaining 388 KB, but it is a brand asset and how it should be resampled — or
+whether it wants a 2x variant — is a design call, not a cleanup.
+
 ### Verified by running
 
 | Check | Result |
 |---|---|
+| Logo after deletion | Renders at all four sizes (36/28/48/80 px) from `logo-BP5QIxCf.png`, **0 broken images, 0 console errors** |
 | Profile on a fresh install, zero contacts | **"Ready to connect directly"** — `rgb(92,158,123)` on `rgb(28,40,33)`, no "Connected" claim |
 | At-rest copy | "stored locally on **this device**" |
 | Console errors | **0** — the new error paths correctly did not fire |

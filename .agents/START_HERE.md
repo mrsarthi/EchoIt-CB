@@ -129,7 +129,9 @@ bitten three times. Check both.
   reachable for the first time.
 - **Unread counts are hardcoded to `0`** (`AppShell.tsx:38`, `:93`), so the
   count branch in both navs and in `ChatsTab` has never rendered.
-- **388 KB logo**, shipped twice (bundle + favicon), displayed at 80px.
+- **388 KB logo.** The duplicate `public/` copy is deleted (nothing linked to
+  it — there is no favicon tag). The remaining one is **1000×1000 displayed at
+  80px**; resizing is a design call, not a cleanup.
 - ~~**Updater (Q21)**~~ **Built 2026-08-22.** Check is one Rust command on both
   platforms; Windows installs in place, Android opens the Releases page. The
   **in-place download has never run** — there is no published release to update
