@@ -1338,6 +1338,36 @@ free:
 3. **One contact per tester for beta.** Unrealistic; rejected for the same
    reason under Finding 16.
 
+### The leak has TWO paths, not one *(added 2026-08-21, after MACCO)*
+
+The finding above describes the document-sync path (`0x01`). **The live send
+path leaks the same way**, and the first write-up missed it. MACCO's challenger
+raised it; verified directly afterwards.
+
+`session-manager.js:83` — `publish()`:
+
+```js
+for (const peer of this.deps.peers.listPairedConnected()) {
+    const envelope = sealMessage(payload, connection.sessionKey, epoch);
+    sends.push(connection.send(StreamType.E2EE_MESSAGE, envelope));
+}
+```
+
+Every paired, connected peer gets the message. **There is no channel filter** —
+`payload.channelId` is never consulted. The receiver runs `ingestRemote`, which
+writes it into the channel document and notifies listeners.
+
+So a message reaches an uninvolved contact by whichever path is available:
+immediately over `0x02` if they are online, or later by document sync over
+`0x01` if they are not. Fixing only the sync engine would close the slower half
+and leave the fast one open.
+
+**This was already in this file and nobody drew the line.** The Finding 16
+correction records *"`publish()` is a broadcast to all paired-connected peers
+with no per-recipient targeting"* — written as a delivery-semantics detail to
+explain why a peer catches up on reconnect. It is the same sentence as this
+defect, read for a different purpose.
+
 ### Upstream request — SDK-7
 
 `CrdtSyncEngine` must scope documents to peers entitled to them. Concretely:
@@ -1353,9 +1383,28 @@ free:
   document loop. A per-peer or per-document root would make the common case
   cheaper as well as correct.
 
+**And `SessionManager.publish` must take the channel's participants too**
+(`session-manager.js:83`). It currently fans out to `listPairedConnected()`
+without reading `payload.channelId`. A sync-side fix alone leaves this open.
+
 Until this lands, a channel is effectively readable by every paired peer, and
 that should be stated in the SDK's documentation — the current wording implies
 per-channel scoping.
+
+### Why option 2 (encrypt in the app) is not the shortcut it looks like
+
+`@dicsussion/core` does export `./crypto` publicly, so the primitives are
+reachable without breaking the boundary rule. **The key is not.**
+`client.d.ts:134` exposes `encryptionPublicKey` and nothing else; identity
+secrets are derived inside `init()` from a seed the app never holds, exactly as
+`create-client.ts` describes. App-layer encryption would therefore mean
+inventing a second keypair and a second key exchange, carried in the ticket or
+in pairing, and shipping it under a deadline. New cryptography written in a
+hurry is a worse outcome than a delayed feature.
+
+It would also only mask the content: both fan-out paths still deliver to every
+contact, so message counts, timing, and the channel id — which carries both
+did:keys — continue to leak the social graph.
 
 
 ### Finding 18 — the relay and discovery servers are undisclosed, and unchosen — 🔴 **OPEN** *(found 2026-08-21)*
