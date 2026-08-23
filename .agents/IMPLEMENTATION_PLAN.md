@@ -568,7 +568,7 @@ Everything else is device to device.
 | **Q10** | Platform targets | **Windows + Android only.** No macOS/Linux/iOS for now |
 | **Q16** | CSP | **Closed.** Strict policy applied and verified — zero violations, full message flow still passes. See below |
 | **Q12** | Multi-device | **Deferred.** A QR-based design exists for a future update |
-| **Q13** | Repo name | **Done.** Development in `EchoIt-CB`; **releases publish to `EchoIt-Messenger`** (set 2026-08-23). The updater endpoint is compiled into every build, so it must be right before the first release or installs check a repo that never gets one |
+| **Q13** | Repo name | **Done.** Development in `EchoIt-CB`; **releases publish to `EchoIt-Messenger`** — a **deliberate split**, decided 2026-08-23, not an oversight to reconcile. The updater endpoint is compiled into every build, so it must be right before the first release or installs poll a repo that never gets one. The publishing repo must stay **public**: the check is an unauthenticated GET. Runbook in `.agents/RELEASING.md` |
 | **Q19** | File the `wmi` upstream report | **Set aside** |
 | **Q20** | Remove the vendored `wmi` patch | **Keep checking** whether upstream has fixed the version ranges |
 | **Q1–Q4, Q7** | Toolchain, upstream ownership, SDK-3b, frontend stack, pairing | Settled earlier — see git history of this file |

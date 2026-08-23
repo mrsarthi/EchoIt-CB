@@ -151,6 +151,18 @@ bitten three times. Check both.
 
 ---
 
+## Releasing
+
+**Development is `EchoIt-CB`; releases publish to `EchoIt-Messenger`.** That
+split is deliberate (Q13, 2026-08-23) — the updater points at a repository the
+code does not live in **on purpose**, so do not reconcile them. The publishing
+repo must stay public, because the update check is an unauthenticated GET.
+
+`.agents/RELEASING.md` is the runbook. Four of its steps are marked
+UNRECOVERABLE; those are the ones that strand people who already installed.
+
+---
+
 ## Read in this order
 
 1. **This file.**
