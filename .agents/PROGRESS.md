@@ -18,6 +18,115 @@
 | **1. Core Application (v1)** | Chats, local storage, recovery | **In progress** | 0 | Onboarding + navigation shell done & audited. **Next: pairing (2.3)** |
 | **Pre-UI hardening** | CSP locked down before the UI grows | ✅ **PASSED** | 2 | Strict policy, 0 violations, message flow intact — see below |
 
+## ✅ M2.4 — messages actually send (2026-08-23)
+
+**Two app instances held a conversation through the real UI, both directions.**
+
+```
+A adds B, B adds A (through Add Contact)
+B sends: hello-from-B-...      B -> A: DELIVERED
+A replies: hello-from-A-...    A -> B: DELIVERED
+A still shows its own sent message: true
+M2.4 PASSED — both directions, through the UI
+```
+
+Driven by `harness/cdp/drive-chat.mjs`, which touches only the screens a person
+touches: Profile to copy a ticket, Add Contact to paste one, the composer to
+send. **No `window.__echoit`** — the bridge harness bypasses precisely the layer
+this had to prove.
+
+### What was built
+
+| File | Role |
+|---|---|
+| `src/services/conversation.ts` | Channel id, open, send, history, subscribe |
+| `src/context/AppContext.tsx` | Message store, `sendMessage`, per-contact subscriptions and history load |
+| `src/screens/AppShell.tsx` | Real send; conversation previews derived from stored messages |
+| `src/services/reconnect.ts` | Re-opens each channel alongside re-adding the peer |
+
+`AppShell.handleSendMessage` was twelve lines that called `setConversations` and
+nothing else — a composer that showed messages which never left the device. The
+list preview is now **derived** from the message store rather than written at
+send time, which is exactly how the old code managed to display messages the SDK
+never accepted.
+
+### The trap this design is built around
+
+0.4.0's guest-list filter is **fail-closed**. A channel missing its participant
+does not error — it sends to nobody and reports success, which is
+indistinguishable from the bug the filter was added to fix. So `createChannel`
+is called in **three** places — pairing, contact load, and every reconnect sweep
+— all idempotent, rather than relying on `sendMessage`'s implicit creation.
+
+### Channel id — and a decision reversed
+
+`dm:${[a, b].sort().join('|')}`. Sorted, so both sides derive the same id with
+nothing exchanged.
+
+**I said I would hash it, then didn't.** The reasoning that changed: deriving
+`sha256(a|b)` needs the same two did:keys as deriving `a|b`, so guessability is
+identical — and message bodies are stored unencrypted anyway (Finding 11), so
+anyone who can read the id can already read the conversation. Hashing would have
+bought nothing but a false sense of having addressed it. The real fix is an
+inbound entitlement check in the SDK so a sender cannot declare its own
+membership; recorded rather than worked around.
+
+### A defect in my own Finding 17 fix, found by driving it
+
+Yesterday's fix promoted a contact to bilateral only on an **inbound
+connection**. I verified the negative case — a one-sided contact correctly says
+"waiting" — and **never verified the positive one.** It does not work: both
+sides sat locked at "Waiting for them to connect back" with mutual pairing
+complete. The mirror of the original bug — denying a connection that exists
+rather than claiming one that does not.
+
+**Why.** Whoever adds second dials into the connection the first side already
+opened, so no fresh inbound ever reaches the first side.
+
+Bilateral now accepts three kinds of evidence, because no one of them covers
+every flow:
+
+1. **An inbound connection** — they dialled us, which needs our ticket.
+2. **A knock waiting when we add them** — the same proof, seen earlier. This was
+   being discarded whenever someone completed pairing through Add Contact
+   instead of the Accept button.
+3. **A message from them** — they cannot send unless they added us.
+
+**Behavioural consequence, and it matters on real devices:** whoever adds
+*second* can send immediately; whoever added first has their composer unlocked
+by the first incoming message. **On two phones, have the second person send
+first.** Sending from the first phone before that looks like a failure and is
+not one.
+
+### Verified
+
+| Check | Result |
+|---|---|
+| `drive-chat.mjs` | **PASSED** — both directions through the UI, sender retains its own message |
+| `npm run test:three-peer` | **PASS** — Carol still receives nothing |
+| `npm run test:two-peer` | **3/3** |
+| `csp-check` | **0 violations, 0 console errors** |
+| `typecheck` / `build` / `audit` | clean, **0 vulnerabilities** |
+
+### Two harness properties worth knowing
+
+**Do not run `test:two-peer` while app instances are live.** It read 1/3 with two
+Tauri apps running and 3/3 with them closed. Real QUIC, real ports, one machine —
+contention, not a regression. Anything else would have been misread as one.
+
+**`drive-chat.mjs` must navigate the receiver before asserting.**
+`document.body.innerText` only sees the screen that is showing, so a receiver
+left on the Contacts tab reports every message as undelivered. That produced one
+false FAIL before it was fixed — a test bug that looked exactly like a product
+bug.
+
+### Not built
+
+**§5b's `Staged → Sent → Delivered → Read` ladder.** Messages render with no
+status. A send that fails currently fails quietly, which is still better than the
+old behaviour of showing everything as sent — but it is not what §5b asks for,
+and it is the obvious next piece.
+
 ## ✅ SDK 0.4.0 — Finding 19 fixed, M2.4 unblocked (2026-08-23)
 
 **The same test that failed yesterday now passes.** That is the whole claim, and

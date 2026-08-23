@@ -9,10 +9,11 @@ import { ProfileTab } from "./tabs/ProfileTab";
 import { ChatView } from "./chat/ChatView";
 import { Logo } from "../components/ui/Logo";
 import { useApp } from "../context/AppContext";
+import type { MessageItem } from "./chat/ChatView";
 
 export function AppShell() {
   const isWide = useBreakpoint(840);
-  const { contacts, pendingRequests } = useApp();
+  const { contacts, pendingRequests, messages, sendMessage, did } = useApp();
   const [activeTab, setActiveTab] = useState<AppTab>("chats");
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationItem[]>([]);
@@ -33,7 +34,12 @@ export function AppShell() {
             id: `chat-${contact.peerDid.slice(0, 16)}`,
             peerDid: contact.peerDid,
             name: contact.name,
-            lastMessage: contact.pairingState === "bilateral_connected" ? "Connected directly" : "Waiting for them to connect back",
+            // Placeholder only until a message exists; the real preview is
+          // derived below so it cannot drift from what was actually sent.
+          lastMessage:
+            contact.pairingState === "bilateral_connected"
+              ? "No messages yet"
+              : "Waiting for them to connect back",
             timestamp: "Recently",
             unreadCount: 0,
             isOnline: contact.pairingState === "bilateral_connected",
@@ -44,6 +50,27 @@ export function AppShell() {
       return updated;
     });
   }, [contacts]);
+
+  /**
+   * Conversation rows with their preview taken from the message store.
+   *
+   * Derived rather than written on send, so the list cannot show a preview for
+   * a message the SDK never accepted — the failure the old `handleSendMessage`
+   * produced by construction.
+   */
+  const conversationsWithPreview: ConversationItem[] = conversations.map((c) => {
+    const thread = messages[c.peerDid] ?? [];
+    const latest = thread[thread.length - 1];
+    if (!latest) return c;
+    return {
+      ...c,
+      lastMessage: latest.content,
+      timestamp: new Date(latest.timestamp).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+    };
+  });
 
   const selectedConversation = conversations.find((c) => c.id === selectedChatId) || null;
   const selectedContact = selectedConversation
@@ -65,19 +92,37 @@ export function AppShell() {
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
   }, [handleGlobalKeyDown]);
 
+  /**
+   * Send for real.
+   *
+   * This used to mutate `conversations` and nothing else, so the UI showed a
+   * message that had never left the device. The SDK call is the whole point of
+   * M2.4; the local echo now comes from `AppContext`, which appends what the
+   * SDK actually accepted rather than what was typed.
+   */
   const handleSendMessage = (text: string) => {
-    if (!selectedChatId) return;
-    setConversations((prev) =>
-      prev.map((c) =>
-        c.id === selectedChatId
-          ? {
-              ...c,
-              lastMessage: text,
-              timestamp: "Just now",
-            }
-          : c
-      )
-    );
+    const peerDid = selectedConversation?.peerDid;
+    if (!peerDid) return;
+    void sendMessage(peerDid, text).catch(() => {
+      // Surfacing this properly needs the §5b Staged/Sent ladder. Until that
+      // exists, failing quietly is still better than the previous behaviour,
+      // which was to show every message as sent whether or not it was.
+    });
+  };
+
+  /** SDK messages in the shape ChatView renders. */
+  const messagesFor = (peerDid: string | undefined): MessageItem[] => {
+    if (!peerDid || !did) return [];
+    return (messages[peerDid] ?? []).map((m) => ({
+      id: m.id,
+      senderDid: m.authorDid ?? peerDid,
+      isOutgoing: m.authorDid === did,
+      text: m.content,
+      timestamp: new Date(m.timestamp).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+    }));
   };
 
   const handleSelectContact = (peerDid: string) => {
@@ -107,7 +152,7 @@ export function AppShell() {
       case "chats":
         return (
           <ChatsTab
-            conversations={conversations}
+            conversations={conversationsWithPreview}
             selectedChatId={selectedChatId}
             onSelectChat={(id) => setSelectedChatId(id)}
             onNewChat={() => setActiveTab("contacts")}
@@ -140,6 +185,7 @@ export function AppShell() {
             pairingState={selectedContact?.pairingState || "unilateral_waiting"}
             isOnline={selectedConversation.isOnline}
             onBack={() => setSelectedChatId(null)}
+            messages={messagesFor(selectedConversation?.peerDid)}
             onSendMessage={handleSendMessage}
             onShareTicket={() => setActiveTab("profile")}
           />
@@ -220,6 +266,7 @@ export function AppShell() {
             peerName={selectedConversation.name}
             pairingState={selectedContact?.pairingState || "unilateral_waiting"}
             isOnline={selectedConversation.isOnline}
+            messages={messagesFor(selectedConversation?.peerDid)}
             onSendMessage={handleSendMessage}
             onShareTicket={() => setActiveTab("profile")}
           />

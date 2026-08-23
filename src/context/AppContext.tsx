@@ -1,5 +1,12 @@
 import { createContext, useContext, useEffect, useState, useCallback, useRef, type ReactNode } from "react";
 import { createEchoItClient, type EchoItClient } from "../transport/create-client";
+import {
+  historyWithPeer,
+  openConversation,
+  sendToPeer,
+  subscribeToPeer,
+  type ConversationMessage,
+} from "../services/conversation";
 import { markPendingReset, DEFAULT_DATABASE_NAME } from "../services/pending-reset";
 import { reconnectKnownContacts } from "../services/reconnect";
 import {
@@ -47,6 +54,9 @@ export interface AppContextValue {
   blockedPeers: BlockedPeer[];
   activeInvites: ActiveInvite[];
   pairAndConnect: (ticketString: string, name: string) => Promise<void>;
+  /** Messages per peer did, oldest first. */
+  messages: Record<string, ConversationMessage[]>;
+  sendMessage: (peerDid: string, text: string) => Promise<void>;
   acceptRequest: (peerDid: string, ticketString?: string) => Promise<void>;
   ignoreRequest: (peerDid: string) => void;
   blockPeer: (peerDid: string) => void;
@@ -67,6 +77,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   // Pairing & Contacts State
   const [contacts, setContacts] = useState<Contact[]>([]);
+  const [messages, setMessages] = useState<Record<string, ConversationMessage[]>>({});
   const [pendingRequests, setPendingRequests] = useState<InboundRequest[]>([]);
   const [blockedPeers, setBlockedPeers] = useState<BlockedPeer[]>([]);
   const [activeInvites, setActiveInvites] = useState<ActiveInvite[]>([]);
@@ -287,6 +298,122 @@ export function AppProvider({ children }: { children: ReactNode }) {
     // Re-running is cheap: the sweep's own cooldown suppresses repeat dials.
   }, [client, state, contacts.length]);
 
+  /**
+   * Record that pairing is mutual.
+   *
+   * Kept separate from `pairAndConnect` because the two answer different
+   * questions: that function knows *we* added *them*, this one knows they
+   * added us. Only the second makes a conversation deliverable, and §5b gates
+   * the composer on it.
+   *
+   * Three things count as evidence, because no single one covers every flow:
+   *
+   *   1. An inbound connection — they dialled us, which needs our ticket.
+   *   2. A knock waiting when we add them — same thing, seen earlier.
+   *   3. A message from them — they cannot send unless they added us.
+   *
+   * (3) exists because (1) misses the common case. Whoever adds second dials
+   * into a connection the first side already opened, so no fresh inbound
+   * arrives at the first side and it would otherwise wait forever.
+   */
+  const markBilateral = useCallback(
+    (peerDid: string) => {
+      if (!did) return;
+      setContacts((prev) => {
+        if (!prev.some((c) => c.peerDid === peerDid && c.pairingState !== "bilateral_connected")) {
+          return prev;
+        }
+        const updated = prev.map((c) =>
+          c.peerDid === peerDid ? { ...c, pairingState: "bilateral_connected" as const } : c
+        );
+        saveContacts(did, updated);
+        return updated;
+      });
+    },
+    [did]
+  );
+
+  /**
+   * Load history and listen, for every contact.
+   *
+   * Keyed on the contact list rather than run once: a contact added later must
+   * get the same treatment, and `openConversation` is idempotent so re-running
+   * costs nothing. Re-opening every channel on each pass is also the cheapest
+   * guard against a channel that lost its guest list — a state that would
+   * otherwise present as messages silently reaching nobody.
+   */
+  useEffect(() => {
+    if (!client || !did || state !== "ready") return;
+
+    let live = true;
+    const unsubscribes: Array<() => void> = [];
+
+    for (const contact of contacts) {
+      openConversation(client, did, contact.peerDid);
+
+      unsubscribes.push(
+        subscribeToPeer(client, did, contact.peerDid, (message) => {
+          if (!live) return;
+          // Receiving from them settles it. A peer can only send to us if they
+          // added us, so this is the strongest evidence available and it
+          // arrives in the one flow the other signals miss: whoever added
+          // second never sees a fresh inbound connection, because the
+          // connection the first side opened is still live.
+          if (message.authorDid && message.authorDid !== did) {
+            markBilateral(contact.peerDid);
+          }
+          setMessages((prev) => {
+            const existing = prev[contact.peerDid] ?? [];
+            // The same message can arrive twice — once as a live envelope and
+            // again when a document sync replays the channel. The SDK
+            // de-duplicates by id for its own emit, but a reconnect can still
+            // deliver something we already hold, so the UI checks too.
+            if (existing.some((m) => m.id === message.id)) return prev;
+            return { ...prev, [contact.peerDid]: [...existing, message] };
+          });
+        }),
+      );
+
+      void historyWithPeer(client, did, contact.peerDid)
+        .then((history) => {
+          if (!live || history.length === 0) return;
+          setMessages((prev) => {
+            const existing = prev[contact.peerDid] ?? [];
+            const seen = new Set(existing.map((m) => m.id));
+            const merged = [...existing, ...history.filter((m) => !seen.has(m.id))];
+            merged.sort((a, b) => a.timestamp - b.timestamp);
+            return { ...prev, [contact.peerDid]: merged };
+          });
+        })
+        .catch(() => {
+          // A channel with no history yet is the normal case on a fresh
+          // pairing, not an error worth surfacing.
+        });
+    }
+
+    return () => {
+      live = false;
+      for (const off of unsubscribes) off();
+    };
+    // `contacts` by identity: a rename should not tear down every listener,
+    // but a new contact must gain one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, did, state, contacts.map((c) => c.peerDid).join(",")]);
+
+  /** Send to a peer and show it immediately. */
+  const sendMessage = async (peerDid: string, text: string) => {
+    if (!client || !did) throw new Error("Client not ready");
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    const sent = await sendToPeer(client, did, peerDid, trimmed);
+    setMessages((prev) => {
+      const existing = prev[peerDid] ?? [];
+      if (existing.some((m) => m.id === sent.id)) return prev;
+      return { ...prev, [peerDid]: [...existing, sent] };
+    });
+  };
+
   // Pair with a pasted ticket and dial the peer
   const pairAndConnect = async (ticketString: string, name: string) => {
     if (!client || !did) throw new Error("Client not ready");
@@ -304,6 +431,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     // 1. Register peer with SDK
     client.client.addPeer(peer.didKey, peer.encryptionKey!);
+
+    // 1a. A knock already waiting from this peer is proof they added us.
+    //
+    // `acceptRequest` handles the case where the user presses Accept. This is
+    // the same evidence arriving by a different route: they dialled us, so
+    // they hold our ticket, and the user is now adding them back through Add
+    // Contact. Discarding the knock here would leave a fully mutual pair
+    // stuck on "waiting for them", which is what it did.
+    const theyKnocked = pendingRequests.some((r) => r.peerDid === peer.didKey);
+
+    // 1b. Admit them to our conversation with them.
+    //
+    // `addPeer` says "may connect"; since SDK 0.4.0 it does not say "may
+    // receive what I send on this channel". Without this, `publish` correctly
+    // skips them and every message resolves having reached nobody — and
+    // reports success, because reaching nobody is not an error. That is
+    // indistinguishable from the silent loss the guest list was added to
+    // prevent, so it must not be left to the first send.
+    openConversation(client, did, peer.didKey);
 
     // 2. Connect to peer
     await client.client.connect(peer);
@@ -343,6 +489,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       saveRequests(did, updated);
       return updated;
     });
+
+    if (theyKnocked) markBilateral(peer.didKey);
   };
 
   // Accept a pending request
@@ -368,26 +516,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     markBilateral(peerDid);
   };
 
-  /**
-   * Record that pairing is mutual.
-   *
-   * Kept separate from `pairAndConnect` because the two answer different
-   * questions: that function knows we added them, this one knows they added
-   * us. Only the second makes a conversation deliverable, and §5b gates the
-   * composer on it.
-   */
-  const markBilateral = (peerDid: string) => {
-    if (!did) return;
-    setContacts((prev) => {
-      const updated = prev.map((c) =>
-        c.peerDid === peerDid && c.pairingState !== "bilateral_connected"
-          ? { ...c, pairingState: "bilateral_connected" as const }
-          : c
-      );
-      saveContacts(did, updated);
-      return updated;
-    });
-  };
+
 
   // Ignore an inbound request (silent: removes locally, reappears if they knock again)
   const ignoreRequest = (peerDid: string) => {
@@ -526,6 +655,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         blockedPeers,
         activeInvites,
         pairAndConnect,
+        messages,
+        sendMessage,
         acceptRequest,
         ignoreRequest,
         blockPeer,

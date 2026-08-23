@@ -28,6 +28,7 @@
  */
 
 import type { EchoItClient } from '../transport/create-client';
+import { openConversation } from "./conversation";
 import { parseAndValidateTicket, type Contact } from './pairing-store';
 
 /**
@@ -99,6 +100,11 @@ export async function reconnectKnownContacts(
         // encryption key recorded before it will encrypt anything for them.
         if (ticket.encryptionKey) {
           client.client.addPeer(ticket.didKey, ticket.encryptionKey);
+          // Re-open the conversation alongside re-adding the peer. Idempotent,
+          // and it is the cheapest guard against a channel that somehow lacks
+          // its guest list -- a state that would present as messages silently
+          // reaching nobody rather than as an error.
+          if (myDid) openConversation(client, myDid, ticket.didKey);
         }
         await client.client.connect(ticket);
         result.connected += 1;

@@ -31,18 +31,19 @@ beta — no groups.
 - Pairing UI, requests list, reconnect-on-resume.
 - Android release keystore, generated and used to sign a real APK.
 
-**Not built:** sending and receiving messages (the composer is not wired),
-groups, read receipts, the updater.
+**Not built:** groups, read receipts, and §5b's delivery-status ladder.
 
-**Unblocked as of SDK 0.4.0 (2026-08-23).** Finding 19 — a channel being
-readable by every paired contact — is fixed by
-`chat.createChannel(channelId, participants)`, and `npm run test:three-peer`
-now passes. M2.4 can use a channel per conversation.
+**Messaging works as of 2026-08-23.** `harness/cdp/drive-chat.mjs` drives two
+app instances through the real screens and gets delivery both ways.
 
-**The one thing M2.4 must not forget:** the app's pairing path has no
-`createChannel` call yet. Wiring the composer without it produces sends that
-reach nobody and report success — the new fail-closed filter looking exactly
-like the bug it replaced.
+**Two things about it that will confuse you otherwise:**
+
+- **Whoever adds second can send first.** Bilateral pairing needs evidence the
+  other side added us, and whoever adds first gets that evidence only when the
+  first message arrives. On two phones, have the second person send first.
+- **`createChannel` must be called wherever a peer becomes known.** 0.4.0's
+  guest-list filter is fail-closed: a channel missing its participant sends to
+  nobody and reports success. It is called in three places for that reason.
 
 **The one thing blocking beta:** background delivery has never been measured on
 0.3.2. Everything needed to measure it now exists — see "How to verify".
