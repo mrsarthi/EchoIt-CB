@@ -39,7 +39,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYzMDc3QUIzNTIzRTRFMDYKUldRR1RqNVNzM29IWTRZWEpqdDNWQ2M5TUNaWTZhQVRjUHZpUURTY3BVdzR0RHFFL3poM3dqcUkK",
       "endpoints": [
-        "https://github.com/mrsarthi/EchoIt-CB/releases/latest/download/latest.json"
+        "https://github.com/mrsarthi/EchoIt-Messenger/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

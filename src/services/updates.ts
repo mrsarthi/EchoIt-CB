@@ -88,7 +88,7 @@ export async function checkForUpdate(): Promise<UpdateStatus> {
       available: false,
       current: APP_VERSION,
       latest: null,
-      releasePage: "https://github.com/mrsarthi/EchoIt-CB/releases/latest",
+      releasePage: "https://github.com/mrsarthi/EchoIt-Messenger/releases/latest",
       error: error instanceof Error ? error.message : String(error),
     };
   }

@@ -31,10 +31,10 @@ use serde::{Deserialize, Serialize};
 /// from `tauri.conf.json`; this is deliberately the same release, so the two
 /// tracks cannot drift to different versions.
 const RELEASE_API: &str =
-    "https://api.github.com/repos/mrsarthi/EchoIt-CB/releases/latest";
+    "https://api.github.com/repos/mrsarthi/EchoIt-Messenger/releases/latest";
 
 /// Human-facing page the user is sent to when an update exists on Android.
-const RELEASE_PAGE: &str = "https://github.com/mrsarthi/EchoIt-CB/releases/latest";
+const RELEASE_PAGE: &str = "https://github.com/mrsarthi/EchoIt-Messenger/releases/latest";
 
 /// What a check found.
 ///
