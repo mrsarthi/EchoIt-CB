@@ -178,6 +178,11 @@ export async function installBridgeHarness(): Promise<void> {
       }
 
       client.addPeer(peer.didKey, peer.encryptionKey);
+      // SDK 0.4.0: a channel carries a guest list and `publish` skips anyone
+      // not on it. Pairing alone no longer makes a peer reachable on this
+      // channel, so admit them here — otherwise every send resolves having
+      // reached nobody.
+      client.chat.createChannel(CHANNEL, [peer.didKey]);
       state.pairedWith.push(peer.didKey);
       // In full, and never truncated. A shortened did here reads as a
       // complete value that happens not to match the other screen — which is

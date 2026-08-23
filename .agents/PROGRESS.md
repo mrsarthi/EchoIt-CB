@@ -2,7 +2,7 @@
 
 ## Status at a glance
 
-*Last updated: 2026-08-22 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.3.2` · **🚪 GATE OPEN — two physical phones exchanged messages** · UI work unblocked*
+*Last updated: 2026-08-23 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.4.0` · **🚪 GATE OPEN — two physical phones exchanged messages** · UI work unblocked*
 
 | Phase | Target / Deliverable | Status | Tests | Notes |
 |---|---|---|---|---|
@@ -17,6 +17,100 @@
 | **S3. iOS readiness** | Paper check only — no Mac available | **Not Started** | 0 | Deferred by decision, not forgotten |
 | **1. Core Application (v1)** | Chats, local storage, recovery | **In progress** | 0 | Onboarding + navigation shell done & audited. **Next: pairing (2.3)** |
 | **Pre-UI hardening** | CSP locked down before the UI grows | ✅ **PASSED** | 2 | Strict policy, 0 violations, message flow intact — see below |
+
+## ✅ SDK 0.4.0 — Finding 19 fixed, M2.4 unblocked (2026-08-23)
+
+**The same test that failed yesterday now passes.** That is the whole claim, and
+it is the only kind worth making about a privacy fix.
+
+```
+bob's copy of the channel   : 1 message(s) ["private-to-bob-1787473246171"]
+carol's copy of the channel : 0 message(s) []
+
+PASS — the conversation stayed between alice and bob.
+```
+
+Three real processes, real QUIC. Alice paired with Bob and Carol; Bob and Carol
+strangers to each other; Alice and Bob open a channel naming only each other.
+Carol receives nothing. Yesterday she received the plaintext.
+
+### What 0.4.0 introduced
+
+`chat.createChannel(channelId, participants)` — and the docblock names it for
+what it is: *"The guest list decides who the conversation may be sent to and
+synchronised with, so this is an authorization boundary rather than
+bookkeeping."*
+
+Both paths from Finding 19 are now filtered, and the second one is the half I
+had to be told about:
+
+| Path | 0.3.2 | 0.4.0 |
+|---|---|---|
+| Envelope `0x02` — `SessionManager.publish` | Fanned out to every paired connected peer, no channel filter | Skips any peer failing `mayReceive(did, channelId)`. **Fail-closed** — an absent hook skips everyone rather than everyone through |
+| Sync `0x01` — outbound | `generateAllDocumentMessages` offered every local document | Filtered per peer |
+| Sync `0x01` — inbound | `ensureSyncDocument` adopted any docId pushed at it | Mirrored filter: *"adopting one uninvited both stores a conversation this node has no business holding"* |
+
+The inbound mirror matters as much as the outbound filter. Without it a peer can
+still **push** a document into someone who should not hold it.
+
+### Harness changes — two, both needed, one not our bug
+
+`test:two-peer` dropped to 1/3 on 0.4.0. Both fixes came from the user, and both
+were confirmed here against the published package before being written up.
+
+**1. Pairing no longer implies channel membership.** `addPeer` says "may
+connect"; it does not say "may talk on this channel". Without an explicit
+`createChannel`, `publish` correctly skips the peer and every send resolves
+having reached nobody — the fail-closed behaviour working exactly as designed,
+which is why it presents as silence. One line in `harness/peer.mts` took it to
+2/3, and the same line was needed in `harness/bridge-peer.mts` and
+`src/bridge-harness.ts`.
+
+**2. `connect()` resolves before the accepting side is ready.** It returns when
+the **dialler's** handshake completes; the accepting peer is still adopting
+sub-streams. A send issued immediately races that and loses.
+
+**This is not a 0.4.0 regression.** It has always been true — the user's own
+mesh harness already documents the property and waits for it. The extra work
+0.4.0 does at connect time simply widened the window enough to lose the race
+reliably rather than occasionally. A latent flake became a deterministic
+failure, which is the good outcome: it is now visible.
+
+The wait went into `peer.mts`'s `connect` rather than into each scenario, so
+`connected` means *"both ends are ready"* — which is what every caller already
+assumed. `drive-bridge.mjs` never needed it because it polls for delivery rather
+than asserting once.
+
+Also added a `{cmd:'channel', channelId, participants}` command to `peer.mts`, so
+a harness can open a channel with an explicit guest list rather than only the
+default one.
+
+### Verified on 0.4.0
+
+| Check | Result |
+|---|---|
+| `npm run test:three-peer` | **PASS** — Bob 1 message, Carol 0. Finding 19 closed |
+| `npm run test:two-peer` | **3/3** |
+| `npm run test:bridge` | **3/3** |
+| `drive-bridge.mjs` | **`STEP 1 PASSED`**, `relayed=false`, `outbox=0` |
+| `csp-check` — bridge build and UI build | **0 violations, 0 console errors** each |
+| App boot on 0.4.0 | Clean, no console errors |
+| `typecheck` / `build` / `audit` | clean, **0 vulnerabilities** |
+
+### What this unblocks
+
+**M2.4 can now be built.** The channel-per-pair scheme is sound, and the test
+proves it under the condition that broke it before — a third contact. The id
+`dm:${[a, b].sort().join('|')}` is deterministic on both sides with no
+coordination, and both ends call `createChannel` naming the other.
+
+**One thing M2.4 must not forget:** the app's own pairing path
+(`AppContext.pairAndConnect`, and `acceptRequest` behind it) has **no**
+`createChannel` call yet. Wiring the composer without it produces sends that
+reach nobody and report success — the fail-closed path looking exactly like the
+bug it replaced. `services/reconnect.ts:101` re-adds peers on every sweep and
+will want the same treatment, since `createChannel` is idempotent and only adds
+missing participants.
 
 ## Three unblocked cleanups (2026-08-22)
 
@@ -1486,7 +1580,16 @@ from the protocol's documentation.
 
 ## Findings
 
-### Finding 19 — every paired contact receives every conversation, in plaintext — 🔴 **BLOCKS M2.4** *(found 2026-08-21)*
+### Finding 19 — every paired contact receives every conversation, in plaintext — ✅ **FIXED in SDK 0.4.0** *(found 2026-08-21, closed 2026-08-23)*
+
+**Resolved by `chat.createChannel(channelId, participants)`**, which makes a
+channel's guest list an authorization boundary on both the envelope and sync
+paths, in both directions. Verified by re-running the test that found it:
+Carol's copy of the channel went from 1 message to 0. Details in the 2026-08-23
+entry. SDK-7 is closed by it.
+
+The description below is kept as written, because the mechanism is what makes
+the fix legible.
 
 **Measured, not read.** `npx tsx harness/three-peer-privacy.mts`, three real
 processes over real QUIC:

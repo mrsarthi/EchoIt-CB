@@ -5,12 +5,16 @@
  * channel id derived from the two participants' did:keys. That is only sound
  * if document sync is scoped to the people in the channel.
  *
- * Reading `@dicsussion/core/dist/crdt/sync-engine.js`, it may not be:
- * `handleRootSync` answers a root mismatch with `generateAllDocumentMessages`,
- * which iterates `documents.listDocuments()` — *every* local document — with
- * no reference to who the peer is or which channels they belong to. Sync is
- * gated on pairing (`session-manager.beginSync` refuses unpaired peers), so
- * strangers are not the question. Contacts are.
+ * Before SDK 0.4.0 it was not: `handleRootSync` answered a root mismatch with
+ * `generateAllDocumentMessages`, which iterated every local document with no
+ * reference to who the peer was, and `recordLocally` stored message bodies as
+ * plaintext. Sync is gated on pairing, so strangers were never the question —
+ * contacts were, and they received everything.
+ *
+ * 0.4.0 introduced `chat.createChannel(channelId, participants)` as an
+ * authorization boundary: `publish` skips peers failing `mayReceive`, and the
+ * sync engine filters on both send and receive. This test is what says whether
+ * that holds under three real peers rather than in the changelog.
  *
  * So: Alice pairs with both Bob and Carol. Alice and Bob hold a conversation
  * in their own channel. Carol is never told that channel's id and never sends
@@ -178,6 +182,16 @@ try {
 
   const privateChannel = dmChannel(aDid, bDid);
   const secret = `private-to-bob-${Date.now()}`;
+
+  // SDK 0.4.0: the channel's guest list is the authorization boundary. Alice
+  // and Bob each open it naming only the other. Carol is not on it and is
+  // never told it exists — exactly the shape M2.4 will use.
+  alice.send({ cmd: 'channel', channelId: privateChannel, participants: [bDid] });
+  bob.send({ cmd: 'channel', channelId: privateChannel, participants: [aDid] });
+  await Promise.all([
+    alice.wait((e) => e.type === 'channel', REPLY_TIMEOUT_MS, 'alice channel'),
+    bob.wait((e) => e.type === 'channel', REPLY_TIMEOUT_MS, 'bob channel'),
+  ]);
 
   say(`\nalice sends to ${privateChannel.slice(0, 34)}…`);
   say('carol is never given this channel id and never writes to it');

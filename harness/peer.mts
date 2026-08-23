@@ -13,6 +13,7 @@
  * Protocol
  *   in : {cmd:'pair', ticket}          register a peer's key (see D3)
  *        {cmd:'connect', ticket}       dial
+ *        {cmd:'channel', channelId, participants}  open one with a guest list
  *        {cmd:'send', channelId, content}
  *        {cmd:'history', channelId}
  *        {cmd:'status'} | {cmd:'quit'}
@@ -82,13 +83,41 @@ async function handle(msg: Record<string, unknown>): Promise<void> {
       const ticket = decodeTicket(String(msg.ticket));
       if (!ticket.encryptionKey) throw new Error('ticket carries no encryption key');
       client.addPeer(ticket.didKey, ticket.encryptionKey);
+      // SDK 0.4.0: pairing is no longer enough. A channel carries a guest
+      // list, and `publish` skips any peer not on it — that filter is what
+      // stops a conversation reaching contacts who are not in it. Admitting
+      // the peer here is what makes pairing mean "may talk on this channel"
+      // rather than only "may connect".
+      client.chat.createChannel(CHANNEL, [ticket.didKey]);
       emit({ type: 'paired', did: ticket.didKey });
       return;
     }
 
     case 'connect': {
       await client.connect(decodeTicket(String(msg.ticket)));
+      // `connect()` resolves when the DIALLER's handshake completes. The
+      // accepting side is still adopting sub-streams at that moment, so a
+      // send issued the instant this returns races it and can be dropped by
+      // a peer that is not listening yet.
+      //
+      // This is not new in 0.4.0 — it has always been true — but the extra
+      // work 0.4.0 does at connect time widens the window enough to lose the
+      // race reliably. Waiting here rather than in each scenario makes
+      // `connected` mean "both ends are ready", which is what every caller
+      // already assumed it meant.
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
       emit({ type: 'connected' });
+      return;
+    }
+
+    case 'channel': {
+      // The 0.4.0 authorization boundary, driven explicitly. `pair` admits a
+      // peer to the default channel; this opens an arbitrary one with a
+      // chosen guest list, which is what a per-conversation channel needs.
+      const channelId = String(msg.channelId);
+      const participants = (msg.participants as string[] | undefined) ?? [];
+      client.chat.createChannel(channelId, participants);
+      emit({ type: 'channel', channelId, participants });
       return;
     }
 

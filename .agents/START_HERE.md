@@ -34,10 +34,15 @@ beta — no groups.
 **Not built:** sending and receiving messages (the composer is not wired),
 groups, read receipts, the updater.
 
-**Blocked, not merely unbuilt:** wiring the composer (M2.4) needs a channel per
-conversation, and **Finding 19** proves a channel is readable by every paired
-contact, not just its two participants. Measured with three real peers, not
-inferred. Read that finding before designing anything on top of channels.
+**Unblocked as of SDK 0.4.0 (2026-08-23).** Finding 19 — a channel being
+readable by every paired contact — is fixed by
+`chat.createChannel(channelId, participants)`, and `npm run test:three-peer`
+now passes. M2.4 can use a channel per conversation.
+
+**The one thing M2.4 must not forget:** the app's pairing path has no
+`createChannel` call yet. Wiring the composer without it produces sends that
+reach nobody and report success — the new fail-closed filter looking exactly
+like the bug it replaced.
 
 **The one thing blocking beta:** background delivery has never been measured on
 0.3.2. Everything needed to measure it now exists — see "How to verify".
@@ -101,7 +106,7 @@ version:
 ```bash
 npm run typecheck && npm run build     # necessary, nowhere near sufficient
 npm run test:two-peer                  # 3 scenarios, real QUIC, two OS processes
-npm run test:three-peer                # does a 1:1 channel stay 1:1? (currently FAILS)
+npm run test:three-peer                # does a 1:1 channel stay 1:1? (PASSES on 0.4.0)
 node harness/cdp/drive-bridge.mjs      # two app instances exchange messages
 node harness/cdp/csp-check.mjs 9222    # CSP violations + console errors
 ```
@@ -120,9 +125,6 @@ bitten three times. Check both.
   **push** (notification, banner, app-icon badge), and `DESIGN.md` §1 designs
   unread counts on Chats. The docs never disagreed with each other — the
   summary of them did. Details in `PROGRESS.md`.
-- **Finding 19 blocks M2.4** — a channel is readable by every paired contact.
-  Needs an upstream fix (SDK-7), app-layer encryption, or a scope change.
-  **This is a decision, not a task.**
 - ~~**A unilateral contact says "Connected directly"**~~ **Fixed 2026-08-22**
   (Finding 17). `event.paired` is a local flag; the connection *direction* is
   what proves the other side added us. Fixing it also made §5b's composer gate

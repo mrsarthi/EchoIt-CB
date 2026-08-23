@@ -197,6 +197,11 @@ async function handle(msg: Record<string, unknown>): Promise<void> {
       const peer = decodeTicket(String(msg.ticket));
       if (!peer.encryptionKey) throw new Error('ticket carries no encryption key');
       client.addPeer(peer.didKey, peer.encryptionKey);
+      // SDK 0.4.0: a channel carries a guest list and `publish` skips anyone
+      // not on it. Pairing alone no longer makes a peer reachable on this
+      // channel, so admit them here — otherwise every send resolves having
+      // reached nobody.
+      client.chat.createChannel(CHANNEL, [peer.didKey]);
       emit({ type: 'paired', did: peer.didKey });
       return;
     }
