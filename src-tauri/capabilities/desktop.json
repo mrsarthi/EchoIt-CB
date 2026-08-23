@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop-updater",
+  "description": "In-place updates. Desktop only: Tauri v2 ships no Android updater, so tauri-plugin-updater is compiled out there (see Cargo.toml) and its permission does not exist on that platform. Leaving it in the shared capability made every Android build fail with 'Permission updater:default not found'.",
+  "platforms": ["windows", "linux", "macOS"],
+  "windows": ["main"],
+  "permissions": ["updater:default"]
+}

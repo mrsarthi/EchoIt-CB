@@ -1,3 +1,5 @@
+#[cfg(target_os = "android")]
+mod android_ctx;
 mod iroh_bridge;
 mod keychain;
 mod updates;

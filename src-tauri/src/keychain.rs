@@ -60,10 +60,18 @@ fn build_store() -> Result<Arc<CredentialStore>, String> {
 
     #[cfg(target_os = "android")]
     {
-        // Uses the crate's default store, which is backed by its own
-        // SharedPreferences file and a dedicated Keystore entry. Tauri Mobile
-        // initialises the `ndk-context` this depends on, so no Kotlin shim is
-        // needed on our side.
+        // Uses the crate's default store, backed by its own SharedPreferences
+        // file and a dedicated Keystore entry.
+        //
+        // The store reads `ndk_context` for its JavaVM and Context, and
+        // NOTHING in Tauri or wry initialises that -- contrary to the upstream
+        // README. Unset, `android_context()` panics, and because the panic
+        // crosses the JNI boundary it aborts the process instead of returning
+        // an error. That is not a keychain failure the app can report; it is
+        // the app dying on launch. Initialise first, and turn what would have
+        // been an abort into a Result.
+        crate::android_ctx::ensure_initialised()?;
+
         let store = android_native_keyring_store::Store::new()
             .map_err(|e| format!("android keystore unavailable: {e}"))?;
         Ok(store)

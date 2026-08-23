@@ -79,7 +79,14 @@ tauri-plugin-updater = "2"
 windows-native-keyring-store = "1.1"
 
 [target.'cfg(target_os = "android")'.dependencies]
+# ndk_context is what android-native-keyring-store reads for its JavaVM and
+# Context. Nothing in Tauri or wry initialises it -- verified by grep, after a
+# comment in this file claiming otherwise crashed the app on launch -- so
+# src/android_ctx.rs does, using jni to reach ActivityThread.currentApplication().
+ndk-context = "0.1"
+jni = "0.21"
 # Stores the ciphertext in SharedPreferences under a key held by the Android
-# Keystore. Requires `ndk-context` to be initialised, which Tauri Mobile does
-# for us — no Kotlin shim needed (upstream README names Tauri explicitly).
+# Keystore. Requires `ndk-context` to be initialised. The upstream README says
+# Tauri Mobile does that; it does not, and believing it aborted the app on
+# every launch. See src/android_ctx.rs.
 android-native-keyring-store = "1"
