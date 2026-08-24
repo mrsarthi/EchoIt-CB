@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, useCallback, useRef, type ReactNode } from "react";
 import { createEchoItClient, type EchoItClient } from "../transport/create-client";
 import {
+  checkpoint,
   historyWithPeer,
   openConversation,
   sendToPeer,
@@ -362,6 +363,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
           if (message.authorDid && message.authorDid !== did) {
             markBilateral(contact.peerDid);
           }
+          // An inbound message is only in memory until this runs. Without it a
+          // received conversation is gone on the next launch, exactly as a
+          // sent one was.
+          checkpoint(client);
           setMessages((prev) => {
             const existing = prev[contact.peerDid] ?? [];
             // The same message can arrive twice — once as a live envelope and
@@ -399,6 +404,29 @@ export function AppProvider({ children }: { children: ReactNode }) {
     // but a new contact must gain one.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, did, state, contacts.map((c) => c.peerDid).join(",")]);
+
+  /**
+   * Checkpoint when the app goes away.
+   *
+   * Belt and braces over the per-message checkpoints: `pagehide` is the last
+   * event a webview reliably gets before it is torn down, and
+   * `visibilitychange` covers Android backgrounding the app without closing it.
+   * Neither is guaranteed — which is why the per-message calls exist and this
+   * is not relied on alone.
+   */
+  useEffect(() => {
+    if (!client) return;
+    const flush = () => checkpoint(client);
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", flush);
+      // Unmounting means the client is being replaced or torn down; take the
+      // last opportunity to write.
+      flush();
+    };
+  }, [client]);
 
   /** Send to a peer and show it immediately. */
   const sendMessage = async (peerDid: string, text: string) => {

@@ -56,6 +56,30 @@ export function openConversation(client: EchoItClient, myDid: string, peerDid: s
   return channelId;
 }
 
+/**
+ * Write the CRDT documents to storage.
+ *
+ * **Messages are not durable until this runs.** `sendMessage` and
+ * `ingestRemote` both write into an in-memory Automerge document;
+ * `client.checkpoint()` is what puts it in IndexedDB, and the SDK only calls it
+ * itself from `disconnect()`. Nothing in a desktop or mobile app calls
+ * `disconnect()` when the user simply closes it, so without this every
+ * conversation vanished on the next launch — reported from real use as "when I
+ * open the app again, the previous msgs disappear".
+ *
+ * Cheap enough to call on every message at beta scale, and calling it too often
+ * is a far better failure than calling it too rarely.
+ */
+export function checkpoint(client: EchoItClient): void {
+  try {
+    client.client.checkpoint();
+  } catch {
+    // Never let a storage hiccup fail the send that triggered it. The message
+    // is already in the document; the worst case is that it is checkpointed by
+    // the next one instead.
+  }
+}
+
 /** Send to a peer. Resolves with the message as the UI should show it. */
 export async function sendToPeer(
   client: EchoItClient,
@@ -65,6 +89,7 @@ export async function sendToPeer(
 ): Promise<ConversationMessage> {
   const channelId = openConversation(client, myDid, peerDid);
   const sent = await client.client.chat.sendMessage({ channelId, content });
+  checkpoint(client);
   return {
     id: sent.id,
     authorDid: sent.authorDid,
