@@ -103,6 +103,38 @@ and deriving the download URL from the same endpoint the app checks, so the two
 cannot disagree. Tauri does **not** generate this file; hand-writing it is how
 the signature and URL drift apart.
 
+### Icons — regenerating them is not enough
+
+`npx tauri icon src/assets/logo.png` regenerates every size, including the
+Android launcher icons. It is **not sufficient on its own**: cargo can consider
+the build script's output up to date and relink the previously compiled
+resource, so a rebuild silently ships the old icon. `cargo clean -p echoit` did
+not help either.
+
+What worked:
+
+```bash
+rm -f  src-tauri/target/release/echoit.exe
+rm -rf src-tauri/target/release/build/echoit-*
+touch  src-tauri/build.rs
+```
+
+then rebuild. Confirm `Compiling echoit` appears in the output.
+
+**Verify the artifact, not the source.** A correct `icons/icon.ico` proves
+nothing about what was linked — that is exactly how the stock Tauri placeholder
+shipped unnoticed from August 5 until a user pointed at their own taskbar:
+
+```bash
+npm run check:icon
+```
+
+It compares every frame of `icons/icon.ico` against the bytes of the built exe.
+Anything less than *"N of N"* means the binary carries a different icon than the
+one on disk. Extracting the icon with `ExtractAssociatedIcon` is **not** a
+substitute; it consults the Windows shell cache and misled this check once
+already.
+
 ---
 
 ## Android

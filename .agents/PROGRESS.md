@@ -2,7 +2,7 @@
 
 ## Status at a glance
 
-*Last updated: 2026-08-23 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.4.0` · **🚪 GATE OPEN — two physical phones exchanged messages** · UI work unblocked*
+*Last updated: 2026-08-24 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.5.0` · **🚪 GATE OPEN — two physical phones held a conversation through the real UI** · signed release artifacts built for Windows and Android, nothing published*
 
 | Phase | Target / Deliverable | Status | Tests | Notes |
 |---|---|---|---|---|

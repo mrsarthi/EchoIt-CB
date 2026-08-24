@@ -14,11 +14,12 @@
     "test:bridge": "tsx harness/two-peer-bridge.mts",
     "test:three-peer": "tsx harness/three-peer-privacy.mts",
     "android:sign": "node scripts/apply-android-signing.mjs",
-    "release:manifest": "node scripts/make-latest-json.mjs"
+    "release:manifest": "node scripts/make-latest-json.mjs",
+    "check:icon": "node scripts/check-icon.mjs"
   },
   "dependencies": {
-    "@dicsussion/core": "^0.4.0",
-    "@dicsussion/sdk": "^0.4.0",
+    "@dicsussion/core": "^0.5.0",
+    "@dicsussion/sdk": "^0.5.0",
     "@scure/bip39": "^1.6.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",

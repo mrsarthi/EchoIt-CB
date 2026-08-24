@@ -24,26 +24,39 @@ beta — no groups.
 
 - Transport. Two physical phones on mobile data behind carrier-grade NAT
   exchanged encrypted messages **directly**, not relayed.
-- Onboarding, identity, recovery phrase, restore.
-- OS keychain (Windows Credential Manager verified; Android compiles but has
-  **never run on a device**).
-- Navigation shell — 4 destinations, responsive at 840px, three-zone desktop.
+- **A conversation between two physical phones**, both directions, through the
+  real screens — `harness/cdp/drive-android-chat.mjs` (2026-08-24).
+- **The same on the signed Windows release binary**, not a debug build —
+  `harness/cdp/drive-chat.mjs` against `target/release/echoit.exe`.
+- Onboarding, identity, recovery phrase, restore. Driven from the DOM on
+  Android, so the recovery phrase is read back and the confirmation answered
+  from it.
+- OS keychain on **both** platforms: Windows Credential Manager, and the
+  Android Keystore reporting *Device key storage — Active* and surviving an
+  APK reinstall.
+- CSP at zero violations on WebView2 **and** on Android.
+- Navigation shell — 4 destinations, responsive at 840px, three-zone desktop,
+  safe-area insets correct on a phone.
 - Pairing UI, requests list, reconnect-on-resume.
-- Android release keystore, generated and used to sign a real APK.
+- Android release keystore, and an APK whose fingerprint was checked against it.
+- Signed Windows installer with `.sig` artifacts and a `latest.json` whose
+  signature byte-matches the build. **Nothing published yet.**
 
 **Not built:** groups, read receipts, and §5b's delivery-status ladder.
 
-**Messaging works as of 2026-08-23.** `harness/cdp/drive-chat.mjs` drives two
-app instances through the real screens and gets delivery both ways.
+**Messaging works as of 2026-08-23**, on desktop and on two phones. Running on
+SDK `0.5.0` since 2026-08-24; all three headless suites and the privacy test
+were re-run on it rather than assumed to carry forward.
 
 **Two things about it that will confuse you otherwise:**
 
 - **Whoever adds second can send first.** Bilateral pairing needs evidence the
   other side added us, and whoever adds first gets that evidence only when the
   first message arrives. On two phones, have the second person send first.
-- **`createChannel` must be called wherever a peer becomes known.** 0.4.0's
-  guest-list filter is fail-closed: a channel missing its participant sends to
-  nobody and reports success. It is called in three places for that reason.
+- **`createChannel` must be called wherever a peer becomes known.** The
+  guest-list filter (SDK 0.4.0+) is fail-closed: a channel missing its
+  participant sends to nobody and reports success. It is called in three places
+  for that reason.
 
 **Background delivery: measured 2026-08-24, it fails, and it is deliberately
 out of scope for 0.1.0.** A backgrounded phone does not receive — accepted, the
