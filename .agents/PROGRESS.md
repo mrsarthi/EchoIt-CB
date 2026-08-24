@@ -1689,6 +1689,104 @@ from the protocol's documentation.
 
 ## Findings
 
+### Finding 20 — a backgrounded peer loses messages the sender reported as delivered — 🔴 **BLOCKS BETA** *(measured 2026-08-24)*
+
+**The question Q8 was written to answer, answered.** Two physical phones, an
+I2404 (Android 16) and an RMX3785 (Android 15), `harness/cdp/test-background.mjs`:
+
+```
+baseline (both foreground): DELIVERED
+B sent to background (HOME)
+
+sent immediately after backgrounding
+   A: sent 6788706c | A status: peers=1 paired=1 connected=true  relayed=false outbox=0
+sent after 30s backgrounded
+   A: sent 2063ead7 | A status: peers=1 paired=1 connected=true  relayed=false outbox=0
+sent after 90s backgrounded (approaching Doze)
+   A: sent 1a27949d | A status: peers=0 paired=1 connected=false relayed=false outbox=1
+
+delivered AFTER foregrounding: 1/3
+A status: peers=0 paired=1 connected=false outbox=1
+B status: peers=0 paired=1 connected=false outbox=0
+```
+
+### Read the outbox column, not the verdict
+
+The driver prints **LOST: 2 of 3**. The precise position is narrower and worse
+in one respect, better in another:
+
+| Message | Sender's belief at send | Outcome |
+|---|---|---|
+| 1 — fresh background | `connected=true`, **`outbox=0`** | Did not arrive. The sender recorded it as sent |
+| 2 — 30s | `connected=true`, **`outbox=0`** | Did not arrive. The sender recorded it as sent |
+| 3 — 90s | `connected=false`, **`outbox=1`** | **Correctly queued.** Still in A's outbox at the end, so recoverable on reconnect |
+
+One of the three arrived after foregrounding. A's outbox still holds one. So of
+the two that did not arrive, **at most one is recoverable** — and **at least one
+message was reported sent, with an empty outbox, and never existed anywhere
+again.**
+
+That is the correctness failure, not the UX one. `outbox=0` is the app
+asserting it has nothing left to deliver.
+
+### Why, and why it is familiar
+
+This is Finding 16's shape, one layer down. `chat-service.js` already says it:
+
+> *"`isOnline()` is a prediction, and predictions about a network are wrong. A
+> transport can hold a connection it believes is live for as long as it takes to
+> notice otherwise: QUIC needs a timeout…"*
+
+Android suspends the peer's webview instantly; QUIC does not notice for tens of
+seconds. In that window `publish()` writes into a connection that is dead and
+not yet known to be dead, returns a non-zero count, and the outbox is never
+involved. By 90 seconds the transport has caught up — which is exactly why the
+third message queued correctly and the first two did not.
+
+**`B webview was frozen — could not be queried while backgrounded.`** The
+process stayed alive the whole time; it is the webview that is suspended. So
+this is not something the app can paper over from JavaScript.
+
+### What it means for beta
+
+The driver's own framing, written before the result was known, is the right
+one: *"push or a foreground service becomes mandatory before beta."*
+
+Shipping as-is means a tester sends a message to someone whose phone is in a
+pocket, sees it accepted, and it is gone. No error, no retry, nothing in the
+outbox. For a messenger that is not a rough edge.
+
+Options, none free:
+
+1. **A foreground service** on Android to keep the socket alive. Costs a
+   permanent notification, and Android 15/16 are strict about what qualifies.
+2. **Push** — needs a server and an account model, which collides with the
+   product's whole posture and with §1.
+3. **Make the send path pessimistic**: treat a peer as unreachable unless it has
+   been *heard from* recently, and queue rather than publish. Does not fix
+   delivery, but converts silent loss into honest queueing — the message would
+   arrive when both are foreground, which is what the product can currently
+   promise anyway. This is app- and SDK-side, needs no infrastructure, and is
+   the smallest change that removes the lie.
+4. Ship with it, and say plainly that messages only move while both apps are
+   open. Honest, and a poor messenger.
+
+**Option 3 is the one worth doing first** regardless of what follows it: it is
+independent of the others and makes the failure visible instead of silent.
+
+### Upstream request — SDK-8
+
+`publish()` reports how many peers it wrote to, and a write into a
+not-yet-timed-out QUIC connection counts. The count therefore means "bytes
+handed to the transport", not "delivered", while `ChatService` uses it to decide
+whether to queue.
+
+Either the count needs to mean delivery — an acknowledgement — or `ChatService`
+needs a separate signal to queue on. A liveness notion based on *last inbound
+traffic* rather than connection state would be enough, and is cheap: the
+transport already sees every frame.
+
+
 ### Finding 19 — every paired contact receives every conversation, in plaintext — ✅ **FIXED in SDK 0.4.0** *(found 2026-08-21, closed 2026-08-23)*
 
 **Resolved by `chat.createChannel(channelId, participants)`**, which makes a
