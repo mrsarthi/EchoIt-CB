@@ -64,14 +64,33 @@ here reaches everything. Bump it *before* building.
 ## Windows
 
 ```bash
-TAURI_SIGNING_PRIVATE_KEY_PATH=src-tauri/echoit-updater.key \
-TAURI_SIGNING_PRIVATE_KEY_PASSWORD=<from src-tauri/updater.properties> \
+PW=$(grep '^password=' src-tauri/updater.properties | cut -d= -f2-)
+KEY=$(cat src-tauri/echoit-updater.key)
+
+TAURI_SIGNING_PRIVATE_KEY="$KEY" \
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$PW" \
 npx tauri build
 ```
 
-**Both variables are required.** Without them Tauri still produces an installer,
-but no `.sig` — and an unsigned artifact is one the updater will refuse. The
-build succeeds either way, which is what makes this easy to miss.
+**Pass the key CONTENTS, not a path.** `tauri signer generate` advertises
+`TAURI_SIGNING_PRIVATE_KEY_PATH` as an alternative and it did **not** work here.
+The build ran to completion, produced both bundles, and ended with:
+
+> `A public key has been found, but no private key. Make sure to set
+> TAURI_SIGNING_PRIVATE_KEY environment variable.`
+
+No `.sig` files — and the process still exited 0. An unsigned artifact is one
+the updater refuses, so a release built that way installs fine and can never be
+updated. Caught by looking for the signatures, not by trusting the exit code.
+
+**Confirm the signatures exist before publishing:**
+
+```bash
+find src-tauri/target/release/bundle -name "*.sig"
+```
+
+Empty means unsigned. `npm run release:manifest` refuses in that case too,
+rather than writing a manifest with nothing to verify against.
 
 Then:
 

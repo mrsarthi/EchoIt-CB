@@ -48,6 +48,12 @@ build/
 *.tsbuildinfo
 *.local
 
+# Updater manifest -- generated from a signed build by `npm run release:manifest`.
+# Never hand-edited and never committed: it carries a signature that is only
+# valid for one specific artifact, so a stale copy in the tree is a copy that
+# disagrees with whatever was actually built.
+latest.json
+
 # Rust / Tauri build output
 src-tauri/target/
 src-tauri/gen/
