@@ -1687,6 +1687,109 @@ from the protocol's documentation.
 
 ---
 
+## Onboarding fixed on both platforms, Android re-verified on 0.5.0 (2026-08-24)
+
+Two bugs a human found in one attempt that the whole automated suite had
+missed, plus confirmation that the fixes hold on Android.
+
+### What was broken
+
+Reported from real use: *"as soon as I press enter after entering the 3rd, 7th
+and 11th word, it throws me back at the setup page to restart the onboarding."*
+No error, no explanation, recovery phrase gone.
+
+**Bug 1 — the flow restarted itself silently.** `startNewIdentity` set
+`state = "unlocking"` before its work, which unmounts `OnboardingScreen`; the
+failure path set `state = "onboarding"`, mounting a **fresh** one at the intro.
+The real error went to a component that no longer existed. `restoreIdentity`
+behaved identically, so a mistyped recovery phrase did the same thing.
+
+The screen already had its own `loading` driving the button spinner, so the
+global flip bought nothing and cost the entire failure path.
+
+**Bug 2 — a failed attempt left a key behind, and this one is worse.**
+`storeStorageKey` runs before the client is built. A failure left a key in the
+OS keychain with no identity behind it, so the **next launch takes the "key
+exists, unlock" branch, skips onboarding entirely, and creates an identity
+whose recovery phrase the user was never shown** — an account that cannot be
+restored, with nothing to indicate anything went wrong.
+
+Found only because the user's failed attempt left a credential on their machine
+and it was noticed reappearing.
+
+### Why the suite missed both
+
+`drive-chat.mjs` drives onboarding too — but only ever on a clean profile,
+where it always succeeds. **Every check asserted that things work, and both
+bugs lived entirely in what happens when they do not.** The same blind spot
+produced the stock Tauri icon shipping for three weeks: a check that only
+confirms the good case cannot see either.
+
+`drive-onboarding-failure.mjs` and `drive-android-onboarding.mjs` now drive the
+unhappy path and fail loudly if the screen restarts without explaining itself.
+
+### Android needed separate proof, not inference
+
+Both bugs were in `AppContext` — shared code — so the fix reaches Android by
+construction. **Bug 2's fix does not.** It calls `clearStorageKey` →
+`keychain_delete` → `android-native-keyring-store`, and that delete had never
+executed on a device. Had it been a no-op there, the code would look fixed while
+the bug survived — precisely the shape of the `ndk_context` crash, which also
+compiled cleanly and had simply never run.
+
+So it was measured rather than assumed. `drive-android-onboarding.mjs` onboards
+for real, deletes the key through the app's own command, and checks whether
+onboarding reappears:
+
+```
+1. onboarding for real
+   done → onboarded: true
+
+2. deleting the storage key via keychain_delete
+   keychain_delete → ok
+   onboarding reappeared after restart: true
+
+3. onboarding again — the database cannot be decrypted now
+   bounced to intro : false
+   still on confirm : true
+   error displayed  : true
+     Could not initialize identity: aes-gcm: invalid tag
+   key left behind after the failure: false
+
+ANDROID ONBOARDING: PASSED — fails safely and leaves no key
+```
+
+`keychain_delete` works on Android. Both fixes hold there.
+
+### Verified on SDK 0.5.0
+
+| Check | Result |
+|---|---|
+| Two phones, conversation through the real UI | **PASSED**, both directions |
+| Android onboarding, happy and failing paths | **PASSED** |
+| `keychain_delete` on Android | **works** — first time it has ever run |
+| CSP on Android | **0 violations, 0 console errors** |
+| Release APK fingerprint | **matches** `2ff2e896…99bd`, `CN=EchoIt` |
+| `test:two-peer` / `test:three-peer` / `test:bridge` | 3/3 · PASS · 3/3 |
+| Desktop release binary, conversation + `check:icon` | **PASSED** · 6 of 6 frames |
+
+### Still open, and it is the same failure from the user's side
+
+**There is no way out of a failed onboarding from inside the app.** If the
+keychain entry is lost while app data survives, the user sees
+`aes-gcm: invalid tag` forever with no reset, no "start fresh", nothing. The
+only escape is deleting app data by hand, which no tester will know to do.
+
+**This is more likely on Android than on Windows**: Android Keystore keys can be
+invalidated by the OS, and changing the lock screen or biometrics can do it. The
+machinery to fix it already exists — `markPendingReset` / `runPendingReset`, as
+used by Settings → Reset Session. Offering it from the onboarding error is a
+small change on a proven path.
+
+Not done: the reset flow is one of the five things in `START_HERE` that look
+wrong and are not, and it was not worth touching while the app was being tested
+live.
+
 ## Findings
 
 ### Finding 20 — a backgrounded peer loses messages the sender reported as delivered — 🔴 **BLOCKS BETA** *(measured 2026-08-24)*
