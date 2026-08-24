@@ -1774,6 +1774,38 @@ Options, none free:
 **Option 3 is the one worth doing first** regardless of what follows it: it is
 independent of the others and makes the failure visible instead of silent.
 
+### Priority for 0.1.0 — deprioritised, by decision *(2026-08-24)*
+
+**Background delivery is explicitly out of scope for the beta.** The goal for
+0.1.0 is two peers connecting and talking without hindrance; delivery to a
+phone that is asleep in a pocket is a later problem. Recorded here so it is not
+re-argued: this finding is **not** a 0.1.0 blocker.
+
+**One part of it is still in scope, and it is not the same thing.** Two failures
+were measured together and only one is about backgrounding:
+
+| | |
+|---|---|
+| A backgrounded phone does not receive | **Out of scope.** Needs a foreground service or push, and the product can honestly say messages move while both apps are open |
+| The sender records `outbox=0` for messages that never arrive | **In scope**, because it is not confined to backgrounding |
+
+The second happens whenever the peer stops servicing the connection faster than
+QUIC notices — the screen going off, the notification shade, switching apps for
+ten seconds. Both people can consider themselves "in a conversation" and a
+message still evaporates with the app reporting it sent. That is a hindrance to
+two peers talking, which is exactly what 0.1.0 is for.
+
+**Option 3 is therefore the beta-relevant half**: queue unless the peer has been
+*heard from* recently, rather than trusting connection state. It does not
+deliver to a sleeping phone and is not meant to — it turns silent loss into
+honest queueing, so the message arrives when the other app comes back rather
+than never. App- and SDK-side, no infrastructure, and independent of everything
+else in this finding.
+
+*(§5b's delivery ladder matters here too: with no status on a message, a lost
+one and a delivered one look identical. The ladder is what would make this
+visible to a user at all.)*
+
 ### Where the messages actually died *(investigated 2026-08-24)*
 
 The verdict above says "lost". That is what was measured, but it does not say

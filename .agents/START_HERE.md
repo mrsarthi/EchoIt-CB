@@ -45,10 +45,16 @@ app instances through the real screens and gets delivery both ways.
   guest-list filter is fail-closed: a channel missing its participant sends to
   nobody and reports success. It is called in three places for that reason.
 
-**The one thing blocking beta: measured 2026-08-24, and it fails.** A peer whose
-phone is backgrounded loses messages the sender recorded as **sent, with an
-empty outbox** — see **Finding 20**. Not a UX gap; the app asserts delivery for
-messages that stop existing. Read that finding before planning a release.
+**Background delivery: measured 2026-08-24, it fails, and it is deliberately
+out of scope for 0.1.0.** A backgrounded phone does not receive — accepted, the
+beta promise is that messages move while both apps are open. See **Finding 20**;
+do not re-argue it as a blocker.
+
+**What is still in scope from that finding:** the sender records `outbox=0` for
+messages that never arrive. That is not confined to backgrounding — a screen
+going off or an app switch is enough — so two people who both think they are in
+a conversation can lose one silently. Option 3 in Finding 20 is the fix, and it
+is beta work.
 
 ---
 
