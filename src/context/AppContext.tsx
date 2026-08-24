@@ -564,8 +564,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
   };
 
   // Onboard new identity
+  /**
+   * Create an identity from a freshly generated phrase.
+   *
+   * **Deliberately does not flip `state` to "unlocking" while it works.** That
+   * unmounts `OnboardingScreen`, and on failure the return to "onboarding"
+   * mounts a *fresh* one — back at the intro step, with the recovery phrase
+   * gone and the error written to a component that no longer exists. The user
+   * sees the setup screen restart itself and is told nothing.
+   *
+   * Reported from real use: entering the three confirmation words appeared to
+   * "throw me back at the setup page". The underlying failure was
+   * `aes-gcm: invalid tag` — an existing database encrypted under a different
+   * key — and none of it reached the screen.
+   *
+   * `OnboardingScreen` already has its own `loading` state driving the button
+   * spinner, so nothing is lost by staying put: it stays mounted, keeps the
+   * phrase, and can show what went wrong.
+   */
   const startNewIdentity = async (mnemonic: string) => {
-    setState("unlocking");
     setError(null);
     try {
       const storageKey = deriveStorageKey(mnemonic);
@@ -577,15 +594,40 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setState("ready");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+
+      // Roll the key back. `storeStorageKey` runs before the client is built,
+      // so a failure here leaves a key in the OS keychain with no identity
+      // behind it — and the next launch takes the "key exists, unlock" branch,
+      // skips onboarding entirely, and creates an identity whose recovery
+      // phrase the user was NEVER SHOWN. They would hold an account they
+      // cannot restore and have no way to know.
+      //
+      // Found because a failed onboarding left a credential behind on a real
+      // machine, immediately after the failure itself was fixed.
+      try {
+        await clearStorageKey();
+      } catch {
+        // Best effort. If the keychain will not give the key up, the error
+        // below is still the more useful thing to report.
+      }
+
       setError(`Setup failed: ${msg}`);
+      // Only meaningful when this was reached from the error screen's Retry;
+      // during onboarding the state never left "onboarding" in the first place.
       setState("onboarding");
       throw err;
     }
   };
 
   // Restore identity from mnemonic
+  /**
+   * Restore from a phrase the user already had.
+   *
+   * Same reasoning as `startNewIdentity`: no "unlocking" flip, so a bad phrase
+   * or an undecryptable database leaves the user on the restore screen with the
+   * error, rather than silently resetting the flow.
+   */
   const restoreIdentity = async (mnemonic: string) => {
-    setState("unlocking");
     setError(null);
     try {
       const storageKey = deriveStorageKey(mnemonic);
@@ -597,6 +639,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setState("ready");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+
+      // Roll the key back. `storeStorageKey` runs before the client is built,
+      // so a failure here leaves a key in the OS keychain with no identity
+      // behind it — and the next launch takes the "key exists, unlock" branch,
+      // skips onboarding entirely, and creates an identity whose recovery
+      // phrase the user was NEVER SHOWN. They would hold an account they
+      // cannot restore and have no way to know.
+      //
+      // Found because a failed onboarding left a credential behind on a real
+      // machine, immediately after the failure itself was fixed.
+      try {
+        await clearStorageKey();
+      } catch {
+        // Best effort. If the keychain will not give the key up, the error
+        // below is still the more useful thing to report.
+      }
+
       setError(`Restore failed: ${msg}`);
       setState("onboarding");
       throw err;
