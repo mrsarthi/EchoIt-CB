@@ -1774,6 +1774,64 @@ Options, none free:
 **Option 3 is the one worth doing first** regardless of what follows it: it is
 independent of the others and makes the failure visible instead of silent.
 
+### Where the messages actually died *(investigated 2026-08-24)*
+
+The verdict above says "lost". That is what was measured, but it does not say
+*where*, and the difference decides whether this needs infrastructure or a bug
+fix.
+
+**The bytes may never have left our own process.** `iroh_bridge.rs:403`, the
+inbound reader:
+
+```rust
+let _ = app.emit("iroh://data", DataEvent { conn_id: conn_id.clone(), data: B64.encode(&buf[..n]) });
+```
+
+Fire-and-forget, with the result discarded by `let _ =`. Rust reads bytes off
+the QUIC socket, hands them to the webview, and if the webview cannot accept
+them there is no buffer, no acknowledgement, and no error. **Nothing on the JS
+side can recover a missed event either** — `tauri-bridge-pipe.ts`'s `subscribe`
+just registers a `listen('iroh://data')` handler; a dropped event is gone.
+
+The timeline fits. B's own event log has the connection alive from `09:32:04`
+until `read error: connection lost` at `09:33:46` — about 102 seconds. Messages
+1 and 2 went at 0s and +30s, comfortably inside that window, so B's transport
+was still connected when they were sent.
+
+### The unknown that decides everything — NOT YET MEASURED
+
+**Was B's Rust actually running?** `test-background.mjs` checks `pidof`, which
+proves the process *exists*, not that its threads are *scheduled*. Android's
+cached-app freezer SIGSTOPs the **whole process**, not just the webview, and
+vendor ROMs are more aggressive than AOSP. If the tokio runtime was frozen too,
+a Rust-side queue buys nothing.
+
+*(Raised by MACCO, and it was right — the earlier reading here overstated its
+confidence. Worth recording that the objection was the useful part, not the
+agreement.)*
+
+**The experiment, which needs no code changes:**
+
+1. Background the app.
+2. Read `/proc/<pid>/stat` `utime`/`stime` at intervals.
+3. **Still accumulating** → Rust threads run → the bytes reached Rust and our
+   own `emit` discarded them → **fixable app-side, no server**: buffer inbound
+   frames in Rust, drain on resume. The resume hook already exists —
+   `AppContext`'s `visibilitychange` + `focus` sweep is where a drain would
+   hang.
+4. **Frozen** → nothing app-side helps, and it is a foreground service or push.
+
+Run this **before** writing any buffering. Building a Rust-side queue that turns
+out to be frozen alongside everything else is the expensive way to learn which
+branch we are on.
+
+### One tunable noticed while looking
+
+The endpoint binds with `presets::N0` (`iroh_bridge.rs:170`), so keepalive and
+idle-timeout are whatever iroh defaults to. Neither has been examined. They
+govern how long a connection survives a backgrounded peer, and they are
+configuration rather than architecture.
+
 ### Upstream request — SDK-8
 
 `publish()` reports how many peers it wrote to, and a write into a
