@@ -137,6 +137,9 @@ export function SidebarNavRail({
       style={{
         width: 60,
         height: "100%",
+        // Wide layout: the rail runs to the bottom edge, so its lower group
+        // would sit under the gesture bar without this.
+        paddingBottom: "var(--safe-bottom)",
         backgroundColor: "var(--color-surface-dim)",
         borderRight: "1px solid var(--color-border)",
         display: "flex",

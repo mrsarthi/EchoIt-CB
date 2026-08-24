@@ -57,6 +57,31 @@ html, body, #root {
   overflow: hidden;
 }
 
+/*
+ * Keep the app out from under the system bars.
+ *
+ * `index.html` already sets `viewport-fit=cover`, so the webview draws
+ * edge-to-edge and `env(safe-area-inset-*)` is populated -- but nothing
+ * consumed it, so on Android the Chats and Settings headers rendered
+ * underneath the status bar, with the clock sitting on top of the app's own
+ * title. Verified on a device; it had never been looked at before.
+ *
+ * Top and sides only. The bottom is deliberately left to whichever element is
+ * actually against that edge (`BottomNav`, `SidebarNavRail`), so its background
+ * reaches the screen edge and only its contents are lifted -- padding the root
+ * instead would leave a strip of page background below the nav.
+ *
+ * The tokens come from `design/tokens.css`, which already defined --safe-top
+ * and had nothing consuming it -- the bottom one was wired up, the top one
+ * never was. `box-sizing: border-box` above keeps `height: 100%` honest with
+ * padding applied.
+ */
+#root {
+  padding-top: var(--safe-top);
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+}
+
 body {
   font-family: var(--font-family-body);
   font-size: var(--font-size-body);

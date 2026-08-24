@@ -178,7 +178,7 @@ export function AppShell() {
     // If a conversation is selected, show full-height ChatView WITHOUT BottomNav
     if (selectedConversation) {
       return (
-        <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
+        <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
           <ChatView
             peerDid={selectedConversation.peerDid}
             peerName={selectedConversation.name}
@@ -197,7 +197,7 @@ export function AppShell() {
     return (
       <div
         style={{
-          height: "100vh",
+          height: "100%",
           display: "flex",
           flexDirection: "column",
           backgroundColor: "var(--color-bg)",
@@ -216,7 +216,7 @@ export function AppShell() {
   return (
     <div
       style={{
-        height: "100vh",
+        height: "100%",
         display: "flex",
         backgroundColor: "var(--color-bg)",
         overflow: "hidden",
