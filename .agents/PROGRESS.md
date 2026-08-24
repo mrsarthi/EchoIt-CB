@@ -1774,6 +1774,34 @@ Options, none free:
 **Option 3 is the one worth doing first** regardless of what follows it: it is
 independent of the others and makes the failure visible instead of silent.
 
+### The test measured the SDK, not the app — re-run needed *(2026-08-24)*
+
+`test-background.mjs` drives `window.__echoit`, which is the **bridge
+harness**. Grepping `bridge-harness.ts` and `bridge-screen.tsx` for
+`visibilitychange`, `focus`, `reconnect` and `sweep` returns **nothing**: it is a
+bare SDK client with no recovery machinery whatever.
+
+The real app has machinery the harness lacks:
+
+- `reconnectKnownContacts` on launch and on return to foreground
+- which produces the connection that `drainAfterReconnect()` flushes the outbox
+  on
+- and `beginSync`, whose CRDT document exchange is a second path by which a
+  missed message can still arrive
+
+**None of it ran.** So the verdict is sound for the SDK in isolation and
+overstated as a claim about EchoIt. One further detail points the same way: the
+sender stayed in the foreground for the whole run, so **its** sweep never fired,
+and its cooldown is 30s while the test waited exactly 30s after foregrounding.
+
+This does not make the finding wrong — a message the sender recorded as
+`outbox=0` still did not arrive, and that part is real. It means **how much the
+app recovers is unmeasured.** Re-run against the normal build before deciding
+how much work Option 3 is; the answer could be anywhere from "nothing is lost,
+only delayed" to the harness result.
+
+Needs both phones.
+
 ### Priority for 0.1.0 — deprioritised, by decision *(2026-08-24)*
 
 **Background delivery is explicitly out of scope for the beta.** The goal for
