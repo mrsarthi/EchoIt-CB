@@ -3,13 +3,11 @@ import { useApp } from "../../context/AppContext";
 import { encodeTicket } from "@dicsussion/core/transport";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
-import { Badge } from "../../components/ui/Badge";
 import { AlertBanner } from "../../components/ui/AlertBanner";
 import { UserIcon, CopyIcon, CheckIcon, RefreshIcon } from "../../components/ui/Icons";
 
 export function ProfileTab() {
-  const { did, client, recordActiveInvite } = useApp();
-  const [copiedDid, setCopiedDid] = useState(false);
+  const { client, recordActiveInvite } = useApp();
   const [copiedTicket, setCopiedTicket] = useState(false);
   const [ticketString, setTicketString] = useState("");
   const [refreshing, setRefreshing] = useState(false);
@@ -32,17 +30,6 @@ export function ProfileTab() {
   useEffect(() => {
     void loadTicket();
   }, [loadTicket]);
-
-  const handleCopyDid = async () => {
-    if (!did) return;
-    try {
-      await navigator.clipboard.writeText(did);
-      setCopiedDid(true);
-      setTimeout(() => setCopiedDid(false), 2500);
-    } catch {
-      // ignore
-    }
-  };
 
   const handleCopyTicket = async () => {
     if (!client) return;
@@ -68,12 +55,6 @@ export function ProfileTab() {
     }
   };
 
-  // Whether this device found a direct address for itself. It describes
-  // *reachability*, not a live connection to anyone -- the previous badge read
-  // "Connected (Relay)" with nobody connected, and showed a green success dot
-  // on a brand-new install with zero contacts. Same family as Finding 17:
-  // asserting a state from a signal that does not carry it.
-  const hasDirectAddress = Boolean(client?.endpoint?.directAddresses?.length);
 
   return (
     <div
@@ -132,50 +113,13 @@ export function ProfileTab() {
           maxWidth: 600,
         }}
       >
-        {/* Safe Address Card */}
-        <section style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span
-              style={{
-                fontSize: "var(--font-size-label)",
-                fontWeight: "var(--font-weight-semibold)",
-                color: "var(--color-text-muted)",
-                letterSpacing: "0.04em",
-              }}
-            >
-              YOUR SAFE ADDRESS
-            </span>
-            <Badge variant={hasDirectAddress ? "success" : "muted"} dot>
-              {hasDirectAddress ? "Ready to connect directly" : "Ready to connect"}
-            </Badge>
-          </div>
-
-          <Card style={{ display: "flex", flexDirection: "column", gap: "var(--space-md)" }}>
-            <div
-              style={{
-                fontFamily: "var(--font-family-mono)",
-                fontSize: "var(--font-size-mono)",
-                padding: "10px 12px",
-                backgroundColor: "var(--color-surface-dim)",
-                borderRadius: "var(--radius-sm)",
-                border: "1px solid var(--color-border)",
-                wordBreak: "break-all",
-                color: "var(--color-text)",
-              }}
-            >
-              {did || "Loading identity..."}
-            </div>
-
-            <Button
-              variant="secondary"
-              size="md"
-              onClick={handleCopyDid}
-              icon={copiedDid ? <CheckIcon size={16} style={{ color: "var(--color-success)" }} /> : <CopyIcon size={16} />}
-            >
-              {copiedDid ? "Copied Safe Address" : "Copy Safe Address"}
-            </Button>
-          </Card>
-        </section>
+        {/*
+          The raw did:key card was removed 2026-08-25 at the user's request:
+          "useless". It showed a 56-character identifier next to a Copy button
+          nobody had a use for — pairing happens through the connection ticket
+          below, which is the only thing anyone needs to share. Third time a
+          bare did:key has turned out to be noise rather than information.
+        */}
 
         {/* Connection Ticket Card */}
         <section style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>

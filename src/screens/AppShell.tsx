@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useBreakpoint } from "../hooks/useBreakpoint";
 import { BottomNav, type AppTab } from "../components/navigation/BottomNav";
 import { SidebarNavRail } from "../components/navigation/SidebarNavRail";
@@ -17,6 +17,50 @@ export function AppShell() {
   const [activeTab, setActiveTab] = useState<AppTab>("chats");
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationItem[]>([]);
+
+  /**
+   * Make the Android back button close the open conversation.
+   *
+   * Navigation here is React state, not routes, so the webview had no history
+   * to go back through — and Android's back gesture went straight to "leave the
+   * app". Reported from real use: pressing back exits rather than returning to
+   * the chat list, so the only way out of a conversation was the app's own
+   * arrow.
+   *
+   * Opening a chat pushes one history entry; back pops it, and `popstate`
+   * closes the conversation instead of the app. Closing the chat any other way
+   * (the arrow, Escape) calls `history.back()` so the entry we pushed is
+   * consumed rather than left behind — otherwise the next back press would eat
+   * a stale entry and appear to do nothing.
+   */
+  const pushedRef = useRef(false);
+
+  useEffect(() => {
+    if (selectedChatId && !pushedRef.current) {
+      window.history.pushState({ echoitChat: true }, "");
+      pushedRef.current = true;
+    }
+  }, [selectedChatId]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      // The entry is already gone by the time this fires; just reflect it.
+      pushedRef.current = false;
+      setSelectedChatId((open) => (open ? null : open));
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  /** Close the conversation, keeping the history stack balanced. */
+  const closeChat = useCallback(() => {
+    if (pushedRef.current) {
+      // `popstate` clears the ref and the selection.
+      window.history.back();
+      return;
+    }
+    setSelectedChatId(null);
+  }, []);
 
   // Sync conversations with contacts
   useEffect(() => {
@@ -81,7 +125,7 @@ export function AppShell() {
   const handleGlobalKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === "Escape" && selectedChatId) {
-        setSelectedChatId(null);
+        closeChat();
       }
     },
     [selectedChatId]
@@ -184,7 +228,7 @@ export function AppShell() {
             peerName={selectedConversation.name}
             pairingState={selectedContact?.pairingState || "unilateral_waiting"}
             isOnline={selectedConversation.isOnline}
-            onBack={() => setSelectedChatId(null)}
+            onBack={closeChat}
             messages={messagesFor(selectedConversation?.peerDid)}
             onSendMessage={handleSendMessage}
             onShareTicket={() => setActiveTab("profile")}

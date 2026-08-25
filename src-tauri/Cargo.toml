@@ -41,6 +41,26 @@ reqwest = { version = "0.13", default-features = false, features = [
   "json",
   "rustls",
 ] }
+
+# TLS trust anchors, compiled in rather than asked of the platform.
+#
+# reqwest's "rustls" feature verifies certificates through
+# rustls-platform-verifier, which on Android must be handed JNI references
+# before use. It was not, so it panicked on a tokio worker thread:
+#
+#     thread 'tokio-rt-worker' panicked:
+#     Expect rustls-platform-verifier to be initialized
+#
+# tokio catches a worker panic, so the process survived — but the task died,
+# the future never resolved, and the invoke promise never settled. "Check now"
+# span forever with no error, which is how it was reported. Desktop was fine.
+#
+# Initialising the verifier would mean matching jni crate versions across
+# dependencies. Bundling Mozilla's roots removes the platform from the path
+# entirely, which for one unauthenticated call to a public API is both simpler
+# and more predictable.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+webpki-roots = "1.0"
 base64 = "0.23.1"
 # ─── OS keychain (M2.2.2) ─────────────────────────────────────────────────
 #

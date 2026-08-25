@@ -58,7 +58,12 @@ function windowsArtifact() {
   for (const dir of roots) {
     if (!existsSync(dir)) continue;
     const files = readdirSync(dir);
-    const sig = files.find((f) => f.endsWith('.sig'));
+    // Match the artifact to THIS version. Older builds are left behind in the
+    // bundle directory, and taking whichever .sig comes first published a
+    // manifest that advertised the new version while pointing at the previous
+    // installer -- a URL that does not exist under the new tag, so every
+    // update fails. Caught only because the signature then did not match.
+    const sig = files.find((f) => f.endsWith('.sig') && f.includes(version));
     if (!sig) continue;
     const installer = sig.replace(/\.sig$/, '');
     if (!files.includes(installer)) continue;

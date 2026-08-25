@@ -2,7 +2,15 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!--
+      `interactive-widget=resizes-content` is what keeps the chat header in
+      place when the soft keyboard opens. Android's default is
+      `resizes-visual`: the layout viewport stays put while the visual one
+      shrinks, so a header positioned against the top slides up underneath
+      the status bar and collides with the clock and battery icons.
+      Resizing the content instead keeps `env(safe-area-inset-top)` honest.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>EchoIt</title>
   </head>
 

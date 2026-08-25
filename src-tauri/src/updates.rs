@@ -91,8 +91,30 @@ fn is_newer(latest: &str, current: &str) -> bool {
 /// would put an error banner in front of someone whose app is working fine.
 /// The failure is reported in the payload instead, so the UI can say "could not
 /// check" rather than "up to date".
+/// Stage markers for the update check.
+///
+/// On Android the check never returned — the button sat on "Checking…" forever
+/// while the same code resolved in about two seconds on Windows. Nothing in the
+/// payload could say *where* it stopped, because the payload is only produced
+/// once it finishes.
+///
+/// These reach logcat as `RustStdoutStderr`, so one run on a device says
+/// exactly which stage never completed:
+///
+/// ```text
+/// adb logcat -c && adb shell am start -n io.github.mrsarthi.echoit/.MainActivity
+/// adb logcat -d | grep echoit-update
+/// ```
+///
+/// The last line printed is the step that hung.
+fn stage(name: &str) {
+    println!("echoit-update: {name}");
+}
+
 #[tauri::command]
 pub async fn check_for_update(app_version: String) -> UpdateStatus {
+    stage("start");
+
     let failed = |message: String| UpdateStatus {
         available: false,
         current: app_version.clone(),
@@ -101,20 +123,52 @@ pub async fn check_for_update(app_version: String) -> UpdateStatus {
         error: Some(message),
     };
 
+    // Bundled roots and an explicit crypto provider. See the note in
+    // Cargo.toml: the default path reaches for rustls-platform-verifier, which
+    // panics on Android when it has not been given JNI references, and takes
+    // the whole request down with it in a way that never surfaces.
+    let tls = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::ring::default_provider().into(),
+    )
+    .with_safe_default_protocol_versions();
+
+    let tls = match tls {
+        Ok(builder) => builder
+            .with_root_certificates(rustls::RootCertStore {
+                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+            })
+            .with_no_client_auth(),
+        Err(e) => {
+            stage("could not build a TLS configuration");
+            return failed(e.to_string());
+        }
+    };
+
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         // GitHub rejects requests without one.
         .user_agent(concat!("EchoIt/", env!("CARGO_PKG_VERSION")))
+        .use_preconfigured_tls(tls)
         .build()
     {
         Ok(c) => c,
-        Err(e) => return failed(e.to_string()),
+        Err(e) => {
+            stage("could not build the HTTP client");
+            return failed(e.to_string());
+        }
     };
+
+    stage("client built, sending request");
 
     let response = match client.get(RELEASE_API).send().await {
         Ok(r) => r,
-        Err(e) => return failed(e.to_string()),
+        Err(e) => {
+            stage("request failed");
+            return failed(e.to_string());
+        }
     };
+
+    stage(&format!("response received: {}", response.status()));
 
     if !response.status().is_success() {
         return failed(format!("release feed returned {}", response.status()));
@@ -122,8 +176,13 @@ pub async fn check_for_update(app_version: String) -> UpdateStatus {
 
     let release: GithubRelease = match response.json().await {
         Ok(r) => r,
-        Err(e) => return failed(e.to_string()),
+        Err(e) => {
+            stage("could not parse the release feed");
+            return failed(e.to_string());
+        }
     };
+
+    stage("parsed the release feed");
 
     // A draft or pre-release is not something to send a beta tester to.
     if release.draft || release.prerelease {
@@ -137,6 +196,8 @@ pub async fn check_for_update(app_version: String) -> UpdateStatus {
     }
 
     let newer = is_newer(&release.tag_name, &app_version);
+    stage(&format!("done: latest={} newer={}", release.tag_name, newer));
+
     UpdateStatus {
         available: newer,
         current: app_version,

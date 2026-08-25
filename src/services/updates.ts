@@ -71,11 +71,28 @@ export function setUpdateChecksEnabled(enabled: boolean): void {
  * rejection, so the UI can say "couldn't check" instead of "up to date". The
  * two are not the same and must not look the same.
  */
+/**
+ * How long the UI will wait before giving up on the check.
+ *
+ * The Rust command has its own 15s request timeout, so in normal operation
+ * this never fires. It exists because "normal operation" turned out not to
+ * include Android: the request never completed, the timeout never fired, and
+ * the button sat on "Checking…" indefinitely with no way back. A UI that can
+ * hang forever on an IPC call is a bug regardless of what is on the other end.
+ */
+const CHECK_TIMEOUT_MS = 20_000;
+
 export async function checkForUpdate(): Promise<UpdateStatus> {
   try {
-    const raw = await invoke<RawUpdateStatus>("check_for_update", {
-      appVersion: APP_VERSION,
-    });
+    const raw = await Promise.race([
+      invoke<RawUpdateStatus>("check_for_update", { appVersion: APP_VERSION }),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("the check did not finish in time")),
+          CHECK_TIMEOUT_MS,
+        ),
+      ),
+    ]);
     return {
       available: raw.available,
       current: raw.current,
