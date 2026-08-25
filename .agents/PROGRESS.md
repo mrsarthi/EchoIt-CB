@@ -1790,6 +1790,59 @@ Not done: the reset flow is one of the five things in `START_HERE` that look
 wrong and are not, and it was not worth touching while the app was being tested
 live.
 
+## The updater works — proven by using it (2026-08-25)
+
+Q21's whole point was that a tester must never be stranded on the build they
+first installed. Until today that was designed, built, and **unproven**: an
+update path cannot be tested without a second release to update *to*.
+
+### Windows — check and in-place install, both verified
+
+| Step | Result |
+|---|---|
+| Installed **0.1.1** from the published release | `%LOCALAPPDATA%\EchoIt`, reports 0.1.1 |
+| Settings → Check now | *"Version v0.1.2 is available"* |
+| **Get version v0.1.2** | Downloaded, installed, relaunched itself |
+| Installed executable afterwards | **0.1.2** |
+| App afterwards | *"You are on version 0.1.2 — You're on the latest version."* |
+
+A `EchoIt-0.1.2-updater-*` folder in `%TEMP%` corroborates it: the updater
+fetched the installer and ran it.
+
+*(Read the result wrong first. Polled the file version for 60s, saw 0.1.1
+throughout, and reported a failure — the install completed after the watch
+window closed. The poll was too impatient; the file version and the temp folder
+were what settled it.)*
+
+### Android — the check is fixed, the install path is not the same thing
+
+`check_for_update` now completes on a device in **0.6s** (Finding 21). But
+Android has no in-place updater: *Check now* reports the version and opens the
+Releases page, and the user reinstalls the APK over the top.
+
+**Whether messages survive that reinstall is still unverified.** The release
+notes claim they do — same signing key, so the app sandbox is preserved — but
+claiming it and having measured it are different, and this one is only claimed.
+
+### A flaw in our own code, found by the false alarm
+
+`installInPlace()` wraps the whole flow in `catch {}` with no logging. While the
+update looked broken there was **no way to learn why** — the error was
+discarded. Falling back to the Releases page is right; discarding the reason is
+the same swallowing pattern fixed in `pairing-store` earlier, in code written
+after that lesson.
+
+### Release sequence, for the record
+
+- **v0.1.0** — first beta.
+- **v0.1.1** — the three reported bugs: Android back button, chat header under
+  the status bar with the keyboard open, and the "Your safe address" panel.
+- **v0.1.2** — Finding 21, the Android update check that hung forever.
+
+**0.1.0 and 0.1.1 on Android cannot check for updates at all**, including for
+the release that fixes it. Those testers need one manual download; from 0.1.2
+the check works. Windows was never affected.
+
 ## Findings
 
 ### Finding 20 — a backgrounded peer loses messages the sender reported as delivered — 🔴 **BLOCKS BETA** *(measured 2026-08-24)*
