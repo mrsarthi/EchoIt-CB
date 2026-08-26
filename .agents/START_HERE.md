@@ -36,7 +36,13 @@ beta — no groups.
   APK reinstall.
 - CSP at zero violations on WebView2 **and** on Android.
 - Navigation shell — 4 destinations, responsive at 840px, three-zone desktop,
-  safe-area insets correct on a phone.
+  safe-area insets correct on a phone, and the header staying clear of the
+  status bar with the soft keyboard open (`useViewportHeight`).
+- **Android back button** — walks back through the views the user actually
+  visited, asks before closing at the floor, and the prompt's Close really
+  closes (a sent message survived exiting that way). Applied natively by
+  `npm run android:prepare`; build with only `android:sign` and back exits on
+  the first press.
 - Pairing UI, requests list, reconnect-on-resume.
 - Android release keystore, and an APK whose fingerprint was checked against it.
 - Signed Windows installer with `.sig` artifacts and a `latest.json` whose

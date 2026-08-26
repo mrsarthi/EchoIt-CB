@@ -14,6 +14,8 @@
     "test:bridge": "tsx harness/two-peer-bridge.mts",
     "test:three-peer": "tsx harness/three-peer-privacy.mts",
     "android:sign": "node scripts/apply-android-signing.mjs",
+    "android:back-nav": "node scripts/apply-android-back-nav.mjs",
+    "android:prepare": "npm run android:sign && npm run android:back-nav",
     "release:manifest": "node scripts/make-latest-json.mjs",
     "check:icon": "node scripts/check-icon.mjs"
   },

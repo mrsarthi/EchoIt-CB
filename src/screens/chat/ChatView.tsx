@@ -164,18 +164,20 @@ export function ChatView({
                   />
                 )}
               </div>
-              <div
-                style={{
-                  fontSize: "var(--font-size-label)",
-                  fontFamily: "var(--font-family-mono)",
-                  color: "var(--color-text-muted)",
-                  wordBreak: "break-all",
-                  lineHeight: 1.3,
-                  maxWidth: 220,
-                }}
-              >
-                {peerDid}
-              </div>
+              {/*
+                The peer's did:key used to render here, under the name. Removed
+                at the user's request — the same identifier was removed from
+                Profile in 0.1.2 for the same reason: it is noise to everyone
+                who is not debugging.
+
+                This slot is reserved for online and typing status. Deliberately
+                left empty rather than filled with something we cannot back:
+                the only signal available today is `pairingState`, which says
+                whether both sides have added each other, NOT whether they are
+                online. Showing that as presence would be the Finding 17
+                mistake again — asserting a state from a signal that does not
+                carry it.
+              */}
             </div>
           </div>
         </div>

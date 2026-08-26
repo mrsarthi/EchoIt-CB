@@ -77,6 +77,16 @@ html, body, #root {
  * padding applied.
  */
 #root {
+  /*
+   * Height comes from the VISIBLE area when the app can measure it (see
+   * hooks/useViewportHeight.ts), not the window. With the keyboard open those
+   * differ, and using the window is what let the header slide under the status
+   * bar: the browser panned the visual viewport to reach the focused input and
+   * carried the safe-area padding up with it.
+   *
+   * Falls back to 100% wherever visualViewport is unavailable.
+   */
+  height: var(--app-height, 100%);
   padding-top: var(--safe-top);
   padding-left: var(--safe-left);
   padding-right: var(--safe-right);

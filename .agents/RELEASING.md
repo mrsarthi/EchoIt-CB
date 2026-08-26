@@ -144,9 +144,19 @@ temporary by construction.
 
 ```bash
 npx tauri android init          # only when gen/ is absent
-npm run android:sign            # AFTER every init, before every release build
+npm run android:prepare         # AFTER every init, before every build
 npx tauri android build --apk --target aarch64
 ```
+
+`android:prepare` runs both generators: `android:sign` (the release signing
+config) and `android:back-nav` (the back button bridge and the native exit
+hook). Running only `android:sign` produces an APK that is correctly signed and
+whose back button walks out of the app on the first press — which shipped once.
+
+Both are idempotent. `android:back-nav` was not, at first: it guarded on a
+string that stopped matching when its own output changed, and inserted a second
+`onWebViewCreate` override that would not compile. It now brackets its output
+with sentinels and removes that region before rewriting it.
 
 ### Verify who signed it — **UNRECOVERABLE if wrong**
 

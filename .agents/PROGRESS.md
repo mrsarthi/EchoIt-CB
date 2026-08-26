@@ -2,7 +2,7 @@
 
 ## Status at a glance
 
-*Last updated: 2026-08-24 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.5.0` · **🚪 GATE OPEN — two physical phones held a conversation through the real UI** · signed release artifacts built for Windows and Android, nothing published*
+*Last updated: 2026-08-26 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.5.0` · **🚪 GATE OPEN — two physical phones held a conversation through the real UI** · signed release artifacts built for Windows and Android, nothing published*
 
 | Phase | Target / Deliverable | Status | Tests | Notes |
 |---|---|---|---|---|
@@ -1842,6 +1842,84 @@ after that lesson.
 **0.1.0 and 0.1.1 on Android cannot check for updates at all**, including for
 the release that fixes it. Those testers need one manual download; from 0.1.2
 the check works. Windows was never affected.
+
+## The Android back button, on the third attempt (2026-08-26)
+
+Reported: *"the back button now works when I am in the chat window, but for
+everywhere else it exits the app."* The intent, in the user's words: *"when
+users presses to back through their phone's navigation system, we just take them
+to the previous page where they were, if there's no more place to be, we ask
+them if they want to exit."*
+
+### Two approaches that could never have worked
+
+Both used `history.pushState` and `popstate`. The device disproved each:
+
+| Attempt | Why it failed | Evidence |
+|---|---|---|
+| `pushState` + `popstate` | `TauriActivity` ships `handleBackNavigation = false`, switching off wry's back callback entirely. The press never reached JS. | App exited with `history.length` 2 |
+| Override it to `true` | wry only calls `goBack()` when `WebView.canGoBack()` — that tracks *native* navigation, not `pushState` entries. | App exited with `history.length` **4** |
+
+The second is the one worth remembering: the fix was aimed at a real mechanism
+that simply does not observe the thing being changed. Reading wry's source
+would have shown this before either build.
+
+### What works
+
+`MainActivity.onWebViewCreate` — the one `open` hook that hands you the WebView
+— registers its own `OnBackPressedCallback` and forwards the press to JS as
+`echoit:back`. No dependence on webview history; the app always decides.
+
+Verified on the I2404, every state read from the live DOM over CDP:
+
+| Press | Before | After |
+|---|---|---|
+| 1 | Settings | Contacts |
+| 2 | Contacts | Chats |
+| 3 | Chats (at the floor) | exit prompt rendered |
+| 4 | prompt open | prompt open, no exit |
+| from an open conversation | chat with Phone B | Contacts, app alive |
+
+The prompt check greps `document.body.innerText` for "Close EchoIt", so it is
+the rendered dialog rather than React state.
+
+### Two defects the testing found
+
+**1. The Close button did nothing.** `getCurrentWindow().close()` is a no-op on
+Android — measured: process still alive after tapping it. The exit prompt had
+replaced *"back exits the app"* with *"back can never exit the app"*, which is
+worse than what it fixed. `EchoItExit.exit()` is now a native bridge calling
+`finish()`; `confirmExit` dispatches `pagehide` first so the checkpoint lands.
+
+Verified: process gone, 0 activity records. And the checkpoint is real — sent
+`persist-probe-211110`, exited through the prompt, relaunched, message still
+there.
+
+**2. `apply-android-back-nav.mjs` was not idempotent.** It guarded on "the file
+already mentions `echoit:back`". When the body grew the exit bridge that guard
+still matched, and the script produced a **second** `onWebViewCreate` override
+— a file that would not compile. A guard that tests for a string the script's
+own output controls stops being a guard the moment that output changes. It now
+brackets its region with sentinels and strips that region before rewriting;
+three consecutive runs produce one override.
+
+This is the fourth stale/duplicated-artifact bug in this project (icon
+resource, release manifest installer, and now this). The pattern: a generator
+whose "already done" check is weaker than what it generates.
+
+### Not verified
+
+- **`ChatView` still shows "Invalid Ticket" for a handshake stall.** Seen while
+  setting up a test peer: a 10s timeout was reported as an invalid ticket. The
+  ticket was fine. Wrong diagnosis shown to the user; not touched here.
+- Desktop is unaffected — there is no back button — but `confirmExit` now needs
+  `core:window:allow-close`, added to `capabilities/default.json`.
+
+### Ships with
+
+`npm run android:prepare` runs signing **and** this patch. Building with only
+`android:sign` yields a correctly signed APK whose back button exits on the
+first press — which is exactly what shipped in 0.1.1.
 
 ## Findings
 
