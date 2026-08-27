@@ -33,7 +33,9 @@ export function ChatView({
   peerDid,
   peerName,
   pairingState = "bilateral_connected",
-  isOnline = true,
+  // Absent evidence must not render as present. Defaulting to true meant any
+  // caller that forgot to pass presence showed a green dot forever.
+  isOnline = false,
   presenceLabel = "",
   messages = [],
   onBack,

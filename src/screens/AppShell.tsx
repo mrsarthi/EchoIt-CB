@@ -270,7 +270,21 @@ export function AppShell() {
      */
     .sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0));
 
-  const selectedConversation = conversations.find((c) => c.id === selectedChatId) || null;
+  /*
+   * Deliberately the enriched list, not raw `conversations`.
+   *
+   * The raw objects carry an `isOnline` fixed when the conversation was first
+   * opened, derived from `pairingState === "bilateral_connected"` -- which says
+   * both people added each other, NOT that anyone is present. Reading it here
+   * left a green dot burning in the chat header for a peer whose app had been
+   * force-stopped: measured, the status line correctly moved Online -> "last
+   * seen just now" -> "last seen 1 minute ago" while the dot never went out.
+   *
+   * That is the Finding 17 mistake -- asserting a state from a signal that does
+   * not carry it -- in the one place the dot is largest.
+   */
+  const selectedConversation =
+    conversationsWithPreview.find((c) => c.id === selectedChatId) || null;
 
   /**
    * Reading a conversation marks it read, up to its newest message.
@@ -376,7 +390,9 @@ export function AppShell() {
         lastMessage: contact?.pairingState === "bilateral_connected" ? "Connected directly" : "Waiting for them to connect back",
         timestamp: "Recently",
         unreadCount: 0,
-        isOnline: contact?.pairingState === "bilateral_connected",
+        // Not from pairingState: that is "we are paired", not "they are here".
+        // The enriched list recomputes this from presence every render.
+        isOnline: false,
       };
       setConversations((prev) => [...prev, newChat]);
       existing = newChat;
