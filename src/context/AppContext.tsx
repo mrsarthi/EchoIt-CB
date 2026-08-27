@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, useCallback, useRef, type ReactNode } from "react";
 import { createEchoItClient, type EchoItClient } from "../transport/create-client";
+import { startPresence, emptyEvidence, type PresenceEvidence } from "../services/heartbeat";
 import {
   checkpoint,
   historyWithPeer,
@@ -53,6 +54,8 @@ export interface AppContextValue {
   contacts: Contact[];
   pendingRequests: InboundRequest[];
   blockedPeers: BlockedPeer[];
+  /** Heartbeat and departure times per peer; feed to `presenceFrom`. */
+  presenceEvidence: PresenceEvidence;
   activeInvites: ActiveInvite[];
   pairAndConnect: (ticketString: string, name: string) => Promise<void>;
   /** Messages per peer did, oldest first. */
@@ -69,6 +72,7 @@ const AppContext = createContext<AppContextValue | null>(null);
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AppState>("checking");
   const [client, setClient] = useState<EchoItClient | null>(null);
+  const [presenceEvidence, setPresenceEvidence] = useState<PresenceEvidence>(emptyEvidence);
   const [did, setDid] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [keychainAvailable, setKeychainAvailable] = useState<boolean>(true);
@@ -402,6 +406,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
     // `contacts` by identity: a rename should not tear down every listener,
     // but a new contact must gain one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, did, state, contacts.map((c) => c.peerDid).join(",")]);
+
+  /**
+   * Heartbeat to paired peers, and listen for theirs.
+   *
+   * Presence used to be inferred from inbound messages alone, because the SDK
+   * had no way to say someone had left — a dot driven by connection alone
+   * switches on and never off. SDK 0.7.1 provides both halves: an ephemeral
+   * heartbeat that is never written to disk, and `onPeerDisconnected`.
+   *
+   * Keyed on the peer list by identity, like the subscribe effect above: a
+   * rename must not restart every heartbeat, but a new contact must gain one.
+   */
+  useEffect(() => {
+    if (!client || !did || state !== "ready") return;
+    const peerDids = contacts.map((c) => c.peerDid);
+    if (peerDids.length === 0) return;
+    return startPresence(client, did, peerDids, setPresenceEvidence);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, did, state, contacts.map((c) => c.peerDid).join(",")]);
 
@@ -740,6 +763,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         contacts,
         pendingRequests,
         blockedPeers,
+        presenceEvidence,
         activeInvites,
         pairAndConnect,
         messages,

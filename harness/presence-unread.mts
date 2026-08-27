@@ -13,7 +13,7 @@
  *   npm run test:presence
  */
 
-import { presenceFrom, describePresence, ONLINE_WINDOW_MS } from '../src/services/presence.js';
+import { presenceFrom, describePresence, ONLINE_WINDOW_MS, HEARTBEAT_INTERVAL_MS } from '../src/services/presence.js';
 import { countUnread, lastInboundAt } from '../src/services/unread.js';
 
 const failures: string[] = [];
@@ -91,13 +91,24 @@ check(
   'so a new contact does not read as "last seen 56 years ago"',
 );
 
+check(
+  'the online window fits the heartbeat interval',
+  ONLINE_WINDOW_MS > HEARTBEAT_INTERVAL_MS * 2 && ONLINE_WINDOW_MS < HEARTBEAT_INTERVAL_MS * 3,
+  `${ONLINE_WINDOW_MS / 1000}s window against a ${HEARTBEAT_INTERVAL_MS / 1000}s beat -- `
+  + 'one dropped beat must not blink the dot off, and a departed peer must not linger',
+);
+
 console.log('\n▸ Phrasing');
 
 const phrase = (msAgo: number | undefined) => describePresence(presenceFrom(msAgo === undefined ? undefined : ago(msAgo), now), now);
 
+// Fixed durations, deliberately not derived from ONLINE_WINDOW_MS. This block
+// tests how a gap is *worded*, not where the online threshold sits, and tying
+// the two together meant shortening the window (2min -> 75s, once heartbeats
+// made that honest) failed a phrasing test whose meaning had not changed.
 const cases: Array<[string, string]> = [
   [phrase(5_000), 'Online'],
-  [phrase(ONLINE_WINDOW_MS + 10_000), 'last seen 2 minutes ago'],
+  [phrase(2 * 60 * 1000 + 10_000), 'last seen 2 minutes ago'],
   [phrase(60 * 60 * 1000), 'last seen 1 hour ago'],
   [phrase(5 * 60 * 60 * 1000), 'last seen 5 hours ago'],
   [phrase(3 * 24 * 60 * 60 * 1000), 'last seen 3 days ago'],

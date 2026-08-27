@@ -19,7 +19,7 @@ import type { MessageItem } from "./chat/ChatView";
 export function AppShell() {
   const isWide = useBreakpoint(840);
   useViewportHeight();
-  const { contacts, pendingRequests, messages, sendMessage, did } = useApp();
+  const { contacts, pendingRequests, messages, sendMessage, did, presenceEvidence } = useApp();
   const [activeTab, setActiveTab] = useState<AppTab>("chats");
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationItem[]>([]);
@@ -212,11 +212,30 @@ export function AppShell() {
    * a message the SDK never accepted — the failure the old `handleSendMessage`
    * produced by construction.
    */
+  /**
+   * The most recent sign a peer was there.
+   *
+   * Heartbeats are the designed signal, but a message that just arrived is
+   * equally good evidence and may be newer — someone typing is unambiguously
+   * present. Taking the later of the two means presence never lags behind a
+   * conversation actually happening.
+   */
+  const evidenceFor = (peerDid: string, thread: typeof messages[string]): number | undefined => {
+    const beat = presenceEvidence.heardAt[peerDid];
+    const message = lastInboundAt(thread ?? [], did);
+    if (beat === undefined) return message;
+    if (message === undefined) return beat;
+    return Math.max(beat, message);
+  };
+
   const conversationsWithPreview: ConversationItem[] = conversations
     .map((c) => {
       const thread = messages[c.peerDid] ?? [];
-      const heardAt = lastInboundAt(thread, did);
-      const presence = presenceFrom(heardAt, now);
+      const presence = presenceFrom(
+        evidenceFor(c.peerDid, thread),
+        now,
+        presenceEvidence.departedAt[c.peerDid],
+      );
 
       const enriched: ConversationItem = {
         ...c,
@@ -268,7 +287,14 @@ export function AppShell() {
    */
   const selectedPresenceLabel = selectedConversation
     ? describePresence(
-        presenceFrom(lastInboundAt(messages[selectedConversation.peerDid] ?? [], did), now),
+        presenceFrom(
+          evidenceFor(
+            selectedConversation.peerDid,
+            messages[selectedConversation.peerDid] ?? [],
+          ),
+          now,
+          presenceEvidence.departedAt[selectedConversation.peerDid],
+        ),
         now,
       )
     : "";

@@ -15,6 +15,7 @@
     "test:three-peer": "tsx harness/three-peer-privacy.mts",
     "test:timestamps": "tsx harness/timestamp-units.mts",
     "test:presence": "tsx harness/presence-unread.mts",
+    "test:presence-quic": "tsx harness/presence-quic.mts",
     "android:sign": "node scripts/apply-android-signing.mjs",
     "android:activity": "node scripts/apply-android-activity.mjs",
     "android:prepare": "npm run android:sign && npm run android:activity",
@@ -22,8 +23,8 @@
     "check:icon": "node scripts/check-icon.mjs"
   },
   "dependencies": {
-    "@dicsussion/core": "^0.6.0",
-    "@dicsussion/sdk": "^0.6.0",
+    "@dicsussion/core": "^0.7.1",
+    "@dicsussion/sdk": "^0.7.1",
     "@scure/bip39": "^1.6.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",

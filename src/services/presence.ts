@@ -7,32 +7,54 @@
  * ## What this can and cannot know
  *
  * WhatsApp knows you are online because your phone holds a connection to their
- * server and heartbeats over it. There is no server here, and the SDK exposes
- * `onPeerConnected` but **no `onPeerDisconnected`** — a flag driven by that
- * alone would switch on and never switch off, showing "online" for someone who
- * left hours ago. That is the Finding 17 mistake: asserting a state from a
- * signal that does not carry it.
+ * server and heartbeats over it. There is no server here.
  *
- * So "online" here means *we have heard from this peer within
- * `ONLINE_WINDOW_MS`* — inbound traffic, which is evidence they were running
- * the app moments ago. It is honest but conservative: a peer who is online and
- * simply not typing falls back to "last seen" once the window lapses.
+ * The first version of this inferred presence from inbound *messages*, because
+ * the SDK then exposed `onPeerConnected` and no way to learn that someone had
+ * left — a flag driven by connection alone switches on and never off, showing
+ * "online" for someone who closed the app hours ago. That is the Finding 17
+ * mistake: asserting a state from a signal that does not carry it.
  *
- * Closing that gap needs an **ephemeral presence ping** in the protocol — a
- * message that is delivered but not written into the CRDT document. Doing it
- * with ordinary messages would grow the document forever: a ping every 30
- * seconds is roughly 2,900 permanent entries per conversation per day, stored
- * on both devices. See PROGRESS.md for the API this needs.
+ * SDK 0.7.1 supplies both halves, so the evidence is now real:
+ *
+ *  - **an ephemeral heartbeat** (`chat.sendEphemeral`, stream `0x07`) every
+ *    `HEARTBEAT_INTERVAL_MS`, delivered now or not at all — never written to
+ *    the CRDT. Doing this with ordinary messages would add roughly 2,900
+ *    permanent entries per conversation per day, on both devices.
+ *  - **`onPeerDisconnected`**, which turns the dot off at once rather than
+ *    waiting for the window to lapse.
+ *
+ * Heartbeats are primary and the disconnect event is an accelerator, per the
+ * protocol's own guidance: a peer can be connected and idle, and a dropped
+ * connection can take time to notice. Absence of a recent heartbeat fails in
+ * the safe direction — someone present may briefly read as away, but someone
+ * gone never reads as present.
+ *
+ * A caveat worth keeping: `sendEphemeral` returning 0 is **normal**. It means
+ * nobody was connected, not that anything failed.
  */
+
+/**
+ * How often we tell paired peers we are still here.
+ *
+ * Ephemeral, so this costs nothing on disk. Thirty seconds is frequent enough
+ * that the window below can be short without flickering, and rare enough that
+ * it is not meaningful traffic.
+ */
+export const HEARTBEAT_INTERVAL_MS = 30 * 1000;
 
 /**
  * How recently we must have heard from a peer to call them online.
  *
- * Two minutes rather than thirty seconds because inbound traffic is currently
- * only real messages. A shorter window would make the indicator flicker off
- * mid-conversation, which reads as a bug. Revisit once presence pings exist.
+ * Two and a half missed heartbeats. One dropped beat — a moment of packet loss,
+ * a device briefly busy — must not blink the dot off, because a flickering
+ * indicator reads as a bug and teaches people to ignore it.
+ *
+ * This was two minutes when the only evidence was real messages arriving; that
+ * had to be long enough to span someone reading rather than typing. Heartbeats
+ * make it honest to be much stricter.
  */
-export const ONLINE_WINDOW_MS = 2 * 60 * 1000;
+export const ONLINE_WINDOW_MS = 75 * 1000;
 
 export type PresenceState = "online" | "offline" | "unknown";
 
@@ -48,11 +70,22 @@ export interface Presence {
  * `unknown` is a distinct state from `offline` on purpose: never having heard
  * from someone is different from knowing they left, and showing "last seen
  * 56 years ago" for a brand new contact is what conflating them produces.
+ *
+ * `departedAt` is a disconnect we were actually told about. It wins over the
+ * window even when a heartbeat arrived seconds ago, because it is direct
+ * evidence of absence where the window is only an inference from silence.
  */
-export function presenceFrom(lastInboundAt: number | undefined, now: number): Presence {
-  if (!lastInboundAt) return { state: "unknown" };
-  if (now - lastInboundAt <= ONLINE_WINDOW_MS) return { state: "online", lastSeen: lastInboundAt };
-  return { state: "offline", lastSeen: lastInboundAt };
+export function presenceFrom(
+  lastHeardAt: number | undefined,
+  now: number,
+  departedAt?: number,
+): Presence {
+  if (departedAt !== undefined && (lastHeardAt === undefined || departedAt >= lastHeardAt)) {
+    return { state: "offline", lastSeen: lastHeardAt ?? departedAt };
+  }
+  if (!lastHeardAt) return { state: "unknown" };
+  if (now - lastHeardAt <= ONLINE_WINDOW_MS) return { state: "online", lastSeen: lastHeardAt };
+  return { state: "offline", lastSeen: lastHeardAt };
 }
 
 const MINUTE = 60 * 1000;
