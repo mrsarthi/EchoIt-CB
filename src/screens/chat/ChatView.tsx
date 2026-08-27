@@ -93,10 +93,24 @@ export function ChatView({
       }}
     >
       {/* 1:1 Chat Header */}
+      {/*
+        Room for two lines.
+        
+        This was a fixed 60px holding a single line. Presence added a second one
+        under the name, and on a real phone the result was cramped: "Phone A"
+        wrapped onto two lines with "Online" squeezed beneath it and the dot
+        pressed against the pairing badge.
+
+        `minHeight` rather than `height` so the header grows if the text needs
+        it instead of compressing, and vertical padding so the two lines are not
+        flush against the edges. Padding alone would have made the wrapping
+        worse by taking width away, so the name is also kept to one line below.
+      */}
       <header
         style={{
-          height: 60,
-          padding: "0 var(--space-md)",
+          minHeight: 68,
+          padding: "var(--space-sm) var(--space-md)",
+          gap: "var(--space-sm)",
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
@@ -106,7 +120,9 @@ export function ChatView({
           zIndex: 10,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        {/* minWidth: 0 lets this shrink so the name can ellipsize rather than
+            wrap — a flex item will not shrink below its content without it. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: "1 1 auto" }}>
           {onBack && (
             <button
               onClick={onBack}
@@ -149,14 +165,21 @@ export function ChatView({
               {peerName.slice(0, 1).toUpperCase()}
             </div>
 
-            <div>
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
                 <span
                   style={{
                     fontWeight: "var(--font-weight-semibold)",
                     fontSize: "var(--font-size-body)",
                     color: "var(--color-text)",
+                    // One line, truncated. A long nickname used to wrap and
+                    // push the presence line into the header's edge.
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    minWidth: 0,
                   }}
+                  title={peerName}
                 >
                   {peerName}
                 </span>
@@ -174,6 +197,7 @@ export function ChatView({
                       borderRadius: "50%",
                       backgroundColor: "var(--color-success)",
                       display: "inline-block",
+                      flexShrink: 0,
                     }}
                     title="Active recently"
                   />
@@ -198,6 +222,10 @@ export function ChatView({
                         ? "var(--color-success)"
                         : "var(--color-text-muted)",
                     lineHeight: 1.3,
+                    marginTop: 2,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
                   }}
                 >
                   {presenceLabel}
@@ -215,6 +243,8 @@ export function ChatView({
             gap: 6,
             padding: "4px 8px",
             borderRadius: "var(--radius-full)",
+            flexShrink: 0,
+            whiteSpace: "nowrap",
             backgroundColor: isConnected ? "var(--color-surface-dim)" : "var(--color-primary-subtle)",
             color: isConnected ? "var(--color-text-muted)" : "var(--color-primary)",
             fontSize: "var(--font-size-label)",

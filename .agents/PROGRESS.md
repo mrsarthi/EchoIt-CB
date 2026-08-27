@@ -2046,6 +2046,83 @@ conversation spanning days reads as out of order — `persist-probe` at 09:11 PM
 sits below `Herro` at 09:15 PM because it is a day later. Day separators are not
 built.
 
+## Presence, proven on two phones (2026-08-27)
+
+SDK 0.7.1 supplies the two things presence needed: an ephemeral heartbeat
+(stream `0x07`, never written to the CRDT) and `onPeerDisconnected`. Rebuilt on
+those, heartbeat every 30s, window 75s -- two and a half missed beats, so one
+dropped beat cannot blink the dot off.
+
+Verified on **RMX3785 (Android 15)** and **I2404 (Android 16)**, on separate
+networks:
+
+| | |
+|---|---|
+| both running | `Online`, dot present, **held past the 75s window** -- so beats are genuinely flowing, not one stale sighting |
+| peer force-stopped, +20s | `Online` (inside the window) |
+| **+30s** | `last seen just now`, **dot gone** |
+| +90s | `last seen 1 minute ago`, dot gone |
+
+Also rendering on hardware for the first time: the **unread badge** (`2`, and it
+clears when the conversation is opened) and **real message times** (20:57,
+21:15, 21:11, 09:11, 09:28).
+
+### The dot read pairing, not presence
+
+The status line was right throughout while the green dot never went out.
+`selectedConversation` was taken from raw `conversations` rather than the
+enriched list; those objects carry an `isOnline` fixed when the conversation was
+first opened, from `pairingState === "bilateral_connected"` -- which says both
+people added each other, not that anyone is present. Nothing recomputed it.
+`ChatView` also defaulted `isOnline = true`, so a caller that forgot to pass
+presence showed a dot forever.
+
+That is the Finding 17 mistake, in the largest place the dot appears, and it is
+exactly what this slot was reserved to avoid when the `did:key` was removed from
+the header earlier the same day.
+
+**`presence-quic` passed while it was broken.** That suite exercises
+`presenceFrom` directly and never renders the component holding the dot. The
+logic was right; the wiring was not. Two phones found it in a minute. A pure
+function test cannot cover the wiring into the view, and this one was written as
+though it could.
+
+### A stale APK, again
+
+The rebuild was backgrounded and the install ran before it finished, so the
+"retest" measured the old code and appeared to show the fix failing. Caught only
+by comparing the APK's mtime against the clock.
+
+Fourth stale-artifact incident here after the icon resource, the release
+manifest, and the patch script. The install step now waits on an explicit
+`BUILD_DONE` marker rather than on the build "probably" being done.
+
+### Header
+
+Presence added a second line under the name and the fixed `height: 60` header
+could not carry it: on a real phone `Phone A` wrapped onto two lines with
+`Online` squeezed beneath and the dot pressed against the pairing badge.
+
+`minHeight: 68` with vertical padding, and -- because padding alone takes width
+away and would have made the wrapping worse -- the name is held to one line with
+an ellipsis while the badge and dot no longer shrink. Measured after:
+`headerHeight 68`, `paddingTop/Bottom 8px`, name on **1** line.
+
+### Not verified
+
+**Recent-first ordering.** Each phone has one conversation, so there is nothing
+to order. The logic is covered in `presence-unread`, the rendering is not.
+
+### Environment note
+
+A laptop peer cannot reach either phone: both are on mobile data behind carrier
+NAT (`100.86.191.111`), and the peer advertises a LAN address. `Handshake
+stalled for 10000ms`. `harness/presence-peer.mts` exists for this and works only
+on a shared network. Phone-to-phone over mobile data is fine.
+
+`ChatView` still reports that stall as **"Invalid Ticket"**. The ticket was
+valid. Second time today it has misled a diagnosis.
+
 ## Findings
 
 ### Finding 20 — a backgrounded peer loses messages the sender reported as delivered — 🔴 **BLOCKS BETA** *(measured 2026-08-24)*
