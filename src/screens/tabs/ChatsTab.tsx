@@ -11,6 +11,13 @@ export interface ConversationItem {
   timestamp?: string;
   unreadCount?: number;
   isOnline?: boolean;
+  /**
+   * Unix ms of the newest message, for ordering.
+   *
+   * Separate from `timestamp`, which is already formatted for display and
+   * would sort alphabetically -- putting "10:05 AM" before "9:15 PM".
+   */
+  lastActivityAt?: number;
 }
 
 export interface ChatsTabProps {

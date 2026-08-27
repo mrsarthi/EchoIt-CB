@@ -12,6 +12,8 @@ import { Logo } from "../components/ui/Logo";
 import { Modal } from "../components/ui/Modal";
 import { Button } from "../components/ui/Button";
 import { useApp } from "../context/AppContext";
+import { presenceFrom, describePresence } from "../services/presence";
+import { countUnread, lastInboundAt, loadReadMarks, saveReadMarks, type ReadMarks } from "../services/unread";
 import type { MessageItem } from "./chat/ChatView";
 
 export function AppShell() {
@@ -21,6 +23,21 @@ export function AppShell() {
   const [activeTab, setActiveTab] = useState<AppTab>("chats");
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationItem[]>([]);
+  const [readMarks, setReadMarks] = useState<ReadMarks>(() => loadReadMarks());
+
+  /**
+   * A ticking "now" so elapsed time re-renders on its own.
+   *
+   * Without it "last seen 2 minutes ago" stays frozen at whatever it said when
+   * the last message arrived, and a peer who has gone quiet reads as online
+   * indefinitely -- the exact failure the presence window exists to avoid.
+   * Thirty seconds is well under the one-minute granularity of the phrasing.
+   */
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   /**
    * Back button navigation.
@@ -164,7 +181,9 @@ export function AppShell() {
         const existing = updated.find((c) => c.peerDid === contact.peerDid);
         if (existing) {
           existing.name = contact.name;
-          existing.isOnline = contact.pairingState === "bilateral_connected";
+          // isOnline is derived below from real inbound activity. It used to be
+          // set from pairingState here, which meant "we have both added each
+          // other" -- true whether or not the peer was anywhere near the app.
         } else {
           updated.push({
             id: `chat-${contact.peerDid.slice(0, 16)}`,
@@ -178,7 +197,6 @@ export function AppShell() {
               : "Waiting for them to connect back",
             timestamp: "Recently",
             unreadCount: 0,
-            isOnline: contact.pairingState === "bilateral_connected",
           });
         }
       });
@@ -194,21 +212,81 @@ export function AppShell() {
    * a message the SDK never accepted — the failure the old `handleSendMessage`
    * produced by construction.
    */
-  const conversationsWithPreview: ConversationItem[] = conversations.map((c) => {
-    const thread = messages[c.peerDid] ?? [];
-    const latest = thread[thread.length - 1];
-    if (!latest) return c;
-    return {
-      ...c,
-      lastMessage: latest.content,
-      timestamp: new Date(latest.timestamp).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
-    };
-  });
+  const conversationsWithPreview: ConversationItem[] = conversations
+    .map((c) => {
+      const thread = messages[c.peerDid] ?? [];
+      const heardAt = lastInboundAt(thread, did);
+      const presence = presenceFrom(heardAt, now);
+
+      const enriched: ConversationItem = {
+        ...c,
+        isOnline: presence.state === "online",
+        unreadCount: countUnread(thread, did, readMarks[c.peerDid]),
+        // Kept for sorting; the row renders `timestamp`.
+        lastActivityAt: thread[thread.length - 1]?.timestamp,
+      };
+
+      const latest = thread[thread.length - 1];
+      if (!latest) return enriched;
+      return {
+        ...enriched,
+        lastMessage: latest.content,
+        timestamp: new Date(latest.timestamp).toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      };
+    })
+    /*
+     * Most recent first.
+     *
+     * There was no ordering at all before this, so the list sat in whatever
+     * order contacts happened to be added and the conversation you were
+     * actually having could be anywhere in it.
+     *
+     * Conversations with no messages sort last rather than first: a contact
+     * added months ago and never written to has no claim on the top of the
+     * list, and `undefined` compared numerically would otherwise put them
+     * there.
+     */
+    .sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0));
 
   const selectedConversation = conversations.find((c) => c.id === selectedChatId) || null;
+
+  /**
+   * Reading a conversation marks it read, up to its newest message.
+   *
+   * Keyed on the newest timestamp rather than a "seen" boolean so a message
+   * arriving while the conversation is already open is marked read too, instead
+   * of leaving a badge on the screen the user is looking at.
+   */
+  /**
+   * The presence phrase for whoever is open, worked out once.
+   *
+   * Derived from the same `lastInboundAt` the chat list uses, so the header and
+   * the row can never disagree about whether someone is around.
+   */
+  const selectedPresenceLabel = selectedConversation
+    ? describePresence(
+        presenceFrom(lastInboundAt(messages[selectedConversation.peerDid] ?? [], did), now),
+        now,
+      )
+    : "";
+
+  const openPeerDid = selectedConversation?.peerDid;
+  const openThreadNewest = openPeerDid
+    ? messages[openPeerDid]?.[messages[openPeerDid].length - 1]?.timestamp
+    : undefined;
+
+  useEffect(() => {
+    if (!openPeerDid || openThreadNewest === undefined) return;
+    setReadMarks((prev) => {
+      if ((prev[openPeerDid] ?? 0) >= openThreadNewest) return prev;
+      const next = { ...prev, [openPeerDid]: openThreadNewest };
+      saveReadMarks(next);
+      return next;
+    });
+  }, [openPeerDid, openThreadNewest]);
   const selectedContact = selectedConversation
     ? contacts.find((c) => c.peerDid === selectedConversation.peerDid)
     : null;
@@ -329,6 +407,7 @@ export function AppShell() {
             peerName={selectedConversation.name}
             pairingState={selectedContact?.pairingState || "unilateral_waiting"}
             isOnline={selectedConversation.isOnline}
+            presenceLabel={selectedPresenceLabel}
             onBack={closeChat}
             messages={messagesFor(selectedConversation?.peerDid)}
             onSendMessage={handleSendMessage}
@@ -411,6 +490,7 @@ export function AppShell() {
             peerName={selectedConversation.name}
             pairingState={selectedContact?.pairingState || "unilateral_waiting"}
             isOnline={selectedConversation.isOnline}
+            presenceLabel={selectedPresenceLabel}
             messages={messagesFor(selectedConversation?.peerDid)}
             onSendMessage={handleSendMessage}
             onShareTicket={() => navigate({ tab: "profile", chatId: null })}

@@ -14,6 +14,7 @@
     "test:bridge": "tsx harness/two-peer-bridge.mts",
     "test:three-peer": "tsx harness/three-peer-privacy.mts",
     "test:timestamps": "tsx harness/timestamp-units.mts",
+    "test:presence": "tsx harness/presence-unread.mts",
     "android:sign": "node scripts/apply-android-signing.mjs",
     "android:activity": "node scripts/apply-android-activity.mjs",
     "android:prepare": "npm run android:sign && npm run android:activity",

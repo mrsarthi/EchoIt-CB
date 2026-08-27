@@ -16,6 +16,12 @@ export interface ChatViewProps {
   peerName: string;
   pairingState?: PairingState;
   isOnline?: boolean;
+  /**
+   * "Online", "last seen 5 minutes ago", or empty when we have never heard
+   * from them. Phrased by `services/presence`, not decided here — the same
+   * wording appears in the chat list and the two must not drift.
+   */
+  presenceLabel?: string;
   messages?: MessageItem[];
   onBack?: () => void;
   onSendMessage?: (text: string) => void;
@@ -28,6 +34,7 @@ export function ChatView({
   peerName,
   pairingState = "bilateral_connected",
   isOnline = true,
+  presenceLabel = "",
   messages = [],
   onBack,
   onSendMessage,
@@ -151,7 +158,13 @@ export function ChatView({
                 >
                   {peerName}
                 </span>
-                {isConnected && isOnline && (
+                {/*
+                  Green means *they were just here*, not "you are paired".
+                  It used to be driven by `isConnected` — bilateral pairing —
+                  so it lit up for a contact who had not opened the app in
+                  weeks. `isOnline` now comes from real inbound activity.
+                */}
+                {isOnline && (
                   <span
                     style={{
                       width: 8,
@@ -160,24 +173,34 @@ export function ChatView({
                       backgroundColor: "var(--color-success)",
                       display: "inline-block",
                     }}
-                    title="Direct connection ready"
+                    title="Active recently"
                   />
                 )}
               </div>
               {/*
-                The peer's did:key used to render here, under the name. Removed
-                at the user's request — the same identifier was removed from
-                Profile in 0.1.2 for the same reason: it is noise to everyone
-                who is not debugging.
+                The peer's did:key used to render here. Removed at the user's
+                request — the same identifier went from Profile in 0.1.2, for
+                the same reason: noise to everyone who is not debugging.
 
-                This slot is reserved for online and typing status. Deliberately
-                left empty rather than filled with something we cannot back:
-                the only signal available today is `pairingState`, which says
-                whether both sides have added each other, NOT whether they are
-                online. Showing that as presence would be the Finding 17
-                mistake again — asserting a state from a signal that does not
-                carry it.
+                Presence took the slot. "Online" is deliberately conservative —
+                it means we have heard from them inside the presence window,
+                because the SDK has `onPeerConnected` and no matching
+                disconnect. See services/presence.ts.
               */}
+              {presenceLabel && (
+                <div
+                  style={{
+                    fontSize: "var(--font-size-label)",
+                    color:
+                      presenceLabel === "Online"
+                        ? "var(--color-success)"
+                        : "var(--color-text-muted)",
+                    lineHeight: 1.3,
+                  }}
+                >
+                  {presenceLabel}
+                </div>
+              )}
             </div>
           </div>
         </div>
