@@ -15,14 +15,19 @@
  */
 
 import type { EchoItClient } from "../transport/create-client";
+import { toMillis } from "./timestamps";
+
+export { toMillis };
 
 /** A message as the UI wants it, decoupled from the SDK's shape. */
 export interface ConversationMessage {
   id: string;
   authorDid?: string;
   content: string;
+  /** Unix milliseconds. See `toMillis` — the SDK reports seconds. */
   timestamp: number;
 }
+
 
 /**
  * The channel two people share.
@@ -94,7 +99,7 @@ export async function sendToPeer(
     id: sent.id,
     authorDid: sent.authorDid,
     content: sent.content,
-    timestamp: sent.timestamp,
+    timestamp: toMillis(sent.timestamp),
   };
 }
 
@@ -110,7 +115,7 @@ export async function historyWithPeer(
     id: m.id,
     authorDid: m.authorDid,
     content: m.content,
-    timestamp: m.timestamp,
+    timestamp: toMillis(m.timestamp),
   }));
 }
 
@@ -137,7 +142,7 @@ export function subscribeToPeer(
       id: m.id,
       authorDid: m.authorDid,
       content: m.content,
-      timestamp: m.timestamp,
+      timestamp: toMillis(m.timestamp),
     });
   });
 }

@@ -2,7 +2,7 @@
 
 ## Status at a glance
 
-*Last updated: 2026-08-26 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.5.0` · **🚪 GATE OPEN — two physical phones held a conversation through the real UI** · signed release artifacts built for Windows and Android, nothing published*
+*Last updated: 2026-08-27 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.5.0` · **🚪 GATE OPEN — two physical phones held a conversation through the real UI** · signed release artifacts built for Windows and Android, nothing published*
 
 | Phase | Target / Deliverable | Status | Tests | Notes |
 |---|---|---|---|---|
@@ -1920,6 +1920,131 @@ whose "already done" check is weaker than what it generates.
 `npm run android:prepare` runs signing **and** this patch. Building with only
 `android:sign` yields a correctly signed APK whose back button exits on the
 first press — which is exactly what shipped in 0.1.1.
+
+## The keyboard, the safe areas, and a wrong diagnosis repeated (2026-08-27)
+
+Reported: *"When the keyboard is open while chatting, I can scroll through and
+the keyboard goes up along with the msgs, revealing a blank grey area under the
+typing box."* A screenshot the user supplied is what actually cracked it.
+
+### What was happening
+
+This webview does not shrink for the keyboard. It keeps full height and Chrome
+**pans** the visual viewport instead:
+
+| | value |
+|---|---|
+| `innerHeight` | 875 |
+| `visualViewport.height` | 548 |
+| `visualViewport.offsetTop` | **250** |
+
+`#root` was sized to the visible 548 but left pinned at layout-top 0, so the pan
+slid it up and uncovered 250px of bare `body` below the composer. The visible
+band was layout-y 250..798; the app stopped at 548.
+
+`interactive-widget=resizes-content` was supposed to prevent this and does
+nothing here — `innerHeight` stayed 875 with it set. It was recorded as
+superseded rather than ineffective.
+
+### The fix
+
+`#root` now follows the pan: `position: fixed; top: var(--vv-offset-top)`.
+`useViewportHeight` had been exporting that variable since it was written, with
+a comment saying it existed so the layout could compensate — and nothing had
+ever consumed it.
+
+### The native approach, tried and abandoned
+
+Padding the WebView by the IME inset makes the layout viewport shrink, which
+removes the reason to pan. It works. It also costs the safe areas: installing an
+`OnApplyWindowInsetsListener` anywhere above the WebView stops the WebView
+receiving insets, and every `env(safe-area-inset-*)` collapses to 0.
+
+| build | envTop | envBottom | result |
+|---|---|---|---|
+| with the listener | 0 | 0 | header under the clock, composer under the nav bar |
+| without it | **36** | **43** | correct |
+
+**This shipped to the user's phone in an unusable state** — *"The typing box is
+stuck behind the navigation buttons at the bottom, I can't click on it. Same for
+the header."* Restoring `acd9de1` fixed it, and doubled as the experiment that
+settled the cause.
+
+### The part worth keeping
+
+The listener was blamed, then **exonerated on the strength of an experiment that
+never ran**. A build was made with the listener removed to test it; that command
+was backgrounded and only its tail read, so the `grep -c
+setOnApplyWindowInsetsListener` that would have confirmed the removal was never
+seen. On that basis the user was told "I did not break the safe areas" — which
+was false, and reversed a correct diagnosis.
+
+The rule this earns: *an experiment whose precondition was not verified is not
+evidence.* Backgrounding a command and reading only its tail discards exactly
+the precondition checks put there on purpose.
+
+Second, smaller: `scripts/apply-android-activity.mjs` reverted on disk mid-session,
+losing three confirmed edits. Which code the intervening APKs contained is not
+knowable after the fact.
+
+### Tests added
+
+`harness/cdp/drive-android-keyboard.mjs` — asserts `#root` spans
+`offsetTop..offsetTop+visualViewport.height` with the keyboard open **and after
+scrolling**, the step the original "header looks right" check skipped.
+
+Three of its own early runs reported failures that were the test measuring the
+wrong thing, and each is now guarded:
+
+- the app had been backgrounded, and the webview answered CDP from behind the
+  home screen with every geometry check passing;
+- the keyboard was still up from the previous run, so the closed baseline was
+  taken with it open;
+- `KEYCODE_ESCAPE` dismissed the keyboard *and* closed the conversation.
+
+It now owns the app lifecycle rather than defending against each. It also cannot
+be driven by synthetic events: neither CDP `Input.dispatchTouchEvent` nor
+`element.focus()` raises the IME. Only `adb shell input tap` does — and while the
+composer was drawn under the nav bar, that tap hit Home.
+
+## Message times were a units bug, not a clock bug (2026-08-27)
+
+Reported: *"fix the timing on the msgs, it always shows 10:03 pm."*
+
+The SDK reports `timestamp` in **seconds**; `new Date()` wants milliseconds.
+Measured:
+
+```
+wall = 1787801421537 (ms)   reported = 1787801421 (s)
+```
+
+Reading seconds as milliseconds put every message in January 1970 and collapsed
+the gaps: three sends three seconds apart came out three *milliseconds* apart
+and rendered as one identical clock time. Storage was never wrong — 3 of 3
+timestamps were distinct throughout.
+
+`toMillis` in `services/conversation.ts` normalises on the way in, at all three
+points where an SDK timestamp becomes an app timestamp. It tests the magnitude
+rather than assuming, so a future SDK switching units does not move the bug by a
+factor of a thousand. No migration: the conversion happens on read, so messages
+already stored show their true original time.
+
+**A vector clock was suggested and is the wrong tool here.** It records causal
+order and deliberately carries no wall-clock time, so there would be nothing to
+display. It would address a different, real problem — two phones with skewed
+clocks producing messages that sort wrongly — which is ordering, not display.
+
+`npm run test:timestamps` covers the units, the collapse, and the zones —
+including **Asia/Kathmandu (+5:45)** and **Pacific/Chatham (+12:45)**, where a fix
+built from a fixed offset would fail, plus an assertion that the conversion
+mentions no timezone at all. It needs no network and no device.
+
+### Still open
+
+With truthful timestamps, messages from different days show only a time, so a
+conversation spanning days reads as out of order — `persist-probe` at 09:11 PM
+sits below `Herro` at 09:15 PM because it is a day later. Day separators are not
+built.
 
 ## Findings
 

@@ -86,6 +86,32 @@ html, body, #root {
    *
    * Falls back to 100% wherever visualViewport is unavailable.
    */
+  /*
+   * Follow the pan.
+   *
+   * When the keyboard opens this webview does not shrink -- it keeps its full
+   * height and the browser pans the visual viewport instead. Measured with the
+   * keyboard up: innerHeight 875, visualViewport.height 548, offsetTop 250.
+   * Sized to the visible 548 but left at layout-top 0, #root slid upward out of
+   * the visible band and exposed 250px of bare page background below the
+   * composer -- reported as "a blank grey area under the typing box".
+   *
+   * Pinning to the offset puts #root exactly over the visible band instead.
+   * `position: fixed` is relative to the layout viewport, which is the
+   * coordinate space offsetTop is expressed in.
+   *
+   * The alternative was native: pad the WebView by the IME inset so it shrinks
+   * and never pans. It works, and it costs the safe areas -- installing an
+   * OnApplyWindowInsetsListener anywhere above the WebView stops the WebView
+   * receiving insets, and every env(safe-area-inset-*) collapses to 0. Measured
+   * both ways: with the listener, envTop 0 and the header back under the clock;
+   * without it, envTop 36 and envBottom 43. Not worth trading a working header
+   * for a working keyboard.
+   */
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--vv-offset-top, 0px);
   height: var(--app-height, 100%);
   padding-top: var(--safe-top);
   padding-left: var(--safe-left);
