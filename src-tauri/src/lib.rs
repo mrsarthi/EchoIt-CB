@@ -1,5 +1,6 @@
 #[cfg(target_os = "android")]
 mod android_ctx;
+mod attachments;
 mod iroh_bridge;
 mod keychain;
 mod updates;
@@ -34,6 +35,7 @@ pub fn run() {
             keychain::keychain_delete,
             keychain::keychain_available,
             updates::check_for_update,
+            attachments::save_attachment,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

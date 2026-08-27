@@ -13,13 +13,24 @@ import { Modal } from "../components/ui/Modal";
 import { Button } from "../components/ui/Button";
 import { useApp } from "../context/AppContext";
 import { presenceFrom, describePresence } from "../services/presence";
+import { saveToDevice, type Attachment } from "../services/attachments";
+import { describeBlobError } from "../services/attachment-format";
 import { countUnread, lastInboundAt, loadReadMarks, saveReadMarks, type ReadMarks } from "../services/unread";
 import type { MessageItem } from "./chat/ChatView";
 
 export function AppShell() {
   const isWide = useBreakpoint(840);
   useViewportHeight();
-  const { contacts, pendingRequests, messages, sendMessage, did, presenceEvidence } = useApp();
+  const {
+    contacts,
+    pendingRequests,
+    messages,
+    sendMessage,
+    sendAttachment,
+    did,
+    presenceEvidence,
+    client,
+  } = useApp();
   const [activeTab, setActiveTab] = useState<AppTab>("chats");
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationItem[]>([]);
@@ -364,6 +375,59 @@ export function AppShell() {
     });
   };
 
+  /**
+   * Send a file to whoever is open.
+   *
+   * Unlike `handleSendMessage`, this rethrows: ChatView shows the reason next
+   * to the paperclip. A file that silently fails to send is worse than a
+   * message that does -- there is no text left in the box to hint that
+   * anything happened.
+   */
+  const handleSendAttachment = async (file: File) => {
+    const peerDid = selectedConversation?.peerDid;
+    if (!peerDid) throw new Error("No conversation is open.");
+    await sendAttachment(peerDid, file);
+  };
+
+  /**
+   * Saving and opening, both routed through one place.
+   *
+   * This is the only path that writes plaintext outside the SDK's encrypted
+   * store, and it runs only on a tap. Keeping both callers here means there is
+   * one place to look when asking what the app can put on disk.
+   */
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
+  const [saveError, setSaveError] = useState("");
+
+  const saveOrOpen = useCallback(
+    async (attachment: Attachment, open: boolean) => {
+      const peerDid = selectedConversation?.peerDid;
+      if (!client || !peerDid) return;
+
+      setSaveState("saving");
+      setSaveError("");
+      try {
+        const result = await saveToDevice(client, attachment, { open });
+        setSaveState("saved");
+        if (result.openError) {
+          // Saved, but nothing on the device handles this type. Saying where it
+          // went is more use than reporting a failure that did not happen.
+          setSaveError(`Saved to ${result.path}, but nothing on this device opens that type.`);
+        }
+      } catch (error) {
+        setSaveState("failed");
+        setSaveError(describeBlobError(error));
+      }
+    },
+    [client, selectedConversation?.peerDid],
+  );
+
+  // A fresh conversation should not inherit the last one's banner.
+  useEffect(() => {
+    setSaveState("idle");
+    setSaveError("");
+  }, [selectedChatId]);
+
   /** SDK messages in the shape ChatView renders. */
   const messagesFor = (peerDid: string | undefined): MessageItem[] => {
     if (!peerDid || !did) return [];
@@ -376,6 +440,9 @@ export function AppShell() {
         hour: "2-digit",
         minute: "2-digit",
       }),
+      // The viewer captions with the instant, not the formatted string.
+      at: m.timestamp,
+      attachments: m.attachments,
     }));
   };
 
@@ -453,6 +520,18 @@ export function AppShell() {
             onBack={closeChat}
             messages={messagesFor(selectedConversation?.peerDid)}
             onSendMessage={handleSendMessage}
+            onSendAttachment={handleSendAttachment}
+            onOpenDocument={(attachment) => void saveOrOpen(attachment, true)}
+            onSaveMedia={(item) => {
+              // By hash, which is the file's identity. Size and mime were
+              // ambiguous between two same-sized files of the same type.
+              const found = messagesFor(selectedConversation.peerDid)
+                .flatMap((m) => m.attachments ?? [])
+                .find((a) => a.hash === item.hash);
+              if (found) void saveOrOpen(found, false);
+            }}
+            saveState={saveState}
+            saveError={saveError}
             onShareTicket={() => navigate({ tab: "profile", chatId: null })}
           />
         </div>
@@ -535,6 +614,18 @@ export function AppShell() {
             presenceLabel={selectedPresenceLabel}
             messages={messagesFor(selectedConversation?.peerDid)}
             onSendMessage={handleSendMessage}
+            onSendAttachment={handleSendAttachment}
+            onOpenDocument={(attachment) => void saveOrOpen(attachment, true)}
+            onSaveMedia={(item) => {
+              // By hash, which is the file's identity. Size and mime were
+              // ambiguous between two same-sized files of the same type.
+              const found = messagesFor(selectedConversation.peerDid)
+                .flatMap((m) => m.attachments ?? [])
+                .find((a) => a.hash === item.hash);
+              if (found) void saveOrOpen(found, false);
+            }}
+            saveState={saveState}
+            saveError={saveError}
             onShareTicket={() => navigate({ tab: "profile", chatId: null })}
           />
         ) : (

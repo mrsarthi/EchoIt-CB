@@ -1,6 +1,9 @@
 import { createContext, useContext, useEffect, useState, useCallback, useRef, type ReactNode } from "react";
 import { createEchoItClient, type EchoItClient } from "../transport/create-client";
 import { startPresence, emptyEvidence, type PresenceEvidence } from "../services/heartbeat";
+import { putAttachment, type Attachment } from "../services/attachments";
+import { describeBlobError } from "../services/attachment-format";
+import { releaseAttachmentUrls } from "../services/attachments";
 import {
   checkpoint,
   historyWithPeer,
@@ -61,6 +64,8 @@ export interface AppContextValue {
   /** Messages per peer did, oldest first. */
   messages: Record<string, ConversationMessage[]>;
   sendMessage: (peerDid: string, text: string) => Promise<void>;
+  /** Store a file and send a message carrying its handle. */
+  sendAttachment: (peerDid: string, file: File, caption?: string) => Promise<void>;
   acceptRequest: (peerDid: string, ticketString?: string) => Promise<void>;
   ignoreRequest: (peerDid: string) => void;
   blockPeer: (peerDid: string) => void;
@@ -445,6 +450,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => {
       window.removeEventListener("pagehide", flush);
       document.removeEventListener("visibilitychange", flush);
+      // The attachment URLs outlive any one component on purpose; this is the
+      // one place that knows nothing is looking at them any more.
+      releaseAttachmentUrls();
       // Unmounting means the client is being replaced or torn down; take the
       // last opportunity to write.
       flush();
@@ -458,6 +466,36 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!trimmed) return;
 
     const sent = await sendToPeer(client, did, peerDid, trimmed);
+    setMessages((prev) => {
+      const existing = prev[peerDid] ?? [];
+      if (existing.some((m) => m.id === sent.id)) return prev;
+      return { ...prev, [peerDid]: [...existing, sent] };
+    });
+  };
+
+  /**
+   * Send a file.
+   *
+   * Two steps, in this order: the bytes are stored locally first and the
+   * message carries only the resulting handle. If `put` fails there is no
+   * message referring to something that was never stored -- a bubble pointing
+   * at a missing file is worse than a refusal.
+   *
+   * The error is rephrased through `describeBlobError` here rather than in the
+   * view, so every caller gets the specific reason -- too big, unavailable,
+   * corrupt -- instead of one generic sentence.
+   */
+  const sendAttachment = async (peerDid: string, file: File, caption = "") => {
+    if (!client || !did) throw new Error("Client not ready");
+
+    let attachment: Attachment;
+    try {
+      attachment = await putAttachment(client, file);
+    } catch (error) {
+      throw new Error(describeBlobError(error));
+    }
+
+    const sent = await sendToPeer(client, did, peerDid, caption.trim(), [attachment]);
     setMessages((prev) => {
       const existing = prev[peerDid] ?? [];
       if (existing.some((m) => m.id === sent.id)) return prev;
@@ -768,6 +806,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         pairAndConnect,
         messages,
         sendMessage,
+        sendAttachment,
         acceptRequest,
         ignoreRequest,
         blockPeer,

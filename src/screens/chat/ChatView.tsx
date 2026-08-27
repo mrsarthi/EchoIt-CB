@@ -1,5 +1,9 @@
 import React, { useState, useRef, useEffect } from "react";
 import { ArrowLeftIcon, LockIcon, PaperclipIcon, SendIcon } from "../../components/ui/Icons";
+import { AttachmentBubble } from "../../components/media/AttachmentBubble";
+import { MediaViewer, type ViewableMedia } from "../../components/media/MediaViewer";
+import { formatSize, isViewable, MAX_ATTACHMENT_BYTES } from "../../services/attachment-format";
+import type { Attachment } from "../../services/attachments";
 import { TwoStepsChecklist, type PairingState } from "../../components/pairing/TwoStepsChecklist";
 
 export interface MessageItem {
@@ -9,6 +13,10 @@ export interface MessageItem {
   text: string;
   timestamp: string;
   status?: "staged" | "sent" | "delivered" | "read";
+  /** Handles only. The bytes are fetched by AttachmentBubble on demand. */
+  attachments?: readonly Attachment[];
+  /** Unix ms, for the viewer's caption. */
+  at?: number;
 }
 
 export interface ChatViewProps {
@@ -25,6 +33,14 @@ export interface ChatViewProps {
   messages?: MessageItem[];
   onBack?: () => void;
   onSendMessage?: (text: string) => void;
+  /** Send one file. Rejects with a sentence worth showing. */
+  onSendAttachment?: (file: File) => Promise<void>;
+  /** Hand a non-media file to the device. Absent while that is not wired. */
+  onOpenDocument?: (attachment: Attachment, url: string) => void;
+  /** Save the media on screen to the device. Absent while that is not wired. */
+  onSaveMedia?: (item: ViewableMedia) => void;
+  saveState?: "idle" | "saving" | "saved" | "failed";
+  saveError?: string;
   onShareTicket?: () => void;
   onConnectBack?: () => void;
 }
@@ -40,10 +56,20 @@ export function ChatView({
   messages = [],
   onBack,
   onSendMessage,
+  onSendAttachment,
+  onOpenDocument,
+  onSaveMedia,
+  saveState,
+  saveError,
   onShareTicket,
   onConnectBack,
 }: ChatViewProps) {
   const [inputText, setInputText] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [attachError, setAttachError] = useState("");
+  const [attaching, setAttaching] = useState(false);
+  /** Which media the viewer is showing, if any. */
+  const [viewing, setViewing] = useState<{ items: ViewableMedia[]; index: number } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -52,6 +78,72 @@ export function ChatView({
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  /**
+   * Pick a file and send it.
+   *
+   * A plain file input rather than the Tauri dialog plugin: it works in
+   * WebView2 and in Android's webview, and needs no additional capability
+   * grant. The permission surface stays exactly as it was.
+   *
+   * The size is checked here as well as in the service, so an oversized file is
+   * refused the instant it is chosen rather than after it has been read into
+   * memory and hashed.
+   */
+  const handleFilePicked = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    // Clear immediately so choosing the same file twice still fires a change.
+    event.target.value = "";
+    if (!file) return;
+
+    setAttachError("");
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      setAttachError(
+        `${file.name} is ${formatSize(file.size)}. The limit is ${formatSize(MAX_ATTACHMENT_BYTES)}.`,
+      );
+      return;
+    }
+
+    setAttaching(true);
+    try {
+      await onSendAttachment?.(file);
+    } catch (error) {
+      setAttachError((error as Error).message || "Could not send that file.");
+    } finally {
+      setAttaching(false);
+    }
+  };
+
+  /**
+   * Open the full-screen viewer on one attachment.
+   *
+   * Only viewable media goes in the list to page through — a document sitting
+   * between two photos would make the arrows lie about what comes next. The
+   * other media are only offered if their bytes are already local, since
+   * paging should never silently start a download.
+   */
+  const openViewer = (message: MessageItem, attachment: Attachment, url: string) => {
+    if (!isViewable(attachment.mime)) {
+      // A document cannot be shown here; opening it needs the device's own
+      // handler, which is wired separately.
+      onOpenDocument?.(attachment, url);
+      return;
+    }
+    setViewing({
+      items: [
+        {
+          hash: attachment.hash,
+          url,
+          mime: attachment.mime,
+          size: attachment.size,
+          name: attachment.name,
+          from: message.isOutgoing ? "You" : peerName,
+          at: message.at ?? Date.now(),
+        },
+      ],
+      index: 0,
+    });
+  };
 
   const handleSend = () => {
     if (!isConnected) return;
@@ -338,6 +430,18 @@ export function ChatView({
                   boxShadow: "var(--shadow-low)",
                 }}
               >
+                {/*
+                  Attachments above the caption, as both reference apps do it:
+                  the picture is the message and the words are about it.
+                */}
+                {msg.attachments?.map((attachment) => (
+                  <div key={attachment.hash} style={{ marginBottom: msg.text ? 8 : 0 }}>
+                    <AttachmentBubble
+                      attachment={attachment}
+                      onOpen={(url) => openViewer(msg, attachment, url)}
+                    />
+                  </div>
+                ))}
                 {msg.text}
               </div>
 
@@ -380,7 +484,23 @@ export function ChatView({
           flexShrink: 0,
         }}
       >
+        {/*
+          A plain file input, deliberately. The Tauri dialog plugin would mean
+          another capability grant; this works in WebView2 and Android's webview
+          as it stands. `accept` is left open because the point of the feature
+          is that any file can be sent.
+        */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          onChange={handleFilePicked}
+          style={{ display: "none" }}
+          aria-hidden="true"
+          tabIndex={-1}
+        />
         <button
+          onClick={() => fileInputRef.current?.click()}
+          disabled={!isConnected || attaching}
           style={{
             width: 40,
             height: 40,
@@ -391,14 +511,19 @@ export function ChatView({
             alignItems: "center",
             justifyContent: "center",
             color: "var(--color-text-muted)",
-            cursor: "not-allowed",
-            opacity: 0.5,
+            cursor: !isConnected || attaching ? "not-allowed" : "pointer",
+            opacity: !isConnected || attaching ? 0.5 : 1,
             flexShrink: 0,
             outline: "none",
           }}
-          title="Attach file (disabled in beta)"
-          aria-label="Attach file"
-          disabled
+          title={
+            !isConnected
+              ? "Connect with each other before sending files"
+              : attaching
+                ? "Sending…"
+                : "Attach a file"
+          }
+          aria-label="Attach a file"
         >
           <PaperclipIcon size={18} />
         </button>
@@ -468,6 +593,51 @@ export function ChatView({
           <SendIcon size={18} />
         </button>
       </div>
+
+      {/*
+        Why a file could not be sent, next to the thing that would send it.
+        Refusals are specific -- too big, unavailable, corrupt -- and saying
+        which one it was is what makes "try again" useful rather than noise.
+      */}
+      {attachError && (
+        <div
+          style={{
+            padding: "0 var(--space-md) var(--space-sm)",
+            fontSize: "var(--font-size-label)",
+            color: "var(--color-danger)",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}
+          role="alert"
+        >
+          <span style={{ flex: "1 1 auto" }}>{attachError}</span>
+          <button
+            onClick={() => setAttachError("")}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "var(--color-text-muted)",
+              cursor: "pointer",
+              padding: 4,
+            }}
+            aria-label="Dismiss"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {viewing && (
+        <MediaViewer
+          items={viewing.items}
+          index={viewing.index}
+          onClose={() => setViewing(null)}
+          onSave={onSaveMedia ? (item) => onSaveMedia(item) : undefined}
+          saveState={saveState}
+          saveError={saveError}
+        />
+      )}
     </div>
   );
 }

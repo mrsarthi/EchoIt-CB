@@ -16,6 +16,7 @@
 
 import type { EchoItClient } from "../transport/create-client";
 import { toMillis } from "./timestamps";
+import type { Attachment } from "./attachments";
 
 export { toMillis };
 
@@ -26,6 +27,13 @@ export interface ConversationMessage {
   content: string;
   /** Unix milliseconds. See `toMillis` — the SDK reports seconds. */
   timestamp: number;
+  /**
+   * Handles for any files sent with this message.
+   *
+   * Handles only — a hash, a size, a media type. The bytes are fetched on
+   * demand through `services/attachments`, never carried in the message.
+   */
+  attachments?: readonly Attachment[];
 }
 
 
@@ -91,15 +99,47 @@ export async function sendToPeer(
   myDid: string,
   peerDid: string,
   content: string,
+  attachments?: readonly Attachment[],
 ): Promise<ConversationMessage> {
   const channelId = openConversation(client, myDid, peerDid);
-  const sent = await client.client.chat.sendMessage({ channelId, content });
+  const sent = await client.client.chat.sendMessage({
+    channelId,
+    content,
+    // The SDK wants refs; `name` is ours and does not belong on the wire.
+    ...(attachments?.length
+      ? { attachments: attachments.map((a) => ({ hash: a.hash, size: a.size, mime: a.mime })) }
+      : {}),
+  });
   checkpoint(client);
   return {
-    id: sent.id,
-    authorDid: sent.authorDid,
-    content: sent.content,
-    timestamp: toMillis(sent.timestamp),
+    ...fromSdkMessage(sent),
+    // Keep the local filename for the sender's own view; the recipient sees
+    // what their own client makes of the media type.
+    attachments: attachments ?? fromSdkMessage(sent).attachments,
+  };
+}
+
+/**
+ * One place that turns an SDK message into the app's shape.
+ *
+ * Both read paths — stored history and live delivery — went through their own
+ * copy of this, and attachments would have had to be added to each. A field
+ * added to a structure and not to everything that reshapes it is precisely how
+ * the SDK dropped `attachments` on the wire in 0.7.0.
+ */
+function fromSdkMessage(m: {
+  id: string;
+  authorDid?: string;
+  content: string;
+  timestamp: number;
+  attachments?: readonly { hash: string; size: number; mime: string }[];
+}): ConversationMessage {
+  return {
+    id: m.id,
+    authorDid: m.authorDid,
+    content: m.content,
+    timestamp: toMillis(m.timestamp),
+    attachments: m.attachments?.map((a) => ({ hash: a.hash, size: a.size, mime: a.mime })),
   };
 }
 
@@ -111,12 +151,7 @@ export async function historyWithPeer(
 ): Promise<ConversationMessage[]> {
   const channelId = channelIdFor(myDid, peerDid);
   const history = await client.client.chat.getHistory(channelId);
-  return history.map((m) => ({
-    id: m.id,
-    authorDid: m.authorDid,
-    content: m.content,
-    timestamp: toMillis(m.timestamp),
-  }));
+  return history.map(fromSdkMessage);
 }
 
 /**
@@ -138,11 +173,6 @@ export function subscribeToPeer(
 ): () => void {
   const channelId = channelIdFor(myDid, peerDid);
   return client.client.chat.onMessage(channelId, (m) => {
-    onMessage({
-      id: m.id,
-      authorDid: m.authorDid,
-      content: m.content,
-      timestamp: toMillis(m.timestamp),
-    });
+    onMessage(fromSdkMessage(m));
   });
 }

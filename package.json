@@ -16,6 +16,7 @@
     "test:timestamps": "tsx harness/timestamp-units.mts",
     "test:presence": "tsx harness/presence-unread.mts",
     "test:presence-quic": "tsx harness/presence-quic.mts",
+    "test:attachments": "tsx harness/attachments-quic.mts",
     "android:sign": "node scripts/apply-android-signing.mjs",
     "android:activity": "node scripts/apply-android-activity.mjs",
     "android:prepare": "npm run android:sign && npm run android:activity",
