@@ -46,13 +46,23 @@ beta — no groups.
 - Pairing UI, requests list, reconnect-on-resume.
 - Android release keystore, and an APK whose fingerprint was checked against it.
 - Signed Windows installer with `.sig` artifacts and a `latest.json` whose
-  signature byte-matches the build. **Nothing published yet.**
+  signature byte-matches the build. **0.2.0 is published** for Windows and
+  Android; artifacts were downloaded back and SHA-256 compared rather than
+  trusting the upload.
+- **Presence** — a 30s ephemeral heartbeat plus `onPeerDisconnected`, so the
+  dot turns off as well as on. Proven on two phones on separate networks.
+- **Unread counts** and recent-first ordering, both drawn on a device.
+- **Media sharing** — any file type; images and video inline and full-screen;
+  documents open in the device's handler; save to device. 16MB cap, provisional
+  until a two-phone transfer says otherwise (the protocol's 64MB does not
+  complete).
 
-**Not built:** groups, read receipts, and §5b's delivery-status ladder.
+**Not built:** groups, read receipts, §5b's delivery-status ladder, and
+MediaStore — so a saved photo does not appear in the Android Gallery.
 
 **Messaging works as of 2026-08-23**, on desktop and on two phones. Running on
-SDK `0.5.0` since 2026-08-24; all three headless suites and the privacy test
-were re-run on it rather than assumed to carry forward.
+SDK `0.7.1` since 2026-08-27; every suite was re-run on it rather than assumed
+to carry forward.
 
 **Two things about it that will confuse you otherwise:**
 

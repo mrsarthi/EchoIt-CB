@@ -2,7 +2,7 @@
 
 ## Status at a glance
 
-*Last updated: 2026-08-27 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.5.0` · **🚪 GATE OPEN — two physical phones held a conversation through the real UI** · signed release artifacts built for Windows and Android, nothing published*
+*Last updated: 2026-08-28 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.7.1` · **🚪 GATE OPEN — two physical phones held a conversation through the real UI** · **0.2.0 published** for Windows and Android*
 
 | Phase | Target / Deliverable | Status | Tests | Notes |
 |---|---|---|---|---|
@@ -2122,6 +2122,118 @@ on a shared network. Phone-to-phone over mobile data is fine.
 
 `ChatView` still reports that stall as **"Invalid Ticket"**. The ticket was
 valid. Second time today it has misled a diagnosis.
+
+## Media sharing, and a CSP that blocked all of it (2026-08-27)
+
+Any file type sends; images and video render inline and open full-screen;
+documents arrive as a card and open in the device's own handler. Built on SDK
+0.7.1 blobs (stream `0x09`).
+
+A message carries only a handle -- hash, size, media type. Base64 in the body
+would be a third larger than the file, enter the conversation document
+permanently, load whole into memory on both sides, and never be deletable.
+Fetch happens **on tap**, not on arrival: pulling every file in a conversation
+unasked is somebody's data allowance.
+
+### The size cap is 16MB, and the protocol's 64MB is not usable
+
+`harness/blob-throughput.mts`, both peers in one process -- an unfair
+arrangement, so a floor rather than a rate:
+
+| | |
+|---|---|
+| 1 MB | 4.5s |
+| 8 MB | 37.1s |
+| 32 MB | 157.2s, RSS 470 MB for a 32 MB file |
+| **64 MB** | **FAILED** -- 30s stall timeout |
+
+At 64MB the error a person sees is *"nobody who has this file is online"*:
+wrong and unactionable. Flat ~1.25s per 256KB chunk regardless of size, which
+looks like a round trip per chunk rather than a pipeline -- worth a look
+upstream. Provisional until a real two-phone transfer says otherwise.
+
+### The bug that mattered: the CSP blocked every object URL
+
+`img-src 'self' data:` had no `blob:`, there was no `media-src` at all so
+`<video>` fell back to `default-src 'self'`, and `connect-src` had no `blob:`
+either -- which is why even `fetch` on the URL failed. Nothing rendered on
+either phone.
+
+**I diagnosed revoke-on-unmount instead, and said so twice.** That was a real
+latent bug -- a document-lifetime resource tied to a component lifetime, fixed
+with a cache keyed by content hash -- but it was not what was breaking the
+display. A symptom was matched to a plausible story rather than measured. The
+measurement that settled it took one command: `fetch` the blob URL and read
+`naturalWidth`.
+
+`blob:` is same-origin and created by our own code; no remote origin was added.
+
+### A test that passed while nothing worked
+
+The first driver counted `img` elements. **A blocked image is still an img
+element**, so it printed *"PASS - the receiver renders the picture"* against a
+blank screen. It now requires `complete && naturalWidth > 0`.
+
+Second false pass this session from the same habit -- asserting a thing exists
+rather than that it works. The first was the presence dot, where
+`presence-quic` passed because it exercised `presenceFrom` and never rendered
+the component holding the dot.
+
+Also fixed there: the sender was checked **once at 12s** and called a failure;
+the picture arrived moments later. Same impatience as the Windows update poll.
+And `check()` printed the failure detail beside PASS lines, producing
+*"PASS - ... (did not decode)"*.
+
+### Saving to the device
+
+A purpose-built Rust command rather than `tauri-plugin-fs`: this needs exactly
+one operation, and a filesystem capability would widen the permission surface
+well past it. `tauri-plugin-opener` was already granted, so **permissions are
+unchanged**.
+
+Filenames come from a remote peer and are untrusted -- `../../.bashrc` becomes
+`bashrc`. Three Rust tests cover traversal, ordinary names, and never returning
+empty. Saving twice yields `name (2).jpg`.
+
+This is the only path that writes plaintext outside the SDK's encrypted store.
+It runs only on a tap and is documented as a deliberate exception.
+
+**Not done:** MediaStore, so saved photos do not appear in the Android Gallery.
+Stated in the release notes rather than left for a tester to discover.
+
+### Verified
+
+RMX3785 and I2404, separate networks: sender `rendered 4`, receiver
+`rendered 2`, and `rendered 2` again after leaving the conversation and
+returning -- the only path where the revoke bug appeared.
+
+Suites: attachments 14/14 over real QUIC, bridge 3/3, presence, timestamps,
+7 Rust tests, typecheck clean. Guardrails re-run: no new dependencies, no
+telemetry, no remote origins.
+
+### Three edits reverted on disk mid-session
+
+`apply-android-activity.mjs`, `messagesFor` in AppShell, and the media driver
+all lost confirmed edits. The AppShell one shipped a build where attachments
+never reached the render. Python heredoc edits were the common factor; Write
+and Edit survived. Every edit is now verified by grep immediately after making
+it, in the same command.
+
+## Released 0.2.0 (2026-08-27)
+
+Media sharing, presence, unread counts, recent-first ordering.
+
+Verified from outside rather than trusting the upload: both binaries downloaded
+back and SHA-256 compared byte-for-byte, APK fingerprint matched
+`2ff2e896…e199bd`, `releases/latest/download/latest.json` serves 0.2.0 and
+points at the `.exe`, and the manifest signature is byte-identical to the
+artifact's `.sig` with its embedded comment naming that same file.
+
+Icon: 6 of 6 frames in the binary. Both Windows bundles signed.
+
+**The four signing files remain on one machine.** Flagged on three consecutive
+releases now, still unconfirmed off-machine. Losing the keystore forces every
+Android tester to uninstall, which wipes the message store.
 
 ## Findings
 
