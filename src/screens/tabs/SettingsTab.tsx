@@ -154,11 +154,30 @@ export function SettingsTab() {
             APPEARANCE & THEME
           </span>
           <Card style={{ display: "flex", flexDirection: "column", gap: "var(--space-md)" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "var(--space-sm)" }}>
+            {/*
+              Wraps rather than a fixed three columns.
+
+              This was `repeat(3, 1fr)`. A `1fr` track has an automatic minimum
+              of min-content, so it cannot shrink below the label plus the
+              button's fixed padding — on a phone with the system font at 1.15
+              the System button ran 55px past the card and 8px off the screen.
+              Measured: right edge 368, card ends at 313, viewport 360.
+
+              Wrapping means a button that no longer fits moves to its own line
+              instead of out of the window, at any font size the system offers.
+            */}
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: "var(--space-sm)",
+              }}
+            >
               <Button
                 variant={theme === "light" ? "primary" : "secondary"}
                 size="md"
                 onClick={() => setTheme("light")}
+                style={{ flex: "1 1 auto" }}
                 icon={<SunIcon size={16} />}
               >
                 Light
@@ -167,6 +186,7 @@ export function SettingsTab() {
                 variant={theme === "dark" ? "primary" : "secondary"}
                 size="md"
                 onClick={() => setTheme("dark")}
+                style={{ flex: "1 1 auto" }}
                 icon={<MoonIcon size={16} />}
               >
                 Dark
@@ -175,6 +195,7 @@ export function SettingsTab() {
                 variant={theme === "system" ? "primary" : "secondary"}
                 size="md"
                 onClick={() => setTheme("system")}
+                style={{ flex: "1 1 auto" }}
               >
                 System
               </Button>
