@@ -128,7 +128,13 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   user-select: none;
-  touch-action: manipulation;
+  /*
+   * `manipulation` removes the double-tap zoom delay but still permits pinch.
+   * `pan-x pan-y` is what actually stops a two-finger pinch zooming the whole
+   * app -- reported as every screen behaving like a photo. Scrolling is
+   * unaffected. The media viewer does its own zoom on the image itself.
+   */
+  touch-action: pan-x pan-y;
 }
 
 /* Typography elements */
@@ -182,4 +188,35 @@ code, pre, .mono {
 
 ::-webkit-scrollbar-thumb:hover {
   background-color: var(--color-text-muted);
+}
+
+/*
+ * The typing indicator's dots.
+ *
+ * Defined here rather than inline because keyframes cannot be expressed in a
+ * style attribute. Used by components/chat/TypingBubble.
+ */
+@keyframes echoit-typing-dot {
+  0%, 60%, 100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+/*
+ * An indicator that animates for as long as someone is typing is precisely
+ * what this setting is meant to stop. The dots stay visible, at their resting
+ * opacity, so the information is not lost with the motion.
+ */
+@media (prefers-reduced-motion: reduce) {
+  @keyframes echoit-typing-dot {
+    0%, 100% {
+      opacity: 0.6;
+      transform: none;
+    }
+  }
 }

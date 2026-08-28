@@ -1,9 +1,20 @@
 import { createContext, useContext, useEffect, useState, useCallback, useRef, type ReactNode } from "react";
 import { createEchoItClient, type EchoItClient } from "../transport/create-client";
-import { startPresence, emptyEvidence, type PresenceEvidence } from "../services/heartbeat";
+import {
+  startPresence,
+  sendTyping,
+  emptyEvidence,
+  type PresenceEvidence,
+} from "../services/heartbeat";
+import { shouldSendTyping } from "../services/typing";
 import { putAttachment, type Attachment } from "../services/attachments";
 import { describeBlobError } from "../services/attachment-format";
 import { releaseAttachmentUrls } from "../services/attachments";
+import {
+  initialWindow,
+  grow,
+  type HistoryWindow,
+} from "../services/history-window";
 import {
   checkpoint,
   historyWithPeer,
@@ -63,9 +74,15 @@ export interface AppContextValue {
   pairAndConnect: (ticketString: string, name: string) => Promise<void>;
   /** Messages per peer did, oldest first. */
   messages: Record<string, ConversationMessage[]>;
-  sendMessage: (peerDid: string, text: string) => Promise<void>;
+  sendMessage: (peerDid: string, text: string, replyTo?: readonly string[]) => Promise<void>;
   /** Store a file and send a message carrying its handle. */
   sendAttachment: (peerDid: string, file: File, caption?: string) => Promise<void>;
+  /** Reveal an older slice of a conversation. Resolves when it is in. */
+  loadOlderMessages: (peerDid: string) => Promise<void>;
+  /** Whether a conversation has anything older than what is loaded. */
+  hasOlderMessages: (peerDid: string) => boolean;
+  /** Say we are composing. Throttled internally; safe to call per keystroke. */
+  notifyTyping: (peerDid: string) => void;
   acceptRequest: (peerDid: string, ticketString?: string) => Promise<void>;
   ignoreRequest: (peerDid: string) => void;
   blockPeer: (peerDid: string) => void;
@@ -78,6 +95,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AppState>("checking");
   const [client, setClient] = useState<EchoItClient | null>(null);
   const [presenceEvidence, setPresenceEvidence] = useState<PresenceEvidence>(emptyEvidence);
+  /**
+   * How far back each conversation is loaded.
+   *
+   * A ref rather than state: it changes during a load and nothing renders
+   * from it directly, so putting it in state would re-render every
+   * conversation to record a number only the loader reads.
+   */
+  const historyWindows = useRef<Record<string, HistoryWindow>>({});
   const [did, setDid] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [keychainAvailable, setKeychainAvailable] = useState<boolean>(true);
@@ -388,8 +413,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }),
       );
 
-      void historyWithPeer(client, did, contact.peerDid)
+      const window = historyWindows.current[contact.peerDid] ?? initialWindow();
+      historyWindows.current[contact.peerDid] = window;
+
+      void historyWithPeer(client, did, contact.peerDid, window.size)
         .then((history) => {
+          // Fewer than asked for means this is the whole conversation, so the
+          // view must not offer to load more that does not exist.
+          historyWindows.current[contact.peerDid] = {
+            ...window,
+            hasMore: history.length >= window.size,
+          };
           if (!live || history.length === 0) return;
           setMessages((prev) => {
             const existing = prev[contact.peerDid] ?? [];
@@ -460,18 +494,81 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [client]);
 
   /** Send to a peer and show it immediately. */
-  const sendMessage = async (peerDid: string, text: string) => {
+  const sendMessage = async (
+    peerDid: string,
+    text: string,
+    replyTo?: readonly string[],
+  ) => {
     if (!client || !did) throw new Error("Client not ready");
     const trimmed = text.trim();
     if (!trimmed) return;
 
-    const sent = await sendToPeer(client, did, peerDid, trimmed);
+    const sent = await sendToPeer(client, did, peerDid, trimmed, undefined, replyTo);
     setMessages((prev) => {
       const existing = prev[peerDid] ?? [];
       if (existing.some((m) => m.id === sent.id)) return prev;
       return { ...prev, [peerDid]: [...existing, sent] };
     });
   };
+
+  /**
+   * Reveal an older slice of a conversation.
+   *
+   * The read is local -- history is a CRDT document on this device -- so this
+   * returns in milliseconds. The window exists to limit how many bubbles are
+   * built at once, not to hide a network wait.
+   *
+   * `getHistory` has no cursor: `limit` caps to the most recent N. Paging
+   * backwards is therefore asking for a larger window and keeping the extra,
+   * which is why the merge below is by id rather than by position.
+   */
+  const loadOlderMessages = useCallback(
+    async (peerDid: string) => {
+      if (!client || !did) return;
+      const current = historyWindows.current[peerDid] ?? initialWindow();
+      if (!current.hasMore) return;
+
+      const next = { ...current, size: current.size + 60 };
+      const history = await historyWithPeer(client, did, peerDid, next.size);
+      historyWindows.current[peerDid] = grow(current, history.length);
+
+      setMessages((prev) => {
+        const existing = prev[peerDid] ?? [];
+        const seen = new Set(existing.map((m) => m.id));
+        const older = history.filter((m) => !seen.has(m.id));
+        if (older.length === 0) return prev;
+        const merged = [...older, ...existing];
+        merged.sort((a, b) => a.timestamp - b.timestamp);
+        return { ...prev, [peerDid]: merged };
+      });
+    },
+    [client, did],
+  );
+
+  /**
+   * Tell a peer we are typing.
+   *
+   * Called from a keystroke handler, so the throttle lives here rather than at
+   * the call site — a per-character packet would be wasteful, and a far more
+   * precise disclosure than "someone is composing something".
+   */
+  const lastTypingSentAt = useRef<Record<string, number>>({});
+
+  const notifyTyping = useCallback(
+    (peerDid: string) => {
+      if (!client || !did) return;
+      const now = Date.now();
+      if (!shouldSendTyping(lastTypingSentAt.current[peerDid], now)) return;
+      lastTypingSentAt.current[peerDid] = now;
+      void sendTyping(client, did, peerDid);
+    },
+    [client, did],
+  );
+
+  const hasOlderMessages = useCallback(
+    (peerDid: string) => historyWindows.current[peerDid]?.hasMore ?? false,
+    [],
+  );
 
   /**
    * Send a file.
@@ -807,6 +904,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         messages,
         sendMessage,
         sendAttachment,
+        loadOlderMessages,
+        hasOlderMessages,
+        notifyTyping,
         acceptRequest,
         ignoreRequest,
         blockPeer,

@@ -1,10 +1,19 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { ArrowLeftIcon, LockIcon, PaperclipIcon, SendIcon } from "../../components/ui/Icons";
 import { AttachmentBubble } from "../../components/media/AttachmentBubble";
 import { MediaViewer, type ViewableMedia } from "../../components/media/MediaViewer";
 import { formatSize, isViewable, MAX_ATTACHMENT_BYTES } from "../../services/attachment-format";
 import type { Attachment } from "../../services/attachments";
 import { TwoStepsChecklist, type PairingState } from "../../components/pairing/TwoStepsChecklist";
+import { shouldLoadMore, preservedScrollTop } from "../../services/history-window";
+import { SwipeToReply } from "../../components/chat/SwipeToReply";
+import { TypingBubble } from "../../components/chat/TypingBubble";
+import {
+  toggleTarget,
+  previewOfMessage,
+  MAX_CHAIN,
+  type ReplyTarget,
+} from "../../services/reply";
 
 export interface MessageItem {
   id: string;
@@ -17,6 +26,8 @@ export interface MessageItem {
   attachments?: readonly Attachment[];
   /** Unix ms, for the viewer's caption. */
   at?: number;
+  /** Ids of messages this one answers, oldest first. */
+  replyTo?: readonly string[];
 }
 
 export interface ChatViewProps {
@@ -32,7 +43,7 @@ export interface ChatViewProps {
   presenceLabel?: string;
   messages?: MessageItem[];
   onBack?: () => void;
-  onSendMessage?: (text: string) => void;
+  onSendMessage?: (text: string, replyTo?: readonly string[]) => void;
   /** Send one file. Rejects with a sentence worth showing. */
   onSendAttachment?: (file: File) => Promise<void>;
   /** Hand a non-media file to the device. Absent while that is not wired. */
@@ -43,6 +54,14 @@ export interface ChatViewProps {
   saveError?: string;
   onShareTicket?: () => void;
   onConnectBack?: () => void;
+  /** Reveal an older slice. Resolves once the messages are in. */
+  onLoadOlder?: () => Promise<void>;
+  /** Called as the user types. Throttled by the caller; safe per keystroke. */
+  onTyping?: () => void;
+  /** Whether anything older exists, so the view does not offer what is not there. */
+  hasOlder?: boolean;
+  /** The peer is composing right now — shows the bubble at the end of the stream. */
+  peerIsTyping?: boolean;
 }
 
 export function ChatView({
@@ -63,8 +82,20 @@ export function ChatView({
   saveError,
   onShareTicket,
   onConnectBack,
+  onLoadOlder,
+  onTyping,
+  hasOlder = false,
+  peerIsTyping = false,
 }: ChatViewProps) {
   const [inputText, setInputText] = useState("");
+  /**
+   * Messages this reply answers, in the order they were swiped.
+   *
+   * A list rather than a single target: swiping several and answering them
+   * together is the requested behaviour, and earlier versions of this app had
+   * it. Capped so a runaway chain cannot fill the composer with quotes.
+   */
+  const [replyChain, setReplyChain] = useState<ReplyTarget[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [attachError, setAttachError] = useState("");
   const [attaching, setAttaching] = useState(false);
@@ -75,9 +106,109 @@ export function ChatView({
 
   const isConnected = pairingState === "bilateral_connected";
 
+  /*
+   * Where the conversation sits when you arrive, and when it moves.
+   *
+   * The first version was `scrollIntoView({ behavior: "smooth" })` on every
+   * change to `messages`, which produced three problems at once, all reported:
+   *
+   *  - opening a conversation *animated* down instead of already being at the
+   *    bottom, which no messenger does;
+   *  - the animation was started before images had loaded, so the content grew
+   *    underneath it and it stopped short, leaving the newest message just off
+   *    screen and needing a manual nudge;
+   *  - it fired on every change, so reading older messages yanked you back down
+   *    whenever anything arrived.
+   *
+   * So: jump instantly on open, follow new messages only while already at the
+   * bottom, and re-anchor when late content changes the height.
+   */
+  const streamRef = useRef<HTMLDivElement>(null);
+
+  /*
+   * "Pinned" means: keep this conversation against its newest message.
+   *
+   * It starts true and is only cleared when a **person** scrolls away. That
+   * distinction is the whole fix. The previous version updated the flag from
+   * the `scroll` event, which the browser also fires while laying content out
+   * — so during the initial layout a scroll event arrived, the view was not yet
+   * at the bottom, the flag was cleared, and every later attempt to re-anchor
+   * declined to run.
+   *
+   * Measured on a device: scrollHeight 1677, clientHeight 622, and scrollTop
+   * parked at 686 — 369px short — stable for five seconds with the images
+   * already decoded. Nothing was still growing; the anchor had simply been
+   * switched off by a scroll event nobody made.
+   *
+   * Touch and wheel are the honest signals of intent, so those clear the pin.
+   */
+  const pinnedRef = useRef(true);
+  const userDrivingRef = useRef(false);
+
+  /** Straight to the end. `scrollTop` rather than scrollTo: no animation to interrupt. */
+  const jumpToBottom = useCallback(() => {
+    const stream = streamRef.current;
+    if (!stream) return;
+    stream.scrollTop = stream.scrollHeight;
+  }, []);
+
+  /** Within a message's height of the end counts as at the bottom. */
+  const nearBottom = () => {
+    const stream = streamRef.current;
+    if (!stream) return true;
+    return stream.scrollHeight - stream.scrollTop - stream.clientHeight < 120;
+  };
+
+  /*
+   * Hold the bottom while the view settles.
+   *
+   * Opening a conversation lays out in several passes — fonts, bubble wrapping,
+   * images decoding — and each one changes the height after the scroll that was
+   * meant to reach the end. Rather than guess how many frames that takes, this
+   * re-pins on every frame until the height stops changing, then stops.
+   */
+  const holdBottom = useCallback(() => {
+    let frame = 0;
+    let lastHeight = -1;
+    let stableFrames = 0;
+
+    const step = () => {
+      const stream = streamRef.current;
+      if (!stream || !pinnedRef.current) return;
+
+      jumpToBottom();
+
+      stableFrames = stream.scrollHeight === lastHeight ? stableFrames + 1 : 0;
+      lastHeight = stream.scrollHeight;
+
+      // Three unchanged frames, or a second of trying. Whichever comes first:
+      // an image that never decodes must not leave this running forever.
+      if (stableFrames < 3 && frame++ < 60) {
+        requestAnimationFrame(step);
+      }
+    };
+    requestAnimationFrame(step);
+  }, [jumpToBottom]);
+
+  // Opening a conversation: be at the bottom, not travel there.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    pinnedRef.current = true;
+    userDrivingRef.current = false;
+    jumpToBottom();
+    holdBottom();
+  }, [peerDid, jumpToBottom, holdBottom]);
+
+  // New messages follow only while pinned, so reading older ones is not
+  // interrupted by an arrival.
+  useEffect(() => {
+    if (pinnedRef.current) holdBottom();
+  }, [messages.length, holdBottom]);
+
+  // The typing bubble appearing and disappearing changes the height too, and
+  // it is the one thing guaranteed to happen right before a message arrives.
+  useEffect(() => {
+    if (peerIsTyping && pinnedRef.current) holdBottom();
+  }, [peerIsTyping, holdBottom]);
 
   /**
    * Pick a file and send it.
@@ -145,15 +276,111 @@ export function ChatView({
     });
   };
 
+  /**
+   * Put a swiped message into the chain, or take it back out.
+   *
+   * The preview is resolved here rather than at send time: the message may
+   * have scrolled out of the window by then, and a quote that cannot render
+   * what it is quoting is worse than no quote.
+   */
+  /**
+   * Bring a quoted message into view.
+   *
+   * Only works while the original is inside the loaded window; older than that
+   * and the quote says so instead of pretending to be tappable.
+   */
+  const scrollToMessage = (id: string) => {
+    const el = streamRef.current?.querySelector(`[data-message-id="${id}"]`);
+    if (!el) return;
+    // A person tapping a quote is deliberately leaving the bottom.
+    pinnedRef.current = false;
+    userDrivingRef.current = true;
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+  };
+
+  const addToChain = (msg: MessageItem) => {
+    setReplyChain((chain) => {
+      const next = toggleTarget(chain, {
+        id: msg.id,
+        author: msg.isOutgoing ? "You" : peerName,
+        preview: previewOfMessage(msg.text, msg.attachments),
+      });
+      // Silently dropping the newest swipe would read as the gesture failing,
+      // so the oldest is dropped instead and the chain stays at the cap.
+      return next.length > MAX_CHAIN ? next.slice(next.length - MAX_CHAIN) : next;
+    });
+    // Replying means writing, so put the caret where the person is going.
+    textareaRef.current?.focus();
+  };
+
   const handleSend = () => {
     if (!isConnected) return;
     const trimmed = inputText.trim();
     if (!trimmed) return;
-    onSendMessage?.(trimmed);
+    onSendMessage?.(trimmed, replyChain.map((t) => t.id));
     setInputText("");
+    setReplyChain([]);
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
+      /*
+       * Keep the keyboard up.
+       *
+       * Tapping Send moves focus to the button, and Android closes the
+       * keyboard the moment the text field loses it -- so every message cost
+       * a tap back into the box. Enter-to-send never had the problem, which
+       * is why it went unnoticed.
+       *
+       * Refocusing synchronously here is not enough on its own; the button
+       * also declines focus on pointerdown, so the field never loses it.
+       */
+      textareaRef.current.focus();
     }
+    // Sending always means you want to see it.
+    pinnedRef.current = true;
+    holdBottom();
+  };
+
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const loadingRef = useRef(false);
+
+  /**
+   * Remembers whether the reader is at the end, and fetches older messages
+   * when they reach the top.
+   *
+   * The scroll position is captured before the load and restored after.
+   * Prepending pushes everything down by the height of what was added, so
+   * without that the view jumps backwards exactly when the reader asked for
+   * more — losing their place as a reward for scrolling up.
+   */
+  const onStreamScroll = () => {
+    const stream = streamRef.current;
+    if (!stream) return;
+
+    // Only a person's scroll changes the pin. The browser fires this event
+    // during layout too, and treating that as intent is what left the view
+    // parked short of the newest message.
+    if (userDrivingRef.current) pinnedRef.current = nearBottom();
+
+    if (!onLoadOlder) return;
+    if (!shouldLoadMore(stream.scrollTop, { size: 0, hasMore: hasOlder }, loadingRef.current)) return;
+
+    loadingRef.current = true;
+    setLoadingOlder(true);
+    const previousHeight = stream.scrollHeight;
+    const previousTop = stream.scrollTop;
+
+    void onLoadOlder()
+      .then(() => {
+        // After paint, or the new height is not measurable yet.
+        requestAnimationFrame(() => {
+          const el = streamRef.current;
+          if (el) el.scrollTop = preservedScrollTop(previousHeight, el.scrollHeight, previousTop);
+        });
+      })
+      .finally(() => {
+        loadingRef.current = false;
+        setLoadingOlder(false);
+      });
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -171,6 +398,11 @@ export function ChatView({
     const target = e.target;
     target.style.height = "auto";
     target.style.height = `${Math.min(target.scrollHeight, 120)}px`;
+
+    // Only while there is something to compose. Announcing "typing…" as
+    // someone deletes their last character back to an empty box is noise, and
+    // it keeps the signal to moments a message might actually arrive.
+    if (target.value.trim()) onTyping?.();
   };
 
   return (
@@ -363,6 +595,12 @@ export function ChatView({
 
       {/* Message Stream Area */}
       <div
+        ref={streamRef}
+        onScroll={onStreamScroll}
+        // Touch and wheel are the honest signals that a person is moving the
+        // list; `scroll` alone cannot tell them from a relayout.
+        onTouchStart={() => { userDrivingRef.current = true; }}
+        onWheel={() => { userDrivingRef.current = true; }}
         style={{
           flex: 1,
           overflowY: "auto",
@@ -372,6 +610,25 @@ export function ChatView({
           gap: "var(--space-md)",
         }}
       >
+        {/*
+          Older messages are a local read, so this is rarely on screen for
+          long. It is here so the list does not silently change length under
+          the reader -- not to fill a wait that mostly does not exist.
+        */}
+        {loadingOlder && (
+          <div
+            style={{
+              textAlign: "center",
+              padding: "var(--space-sm)",
+              fontSize: "var(--font-size-label)",
+              color: "var(--color-text-muted)",
+              flexShrink: 0,
+            }}
+          >
+            Loading earlier messages…
+          </div>
+        )}
+
         {messages.length === 0 ? (
           <div
             style={{
@@ -401,8 +658,13 @@ export function ChatView({
           </div>
         ) : (
           messages.map((msg) => (
-            <div
+            <SwipeToReply
               key={msg.id}
+              selected={replyChain.some((t) => t.id === msg.id)}
+              onReply={() => addToChain(msg)}
+            >
+            <div
+              data-message-id={msg.id}
               style={{
                 display: "flex",
                 flexDirection: "column",
@@ -442,6 +704,58 @@ export function ChatView({
                     />
                   </div>
                 ))}
+                {/*
+                  What this message answers, above its own text.
+
+                  Resolved against the loaded window, so a quote whose original
+                  has scrolled out of the window says so rather than rendering
+                  an empty block. Tapping scrolls to the original when it is
+                  present.
+                */}
+                {msg.replyTo?.map((id) => {
+                  const original = messages.find((m) => m.id === id);
+                  return (
+                    <div
+                      key={id}
+                      onClick={() => original && scrollToMessage(id)}
+                      style={{
+                        borderLeft: "3px solid var(--color-primary)",
+                        paddingLeft: 8,
+                        marginBottom: 6,
+                        cursor: original ? "pointer" : "default",
+                        opacity: original ? 1 : 0.6,
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontSize: "var(--font-size-label)",
+                          color: "var(--color-primary)",
+                          fontWeight: "var(--font-weight-semibold)",
+                        }}
+                      >
+                        {original
+                          ? original.isOutgoing
+                            ? "You"
+                            : peerName
+                          : "Earlier message"}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: "var(--font-size-label)",
+                          color: "var(--color-text-muted)",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          maxWidth: 220,
+                        }}
+                      >
+                        {original
+                          ? previewOfMessage(original.text, original.attachments)
+                          : "Scroll up to load it"}
+                      </div>
+                    </div>
+                  );
+                })}
                 {msg.text}
               </div>
 
@@ -466,10 +780,124 @@ export function ChatView({
                 )}
               </div>
             </div>
+            </SwipeToReply>
           ))
         )}
+        {/*
+          At the end of the stream, where the message being typed will appear.
+          A header line saying the same thing was easy to read past.
+        */}
+        {peerIsTyping && <TypingBubble peerName={peerName} />}
+
         <div ref={messagesEndRef} />
       </div>
+
+      {/*
+        What this reply is answering.
+
+        Above the composer rather than inside it, so a chain of several quotes
+        pushes the conversation up instead of growing the text box downwards
+        into the keyboard.
+      */}
+      {replyChain.length > 0 && (
+        <div
+          style={{
+            borderTop: "1px solid var(--color-border)",
+            backgroundColor: "var(--color-surface-dim)",
+            padding: "var(--space-sm) var(--space-md)",
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+            maxHeight: 168,
+            overflowY: "auto",
+            flexShrink: 0,
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              fontSize: "var(--font-size-label)",
+              color: "var(--color-text-muted)",
+            }}
+          >
+            <span>
+              {replyChain.length === 1
+                ? "Replying to 1 message"
+                : `Replying to ${replyChain.length} messages`}
+            </span>
+            <button
+              onClick={() => setReplyChain([])}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "var(--color-text-muted)",
+                cursor: "pointer",
+                padding: "2px 4px",
+                fontSize: "var(--font-size-label)",
+              }}
+            >
+              Clear
+            </button>
+          </div>
+
+          {replyChain.map((target) => (
+            <div
+              key={target.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                // The bar is the affordance people recognise for a quote.
+                borderLeft: "3px solid var(--color-primary)",
+                paddingLeft: 8,
+                minWidth: 0,
+              }}
+            >
+              <span style={{ minWidth: 0, flex: "1 1 auto" }}>
+                <span
+                  style={{
+                    display: "block",
+                    fontSize: "var(--font-size-label)",
+                    color: "var(--color-primary)",
+                    fontWeight: "var(--font-weight-semibold)",
+                  }}
+                >
+                  {target.author}
+                </span>
+                <span
+                  style={{
+                    display: "block",
+                    fontSize: "var(--font-size-label)",
+                    color: "var(--color-text-muted)",
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {target.preview}
+                </span>
+              </span>
+              <button
+                onClick={() => setReplyChain((c) => c.filter((t) => t.id !== target.id))}
+                aria-label={`Remove reply to ${target.author}`}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "var(--color-text-muted)",
+                  cursor: "pointer",
+                  padding: 4,
+                  flexShrink: 0,
+                  lineHeight: 1,
+                }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Message Composer Bar */}
       <div
@@ -571,6 +999,9 @@ export function ChatView({
 
         <button
           onClick={handleSend}
+          // Taking focus here is what closed the keyboard; declining it keeps
+          // the caret in the composer while the click still fires.
+          onPointerDown={(e) => e.preventDefault()}
           disabled={!isConnected || !inputText.trim()}
           style={{
             width: 40,

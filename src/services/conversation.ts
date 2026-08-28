@@ -17,6 +17,7 @@
 import type { EchoItClient } from "../transport/create-client";
 import { toMillis } from "./timestamps";
 import type { Attachment } from "./attachments";
+import { decodeLegacyReply } from "./reply";
 
 export { toMillis };
 
@@ -34,6 +35,8 @@ export interface ConversationMessage {
    * demand through `services/attachments`, never carried in the message.
    */
   attachments?: readonly Attachment[];
+  /** Ids of the messages this one answers, oldest first. */
+  replyTo?: readonly string[];
 }
 
 
@@ -100,11 +103,15 @@ export async function sendToPeer(
   peerDid: string,
   content: string,
   attachments?: readonly Attachment[],
+  replyTo?: readonly string[],
 ): Promise<ConversationMessage> {
   const channelId = openConversation(client, myDid, peerDid);
   const sent = await client.client.chat.sendMessage({
     channelId,
     content,
+    // Its own field as of 0.7.2, rather than a marker every client would have
+    // to know to strip forever.
+    ...(replyTo?.length ? { replyTo } : {}),
     // The SDK wants refs; `name` is ours and does not belong on the wire.
     ...(attachments?.length
       ? { attachments: attachments.map((a) => ({ hash: a.hash, size: a.size, mime: a.mime })) }
@@ -116,6 +123,7 @@ export async function sendToPeer(
     // Keep the local filename for the sender's own view; the recipient sees
     // what their own client makes of the media type.
     attachments: attachments ?? fromSdkMessage(sent).attachments,
+    replyTo: replyTo && replyTo.length > 0 ? replyTo : undefined,
   };
 }
 
@@ -133,13 +141,26 @@ function fromSdkMessage(m: {
   content: string;
   timestamp: number;
   attachments?: readonly { hash: string; size: number; mime: string }[];
+  replyTo?: readonly string[];
 }): ConversationMessage {
+  /*
+   * References come from the field as of SDK 0.7.2.
+   *
+   * Messages sent before it carry them on a control line inside `content`, and
+   * those live in conversation documents permanently — a CRDT does not forget.
+   * The legacy reader runs only when the field is absent, so someone's older
+   * replies keep their quotes instead of showing a line of machine text.
+   */
+  const legacy = m.replyTo ? { replyTo: [] as string[], content: m.content } : decodeLegacyReply(m.content);
+  const replyTo = m.replyTo ?? legacy.replyTo;
+  const content = legacy.content;
   return {
     id: m.id,
     authorDid: m.authorDid,
-    content: m.content,
+    content,
     timestamp: toMillis(m.timestamp),
     attachments: m.attachments?.map((a) => ({ hash: a.hash, size: a.size, mime: a.mime })),
+    replyTo: replyTo.length > 0 ? replyTo : undefined,
   };
 }
 
@@ -148,9 +169,13 @@ export async function historyWithPeer(
   client: EchoItClient,
   myDid: string,
   peerDid: string,
+  limit?: number,
 ): Promise<ConversationMessage[]> {
   const channelId = channelIdFor(myDid, peerDid);
-  const history = await client.client.chat.getHistory(channelId);
+  // `limit` caps to the most RECENT messages -- there is no cursor, so paging
+  // backwards means asking for a bigger window, not a different page. See
+  // services/history-window.
+  const history = await client.client.chat.getHistory(channelId, limit);
   return history.map(fromSdkMessage);
 }
 

@@ -15,6 +15,11 @@
 
 import { presenceFrom, describePresence, ONLINE_WINDOW_MS, HEARTBEAT_INTERVAL_MS } from '../src/services/presence.js';
 import { countUnread, lastInboundAt } from '../src/services/unread.js';
+import {
+  newestOf,
+  lastActivityOf,
+  orderByRecency,
+} from '../src/services/conversation-order.js';
 
 const failures: string[] = [];
 const check = (name: string, ok: boolean, detail = '') => {
@@ -57,13 +62,19 @@ check(
 
 console.log('\n▸ Ordering');
 
-// The comparator AppShell sorts by, applied to the case that motivated it.
+/*
+ * The real functions, not a copy of them.
+ *
+ * This block used to redeclare the comparator inline and assert against its own
+ * copy, so it would have passed with the app's ordering deleted entirely. It
+ * proved the duplicate worked.
+ */
 const rows = [
   { name: 'never written to', lastActivityAt: undefined as number | undefined },
   { name: 'yesterday', lastActivityAt: ago(26 * 60 * 60 * 1000) },
   { name: 'just now', lastActivityAt: ago(1000) },
 ];
-const ordered = [...rows].sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0));
+const ordered = orderByRecency(rows);
 check(
   'the most recent conversation comes first',
   ordered[0].name === 'just now',
@@ -73,6 +84,36 @@ check(
   'a contact never written to sorts last, not first',
   ordered[ordered.length - 1].name === 'never written to',
   'undefined compared numerically would put them at the top',
+);
+
+// The reported symptom — rows sitting in the order contacts were added — is
+// exactly what an all-undefined sort key produces, because a stable sort leaves
+// equal elements where they are. That is what a chat list looks like in the
+// moment before history has loaded.
+const unloaded = ['first', 'second', 'third'].map((name) => ({
+  name,
+  lastActivityAt: undefined as number | undefined,
+}));
+check(
+  'with no history loaded, the order is stable rather than scrambled',
+  orderByRecency(unloaded).map((r) => r.name).join() === 'first,second,third',
+  'a comparator returning NaN would leave this unspecified',
+);
+
+// Threads are normally ascending, but a live arrival is appended in the order
+// it turns up: a message that syncs late lands at the END while being OLDER
+// than its neighbour. The row's time, preview and position all read from this,
+// so taking the last element would show one time and sort by another.
+const outOfOrder = [{ timestamp: 5_000 }, { timestamp: 9_000 }, { timestamp: 7_000 }];
+check(
+  'the newest message is found by time, not by position',
+  newestOf(outOfOrder)?.timestamp === 9_000,
+  `got ${newestOf(outOfOrder)?.timestamp}, last element is ${outOfOrder[outOfOrder.length - 1].timestamp}`,
+);
+check(
+  'an empty conversation has no activity time',
+  lastActivityOf([]) === undefined,
+  'zero would give a never-used contact a claim on the top of the list',
 );
 
 console.log('\n▸ Presence');

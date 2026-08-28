@@ -2,7 +2,7 @@
 
 ## Status at a glance
 
-*Last updated: 2026-08-28 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.7.1` · **🚪 GATE OPEN — two physical phones held a conversation through the real UI** · **0.2.0 published** for Windows and Android*
+*Last updated: 2026-08-28 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.7.2` · **🚪 GATE OPEN — two physical phones held a conversation through the real UI** · **0.2.0 published** for Windows and Android*
 
 | Phase | Target / Deliverable | Status | Tests | Notes |
 |---|---|---|---|---|
@@ -2234,6 +2234,143 @@ Icon: 6 of 6 frames in the binary. Both Windows bundles signed.
 **The four signing files remain on one machine.** Flagged on three consecutive
 releases now, still unconfirmed off-machine. Losing the keystore forces every
 Android tester to uninstall, which wipes the message store.
+
+## Typing, replies, and four reported bugs (2026-08-28)
+
+SDK **0.7.2**. All suites re-run on it rather than assumed to carry forward.
+
+### Typing indicator
+
+Rides stream `0x07` beside the presence heartbeat: repeated every 2s while
+composing, believed for 5s, and never written to disk. There is deliberately no
+"stopped" message — a stop can be lost, and an indicator that latches on because
+a packet went missing is worse than one that lapses by itself.
+
+Two signals now share the stream, so the check that matters most is that they
+stay distinguishable: a heartbeat misread as typing would show every contact
+with the app open as composing.
+
+**The header line was not enough.** Reported: *"I didn't see any whatsapp style
+typing bubble inside the chat"*. Only the small line under the contact's name
+existed, where presence normally sits — easy to read past. There is now a bubble
+at the end of the stream, shaped like an incoming message, which is where the
+message is about to appear. It stops animating under `prefers-reduced-motion`
+but stays visible, so the information survives when the motion does not.
+
+Verified across two phones: **700ms** to appear, and it expires on its own.
+
+**The expiry bug two phones found.** Elapsed-time labels re-evaluated on a 30s
+tick while the typing lifetime is 5s, so "typing…" stayed on screen long after
+the sender stopped. The clock now runs at 1s **only while someone is typing**; a
+permanent 1s tick would re-render every conversation row all day for a rare
+state.
+
+### Swipe to reply, and chaining
+
+Swipe a message right past 56px to answer it; swipe more to chain; swipe the
+same one again to remove it. The chain sits above the composer so several quotes
+push the conversation up rather than growing the text box into the keyboard.
+
+Built first against a **workaround**: `SendMessageOptions` had no reply field, so
+references rode a control line inside `content` — the exact shape the protocol
+log had rejected for profiles. **0.7.2 added `replyTo` to both
+`SendMessageOptions` and `SdkChatMessage`**, and the send path now uses it.
+Verified over QUIC: a two-id chain arrives intact with content untouched, and an
+id naming a message the device never received travels too, which the SDK
+documents as legitimate.
+
+`decodeLegacyReply` **stays and must**: messages sent during the workaround are
+in conversation documents on real devices permanently, and a CRDT does not
+forget. Removing the reader would turn those replies into visible machine text
+in the middle of someone's own history.
+
+### The chat opened short of the newest message
+
+Reported, and measured on a device: scrollHeight 1677, clientHeight 622,
+scrollTop parked at **686** — 369px short — stable for five seconds with the
+images already decoded.
+
+The first fix assumed images were growing the content underneath the scroll.
+The trace disproved that: nothing was still growing. The cause was the app's own
+code — the "am I at the bottom" flag was updated from the `scroll` event, **which
+the browser also fires during layout**. A scroll event nobody made cleared the
+flag, and every later attempt to re-anchor politely declined to run. An anchor
+with an off switch that layout could press.
+
+Only touch and wheel — actual intent — now clear the pin. After: **gap 0px**.
+
+Also fixed alongside: sending now keeps the keyboard up (the Send button
+declines focus on pointerdown; Android closes the keyboard the moment the field
+loses it, which is why Enter-to-send never showed the bug).
+
+### Lazy loading older messages
+
+60 at a time, growing at the top. Worth stating plainly: **history is a local
+CRDT, so there is no fetch to wait for** — reading further back takes
+milliseconds. The saving is render cost and memory on long conversations, not
+network time. `getHistory(channelId, limit)` caps to the most *recent* N with no
+cursor, so paging back means asking for a bigger window and keeping the extra.
+
+The case that matters: prepending pushes everything down by its height, so the
+view compensates. Without it, scrolling up throws the reader backwards as a
+reward for asking.
+
+### Zoom, and the back button on top of it
+
+Reported: *"the entire application is zoomable"*. `touch-action: manipulation`
+was already set and does not cover pinch — it suppresses the double-tap delay.
+Page zoom is now off (`user-scalable=no` plus `pan-x pan-y`), and the media
+viewer implements its own zoom by transforming the image. Measured: image scaled
+**1 → 4** while `visualViewport.scale` stayed **1**.
+
+Then: *"when I press the phone's back button it throws me out to the chats page
+instead of the chat window"*. The viewer used a `{ capture: true }` listener and
+`stopImmediatePropagation`, on my written assumption that capture runs first. It
+does not — the event is dispatched **on `window`**, so `window` is the target and
+listeners there run in registration order with the capture flag ignored. AppShell
+mounts first, so both handlers ran. Replaced with an explicit back-handler stack
+(`services/back-stack`), 7 checks, headless.
+
+### Ordering: reproduced at last, and it works
+
+Could not be reproduced for most of the day — both phones had one conversation
+each, and three attempts to create a second failed. The blocker was routing, not
+the firewall: `node.exe` **is** allowed inbound UDP on the Public profile and is
+the exact binary running, but the phone's default route is cellular so it cannot
+reach the hotspot subnet the laptop sits on.
+
+Once a second conversation existed, sending into the **older, first-added** one:
+
+| | |
+|---|---|
+| before | `Sunny 19:28` above `Phone A 19:03` |
+| after | `Phone A 19:29` above `Sunny 19:28`, held for 30s |
+
+The older-added conversation overtook the newer purely on recency. Insertion
+order would have kept Sunny first.
+
+Two real defects were fixed while looking, either of which could produce the
+report:
+
+- The row's displayed time and preview came from the **last-appended** message
+  while the sort key used the **maximum**. A late-syncing message makes those
+  disagree, so a row shows one time while sitting in another's position.
+- **The ordering test asserted against its own copy of the comparator** and would
+  have passed with the app's sorting deleted.
+
+Remaining hypothesis for what was seen: the window before history loads, when
+every key is `undefined` and a stable sort leaves rows in insertion order.
+
+### A harness that passed while looking at the wrong screen
+
+The two-phone typing/reply driver reported `contact not found` during setup and
+then **passed every check anyway** — the phone happened to already be in the
+right conversation, so the assertions were true by luck. Setup now aborts the
+run.
+
+Third instance of this shape in two days, after counting `img` elements that
+never decoded and a presence suite that exercised a pure function while the
+component it fed was wired wrong.
 
 ## Findings
 

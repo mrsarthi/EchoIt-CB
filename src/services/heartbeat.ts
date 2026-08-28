@@ -25,13 +25,28 @@ import { channelIdFor } from "./conversation";
 import { HEARTBEAT_INTERVAL_MS } from "./presence";
 import { toMillis } from "./timestamps";
 
-/** What we send. Opaque bytes to the protocol; a tag is enough for us. */
+/*
+ * The signals we put on stream 0x07.
+ *
+ * Opaque bytes as far as the protocol is concerned; the tag is ours. Two
+ * different things share the stream, so each is matched exactly rather than by
+ * prefix — a heartbeat must never be mistaken for typing, or a contact would
+ * appear to be composing a message merely by having the app open.
+ */
 const HEARTBEAT = new TextEncoder().encode("echoit:hb:1");
+const TYPING = new TextEncoder().encode("echoit:typing:1");
+
+const matches = (payload: Uint8Array, signal: Uint8Array) =>
+  payload.length === signal.length && signal.every((byte, i) => payload[i] === byte);
 
 /** Recognise our own heartbeat and ignore anything else on the stream. */
 export function isHeartbeat(payload: Uint8Array): boolean {
-  if (payload.length !== HEARTBEAT.length) return false;
-  return HEARTBEAT.every((byte, i) => payload[i] === byte);
+  return matches(payload, HEARTBEAT);
+}
+
+/** Recognise a typing signal. */
+export function isTypingSignal(payload: Uint8Array): boolean {
+  return matches(payload, TYPING);
 }
 
 /**
@@ -44,9 +59,15 @@ export interface PresenceEvidence {
   heardAt: Record<string, number>;
   /** Unix ms of a disconnect we were actually told about. */
   departedAt: Record<string, number>;
+  /** Unix ms of the last typing signal. Expires on its own; see services/typing. */
+  typingAt: Record<string, number>;
 }
 
-export const emptyEvidence = (): PresenceEvidence => ({ heardAt: {}, departedAt: {} });
+export const emptyEvidence = (): PresenceEvidence => ({
+  heardAt: {},
+  departedAt: {},
+  typingAt: {},
+});
 
 /**
  * Start heartbeating to `peerDids`, and report what comes back.
@@ -71,7 +92,7 @@ export function startPresence(
       // left and came back would stay grey until the next disconnect.
       const departedAt = { ...previous.departedAt };
       delete departedAt[peerDid];
-      return { heardAt: { ...previous.heardAt, [peerDid]: at }, departedAt };
+      return { ...previous, heardAt: { ...previous.heardAt, [peerDid]: at }, departedAt };
     });
   };
 
@@ -79,9 +100,21 @@ export function startPresence(
     const channelId = channelIdFor(myDid, peerDid);
     try {
       const off = client.client.chat.onEphemeral(channelId, (fromDid: string, payload: Uint8Array) => {
-        // Only our own heartbeat counts. A future typing indicator will share
-        // this stream, and it should not be mistaken for presence.
-        if (fromDid === myDid || !isHeartbeat(payload)) return;
+        if (fromDid === myDid) return;
+
+        // Typing is also evidence of presence -- someone composing a message is
+        // unambiguously there -- so it updates both.
+        if (isTypingSignal(payload)) {
+          const at = Date.now();
+          heard(fromDid, at);
+          onEvidence((previous) => ({
+            ...previous,
+            typingAt: { ...previous.typingAt, [fromDid]: at },
+          }));
+          return;
+        }
+
+        if (!isHeartbeat(payload)) return;
         heard(fromDid, Date.now());
       });
       if (typeof off === "function") unsubscribes.push(off);
@@ -146,4 +179,29 @@ export function startPresence(
       }
     }
   };
+}
+
+/**
+ * Tell a peer we are composing a message.
+ *
+ * Ephemeral, so it is delivered now or not at all, and never written to the
+ * conversation document. Zero peers reached is the ordinary case and not a
+ * failure — it means they are not connected, and the indicator they would have
+ * seen simply never appears.
+ *
+ * Throttling is the caller's job (`shouldSendTyping` in services/typing): this
+ * is called from a keystroke handler, and one packet per character would be
+ * both wasteful and a far more precise disclosure than intended.
+ */
+export async function sendTyping(
+  client: EchoItClient,
+  myDid: string,
+  peerDid: string,
+): Promise<void> {
+  try {
+    await client.client.chat.sendEphemeral(channelIdFor(myDid, peerDid), TYPING);
+  } catch {
+    // Undeliverable is ordinary. A typing indicator is the last thing that
+    // should surface an error to anybody.
+  }
 }

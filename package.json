@@ -14,6 +14,10 @@
     "test:bridge": "tsx harness/two-peer-bridge.mts",
     "test:three-peer": "tsx harness/three-peer-privacy.mts",
     "test:timestamps": "tsx harness/timestamp-units.mts",
+    "test:back": "tsx harness/back-stack.mts",
+    "test:history": "tsx harness/history-window.mts",
+    "test:typing": "tsx harness/typing-quic.mts",
+    "test:reply": "tsx harness/reply-encoding.mts",
     "test:presence": "tsx harness/presence-unread.mts",
     "test:presence-quic": "tsx harness/presence-quic.mts",
     "test:attachments": "tsx harness/attachments-quic.mts",
@@ -24,8 +28,8 @@
     "check:icon": "node scripts/check-icon.mjs"
   },
   "dependencies": {
-    "@dicsussion/core": "^0.7.1",
-    "@dicsussion/sdk": "^0.7.1",
+    "@dicsussion/core": "^0.7.2",
+    "@dicsussion/sdk": "^0.7.2",
     "@scure/bip39": "^1.6.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",

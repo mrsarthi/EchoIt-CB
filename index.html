@@ -1,6 +1,27 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <!--
+      user-scalable=no is deliberate, and is not the usual accessibility
+      mistake it looks like.
+
+      Reported: "the entire application is zoomable -- on any window you can
+      pinch with two fingers and zoom in and out like a photo". Browser pinch
+      scales the whole page, so a chat list, the settings screen and the
+      composer all zoomed, and there is nothing in this app that a page zoom
+      helps you read.
+
+      `touch-action: manipulation` was already set and does not cover this: it
+      suppresses the double-tap zoom delay, not pinch.
+
+      Zooming a *photo* is a real need, and the media viewer implements it
+      itself by scaling the image rather than the page -- which is what the
+      reference apps do, and it keeps the chrome readable while you zoom. See
+      components/media/MediaViewer.tsx.
+
+      Text size still follows the system font-size setting, which is the
+      accessibility path that matters here.
+    -->
     <meta charset="UTF-8" />
     <!--
       `interactive-widget=resizes-content` is what keeps the chat header in
@@ -10,7 +31,7 @@
       the status bar and collides with the clock and battery icons.
       Resizing the content instead keeps `env(safe-area-inset-top)` honest.
     -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>EchoIt</title>
   </head>
 

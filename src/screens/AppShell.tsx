@@ -13,8 +13,11 @@ import { Modal } from "../components/ui/Modal";
 import { Button } from "../components/ui/Button";
 import { useApp } from "../context/AppContext";
 import { presenceFrom, describePresence } from "../services/presence";
+import { isTyping, describeActivity } from "../services/typing";
+import { newestOf, byRecency } from "../services/conversation-order";
+import { pushBackHandler } from "../services/back-stack";
 import { saveToDevice, type Attachment } from "../services/attachments";
-import { describeBlobError } from "../services/attachment-format";
+import { describeBlobError, previewOf } from "../services/attachment-format";
 import { countUnread, lastInboundAt, loadReadMarks, saveReadMarks, type ReadMarks } from "../services/unread";
 import type { MessageItem } from "./chat/ChatView";
 
@@ -27,6 +30,9 @@ export function AppShell() {
     messages,
     sendMessage,
     sendAttachment,
+    loadOlderMessages,
+    hasOlderMessages,
+    notifyTyping,
     did,
     presenceEvidence,
     client,
@@ -45,10 +51,29 @@ export function AppShell() {
    * Thirty seconds is well under the one-minute granularity of the phrasing.
    */
   const [now, setNow] = useState(() => Date.now());
+
+  /*
+   * How often elapsed-time labels re-evaluate.
+   *
+   * Thirty seconds suits "last seen 5 minutes ago", which only changes at that
+   * granularity. It is far too slow for "typing…", which expires after five —
+   * measured across two phones: the indicator appeared in 700ms and was still
+   * on screen seven seconds after the sender stopped, because nothing had
+   * re-rendered to notice.
+   *
+   * So the clock speeds up only while someone is actually typing, and drops
+   * back the moment they stop. A permanent one-second tick would re-render
+   * every conversation row all day to serve a state that is rare.
+   */
+  const someoneIsTyping = Object.values(presenceEvidence.typingAt).some((at) =>
+    isTyping(at, now),
+  );
+
   useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 30_000);
+    const period = someoneIsTyping ? 1_000 : 30_000;
+    const id = setInterval(() => setNow(Date.now()), period);
     return () => clearInterval(id);
-  }, []);
+  }, [someoneIsTyping]);
 
   /**
    * Back button navigation.
@@ -139,11 +164,16 @@ export function AppShell() {
       }
       setExitPromptOpen(true);
     };
-    window.addEventListener("echoit:back", onNativeBack);
+    // The bottom of the stack: anything on top of the app -- the media viewer,
+    // for one -- gets the press first and this only runs if nothing claimed it.
+    const release = pushBackHandler(() => {
+      onNativeBack();
+      return true;
+    });
 
     return () => {
       window.removeEventListener("popstate", onPopState);
-      window.removeEventListener("echoit:back", onNativeBack);
+      release();
     };
   }, []);
 
@@ -242,6 +272,9 @@ export function AppShell() {
   const conversationsWithPreview: ConversationItem[] = conversations
     .map((c) => {
       const thread = messages[c.peerDid] ?? [];
+      // The newest by timestamp, not the last appended: a late sync lands at
+      // the end of the array while being older than its neighbour.
+      const latest = newestOf(thread);
       const presence = presenceFrom(
         evidenceFor(c.peerDid, thread),
         now,
@@ -250,17 +283,23 @@ export function AppShell() {
 
       const enriched: ConversationItem = {
         ...c,
+        // Shown in place of the message preview, which is what makes a typing
+        // contact findable from the list without opening anything.
+        isTyping: isTyping(presenceEvidence.typingAt[c.peerDid], now),
         isOnline: presence.state === "online",
         unreadCount: countUnread(thread, did, readMarks[c.peerDid]),
-        // Kept for sorting; the row renders `timestamp`.
-        lastActivityAt: thread[thread.length - 1]?.timestamp,
+        // Sort key and display both come from `latest` below, so a row can
+        // never show one time while sitting in the position of another.
+        lastActivityAt: latest?.timestamp,
       };
 
-      const latest = thread[thread.length - 1];
       if (!latest) return enriched;
       return {
         ...enriched,
-        lastMessage: latest.content,
+        // Not `latest.content`: an attachment sent without a caption has none,
+        // and the row then fell back to "No messages yet" for a conversation
+        // whose most recent event was a photo.
+        lastMessage: previewOf(latest.content, latest.attachments),
         timestamp: new Date(latest.timestamp).toLocaleTimeString([], {
           hour: "2-digit",
           minute: "2-digit",
@@ -279,7 +318,7 @@ export function AppShell() {
      * list, and `undefined` compared numerically would otherwise put them
      * there.
      */
-    .sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0));
+    .sort(byRecency);
 
   /*
    * Deliberately the enriched list, not raw `conversations`.
@@ -311,7 +350,9 @@ export function AppShell() {
    * the row can never disagree about whether someone is around.
    */
   const selectedPresenceLabel = selectedConversation
-    ? describePresence(
+    ? describeActivity(
+        isTyping(presenceEvidence.typingAt[selectedConversation.peerDid], now),
+        describePresence(
         presenceFrom(
           evidenceFor(
             selectedConversation.peerDid,
@@ -321,6 +362,7 @@ export function AppShell() {
           presenceEvidence.departedAt[selectedConversation.peerDid],
         ),
         now,
+      ),
       )
     : "";
 
@@ -365,10 +407,10 @@ export function AppShell() {
    * M2.4; the local echo now comes from `AppContext`, which appends what the
    * SDK actually accepted rather than what was typed.
    */
-  const handleSendMessage = (text: string) => {
+  const handleSendMessage = (text: string, replyTo?: readonly string[]) => {
     const peerDid = selectedConversation?.peerDid;
     if (!peerDid) return;
-    void sendMessage(peerDid, text).catch(() => {
+    void sendMessage(peerDid, text, replyTo).catch(() => {
       // Surfacing this properly needs the §5b Staged/Sent ladder. Until that
       // exists, failing quietly is still better than the previous behaviour,
       // which was to show every message as sent whether or not it was.
@@ -443,6 +485,7 @@ export function AppShell() {
       // The viewer captions with the instant, not the formatted string.
       at: m.timestamp,
       attachments: m.attachments,
+      replyTo: m.replyTo,
     }));
   };
 
@@ -521,6 +564,10 @@ export function AppShell() {
             messages={messagesFor(selectedConversation?.peerDid)}
             onSendMessage={handleSendMessage}
             onSendAttachment={handleSendAttachment}
+            onLoadOlder={() => loadOlderMessages(selectedConversation.peerDid)}
+            onTyping={() => notifyTyping(selectedConversation.peerDid)}
+            peerIsTyping={isTyping(presenceEvidence.typingAt[selectedConversation.peerDid], now)}
+            hasOlder={hasOlderMessages(selectedConversation.peerDid)}
             onOpenDocument={(attachment) => void saveOrOpen(attachment, true)}
             onSaveMedia={(item) => {
               // By hash, which is the file's identity. Size and mime were
@@ -615,6 +662,10 @@ export function AppShell() {
             messages={messagesFor(selectedConversation?.peerDid)}
             onSendMessage={handleSendMessage}
             onSendAttachment={handleSendAttachment}
+            onLoadOlder={() => loadOlderMessages(selectedConversation.peerDid)}
+            onTyping={() => notifyTyping(selectedConversation.peerDid)}
+            peerIsTyping={isTyping(presenceEvidence.typingAt[selectedConversation.peerDid], now)}
+            hasOlder={hasOlderMessages(selectedConversation.peerDid)}
             onOpenDocument={(attachment) => void saveOrOpen(attachment, true)}
             onSaveMedia={(item) => {
               // By hash, which is the file's identity. Size and mime were

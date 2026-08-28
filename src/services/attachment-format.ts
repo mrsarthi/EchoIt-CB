@@ -78,3 +78,34 @@ export function describeBlobError(error: unknown): string {
   }
   return message || "Could not transfer that file.";
 }
+
+/**
+ * What a conversation row should say when the newest message is a file.
+ *
+ * An attachment sent with no caption has empty content, and the chat list fell
+ * back to "No messages yet" for it — so a conversation whose most recent event
+ * was a photo claimed nothing had ever been sent. Seen on a device.
+ *
+ * The reference apps name the kind of thing rather than leaving it blank, which
+ * is also what makes a list of conversations scannable.
+ *
+ * Returns an empty string when there is genuinely nothing, so the caller keeps
+ * its own "No messages yet" for a conversation that really is empty.
+ */
+export function previewOf(
+  content: string,
+  attachments?: readonly { mime: string; name?: string }[],
+): string {
+  const text = content.trim();
+  if (text) return text;
+  if (!attachments || attachments.length === 0) return "";
+
+  if (attachments.length > 1) return `${attachments.length} files`;
+
+  const [only] = attachments;
+  if (only.mime.startsWith("image/")) return "Photo";
+  if (only.mime.startsWith("video/")) return "Video";
+  if (only.mime.startsWith("audio/")) return "Audio";
+  // A name is more use than a media type nobody recognises.
+  return only.name ?? "File";
+}

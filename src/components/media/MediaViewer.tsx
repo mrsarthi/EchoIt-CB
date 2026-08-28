@@ -12,20 +12,22 @@
  * surround changes how the image reads. Both reference apps do this, and it is
  * the one screen in the app that ignores the theme on purpose.
  *
- * **The Android back button closes it, and nothing else.** The viewer listens
- * for `echoit:back` at a higher priority than AppShell's own handler by
- * stopping propagation, so back closes the picture rather than leaving the
- * conversation underneath it. Without that, one press would do both.
+ * **The Android back button closes it, and nothing else.** The viewer takes the
+ * top of the back-handler stack while it is open, so back closes the picture
+ * and leaves the conversation underneath it untouched. An earlier version used
+ * a capture listener and `stopImmediatePropagation`, which cannot work for an
+ * event dispatched on `window` — see services/back-stack.
  *
  * **Object URLs are revoked by whoever created them**, not here. This component
  * is handed a URL and does not own it; revoking on unmount would break a
  * caller that still wants to show a thumbnail.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ArrowLeftIcon, ChevronRightIcon, ShareIcon, XIcon } from "../ui/Icons";
 import { formatSize } from "../../services/attachment-format";
+import { pushBackHandler } from "../../services/back-stack";
 
 export interface ViewableMedia {
   /**
@@ -86,11 +88,12 @@ export function MediaViewer({
    * of which mounted first.
    */
   useEffect(() => {
-    const onBack = (event: Event) => {
-      event.stopImmediatePropagation();
+    // Pushed last, so asked first. See services/back-stack for why a capture
+    // listener could never have worked here.
+    const release = pushBackHandler(() => {
       onClose();
-    };
-    window.addEventListener("echoit:back", onBack, { capture: true });
+      return true;
+    });
 
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -100,26 +103,139 @@ export function MediaViewer({
     window.addEventListener("keydown", onKey);
 
     return () => {
-      window.removeEventListener("echoit:back", onBack, { capture: true });
+      release();
       window.removeEventListener("keydown", onKey);
     };
   }, [onClose, go]);
 
-  // Swiping between items, and down to dismiss — both reference apps do this
-  // and a viewer that only closes by a small button feels broken on a phone.
-  const [touchStart, setTouchStart] = useState<{ x: number; y: number } | null>(null);
-  const onTouchStart = (e: React.TouchEvent) =>
-    setTouchStart({ x: e.touches[0].clientX, y: e.touches[0].clientY });
+  /*
+   * Pinch to zoom the picture, not the page.
+   *
+   * Browser pinch zooms the whole document, which is why it is switched off
+   * app-wide (`user-scalable=no` plus `touch-action: pan-x pan-y`) after being
+   * reported as "the entire application is zoomable". Zooming a photo is still
+   * a real need, so it is done here by transforming the media element: the
+   * chrome stays put and readable, which is how the reference apps behave.
+   *
+   * Gestures share one surface, so which one applies depends on the state:
+   *
+   *   two fingers            always pinch
+   *   one finger, zoomed in  pan around the picture
+   *   one finger, at 1x      swipe between items, or down to dismiss
+   *
+   * Without that last distinction, panning a zoomed photo sideways would page
+   * to the next one, which is maddening.
+   */
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const gesture = useRef<{
+    mode: "none" | "pan" | "pinch";
+    startX: number;
+    startY: number;
+    startOffset: { x: number; y: number };
+    startDistance: number;
+    startZoom: number;
+  }>({ mode: "none", startX: 0, startY: 0, startOffset: { x: 0, y: 0 }, startDistance: 0, startZoom: 1 });
+
+  // Reset when the picture changes; otherwise the next one opens mid-zoom,
+  // scrolled to wherever the previous one was left.
+  useEffect(() => {
+    setZoom(1);
+    setOffset({ x: 0, y: 0 });
+  }, [current]);
+
+  const distanceBetween = (touches: React.TouchList) => {
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.hypot(dx, dy);
+  };
+
+  const onTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length >= 2) {
+      gesture.current = {
+        mode: "pinch",
+        startX: 0,
+        startY: 0,
+        startOffset: offset,
+        startDistance: distanceBetween(e.touches),
+        startZoom: zoom,
+      };
+      return;
+    }
+    gesture.current = {
+      mode: "pan",
+      startX: e.touches[0].clientX,
+      startY: e.touches[0].clientY,
+      startOffset: offset,
+      startDistance: 0,
+      startZoom: zoom,
+    };
+  };
+
+  const onTouchMove = (e: React.TouchEvent) => {
+    const g = gesture.current;
+
+    if (g.mode === "pinch" && e.touches.length >= 2) {
+      const ratio = distanceBetween(e.touches) / (g.startDistance || 1);
+      // Floor at 1: pinching below actual size just leaves a small picture in
+      // a large black field. Ceiling at 6 so it cannot be lost off-screen.
+      setZoom(Math.min(6, Math.max(1, g.startZoom * ratio)));
+      return;
+    }
+
+    if (g.mode === "pan" && zoom > 1 && e.touches.length === 1) {
+      setOffset({
+        x: g.startOffset.x + (e.touches[0].clientX - g.startX),
+        y: g.startOffset.y + (e.touches[0].clientY - g.startY),
+      });
+    }
+  };
+
   const onTouchEnd = (e: React.TouchEvent) => {
-    if (!touchStart) return;
-    const dx = e.changedTouches[0].clientX - touchStart.x;
-    const dy = e.changedTouches[0].clientY - touchStart.y;
-    setTouchStart(null);
+    const g = gesture.current;
+    gesture.current = { ...g, mode: "none" };
+
+    if (g.mode === "pinch") {
+      // Snapping back to centre at 1x avoids a picture that is nominally
+      // unzoomed but nudged off to one side.
+      if (zoom <= 1.02) {
+        setZoom(1);
+        setOffset({ x: 0, y: 0 });
+      }
+      return;
+    }
+
+    // Zoomed in, a drag was a pan, not a navigation.
+    if (g.mode !== "pan" || zoom > 1) return;
+
+    const dx = e.changedTouches[0].clientX - g.startX;
+    const dy = e.changedTouches[0].clientY - g.startY;
     if (Math.abs(dy) > 90 && Math.abs(dy) > Math.abs(dx)) {
       onClose();
       return;
     }
     if (Math.abs(dx) > 60) go(dx < 0 ? 1 : -1);
+  };
+
+  /** Double tap toggles, the way every photo viewer does. */
+  const lastTap = useRef(0);
+  const onMediaClick = () => {
+    const now = Date.now();
+    if (now - lastTap.current < 300) {
+      setZoom((z) => (z > 1 ? 1 : 2.5));
+      setOffset({ x: 0, y: 0 });
+    }
+    lastTap.current = now;
+  };
+
+  const mediaStyle: React.CSSProperties = {
+    maxWidth: "100%",
+    maxHeight: "100%",
+    objectFit: "contain",
+    transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+    // No transition while pinching, or the picture lags the fingers.
+    transition: gesture.current.mode === "none" ? "transform 140ms ease-out" : "none",
+    touchAction: "none",
   };
 
   if (!item) return null;
@@ -152,6 +268,7 @@ export function MediaViewer({
         paddingBottom: "var(--safe-bottom)",
       }}
       onTouchStart={onTouchStart}
+      onTouchMove={onTouchMove}
       onTouchEnd={onTouchEnd}
     >
       {/* Who and when, as both reference apps show it. */}
@@ -254,7 +371,9 @@ export function MediaViewer({
           position: "relative",
         }}
         onClick={(e) => {
-          if (e.target === e.currentTarget) onClose();
+          // Not while zoomed: releasing a pan on the surround would dismiss
+          // the picture the user is in the middle of examining.
+          if (zoom === 1 && e.target === e.currentTarget) onClose();
         }}
       >
         {item.mime.startsWith("video/") ? (
@@ -263,13 +382,15 @@ export function MediaViewer({
             controls
             autoPlay
             playsInline
-            style={{ maxWidth: "100%", maxHeight: "100%", outline: "none" }}
+            style={{ ...mediaStyle, outline: "none" }}
           />
         ) : (
           <img
             src={item.url}
             alt={item.name ?? "Attachment"}
-            style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
+            style={mediaStyle}
+            onClick={onMediaClick}
+            draggable={false}
           />
         )}
 

@@ -8,6 +8,8 @@ export interface ConversationItem {
   peerDid: string;
   name: string;
   lastMessage?: string;
+  /** Composing right now. Outranks the preview. */
+  isTyping?: boolean;
   timestamp?: string;
   unreadCount?: number;
   isOnline?: boolean;
@@ -336,7 +338,7 @@ export function ChatsTab({
                       }}
                     >
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {chat.lastMessage || "No messages yet"}
+                        {chat.isTyping ? "typing…" : chat.lastMessage || "No messages yet"}
                       </span>
                       {chat.unreadCount && chat.unreadCount > 0 ? (
                         <Badge variant="default" style={{ marginLeft: 6, flexShrink: 0 }}>

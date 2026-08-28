@@ -56,12 +56,19 @@ beta — no groups.
   documents open in the device's handler; save to device. 16MB cap, provisional
   until a two-phone transfer says otherwise (the protocol's 64MB does not
   complete).
+- **Typing indicator** — a bubble at the end of the stream and a line in the
+  header. Ephemeral, never stored. 700ms across two phones, and it expires on
+  its own.
+- **Swipe to reply, and chaining** — swipe several messages and answer them
+  together. Uses the SDK's `replyTo` field as of 0.7.2; `decodeLegacyReply`
+  still reads messages sent before it existed and must not be removed.
+- **Lazy loading** older messages, 60 at a time, holding the reader's place.
 
 **Not built:** groups, read receipts, §5b's delivery-status ladder, and
 MediaStore — so a saved photo does not appear in the Android Gallery.
 
 **Messaging works as of 2026-08-23**, on desktop and on two phones. Running on
-SDK `0.7.1` since 2026-08-27; every suite was re-run on it rather than assumed
+SDK `0.7.2` since 2026-08-28; every suite was re-run on it rather than assumed
 to carry forward.
 
 **Two things about it that will confuse you otherwise:**
