@@ -35,6 +35,32 @@ export function countUnread(
 }
 
 /**
+ * How many conversations are waiting, for a nav badge.
+ *
+ * Conversations, not messages. Twelve unread messages from one person is one
+ * thing to go and look at, and a badge reading "12" that resolves to a single
+ * row teaches people that badges overstate. The per-row count in the list is
+ * where a message total belongs.
+ *
+ * Whatever is open does not count. A conversation being read is not something
+ * you have yet to look at, and its read mark does not necessarily advance
+ * while you sit in it — so counting it would leave a badge on the way *out* of
+ * the conversation you just read.
+ */
+export function countWaitingConversations(
+  conversations: ReadonlyArray<{ id: string; unreadCount?: number }>,
+  openId: string | null | undefined,
+): number {
+  return conversations.reduce(
+    (total, conversation) =>
+      (conversation.unreadCount ?? 0) > 0 && conversation.id !== openId
+        ? total + 1
+        : total,
+    0,
+  );
+}
+
+/**
  * Read marks survive a restart.
  *
  * Without persistence every relaunch reports every message as unread, which is

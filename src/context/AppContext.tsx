@@ -14,6 +14,7 @@ import {
   loadAcceptRequests,
   saveAcceptRequests,
 } from "../services/reach";
+import { publishProfile, type MyProfileDraft, type PeerProfile } from "../services/profiles";
 import { putAttachment, type Attachment } from "../services/attachments";
 import { describeBlobError } from "../services/attachment-format";
 import { releaseAttachmentUrls } from "../services/attachments";
@@ -106,6 +107,14 @@ export interface AppContextValue {
   acceptPairingRequest: (peerDid: string) => Promise<void>;
   /** Dismiss a knock. Silent — they learn nothing. */
   ignorePairingRequest: (peerDid: string) => void;
+
+  // Profiles
+  /** What we publish about ourselves, or undefined until something is set. */
+  myProfile: PeerProfile | undefined;
+  /** Publish a name, bio and picture. Resolves with how many peers got it. */
+  saveMyProfile: (draft: MyProfileDraft) => Promise<number>;
+  /** Every peer profile we hold, by did. A peer absent from it has published none. */
+  peerProfiles: Record<string, PeerProfile>;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -137,6 +146,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [activeInvites, setActiveInvites] = useState<ActiveInvite[]>([]);
   const [displayName, setDisplayNameState] = useState<string>(() => loadDisplayName());
   const [acceptRequests, setAcceptRequestsState] = useState<boolean>(() => loadAcceptRequests());
+  const [myProfile, setMyProfile] = useState<PeerProfile | undefined>(undefined);
+  const [peerProfiles, setPeerProfiles] = useState<Record<string, PeerProfile>>({});
   /**
    * Tickets from knocks, kept so Accept needs nothing pasted.
    *
@@ -226,6 +237,35 @@ export function AppProvider({ children }: { children: ReactNode }) {
     bootStarted.current = true;
     void checkKeychainAndBoot();
   }, [checkKeychainAndBoot]);
+
+  /*
+   * Profiles: ours, and everyone else's.
+   *
+   * Subscribing alone is not enough. A profile can arrive before this mounts —
+   * the SDK offers ours to a peer as soon as they pair, and theirs comes back
+   * the same way — and the service holds what it has already been told. So the
+   * held set is read once and the subscription takes it from there, the same
+   * shape as pending pairing requests for the same reason.
+   */
+  useEffect(() => {
+    if (!client || !did) return;
+
+    setMyProfile(client.client.identity.getMyProfile());
+
+    const held: Record<string, PeerProfile> = {};
+    for (const contact of loadContacts(did)) {
+      const profile = client.client.identity.getPeerProfile(contact.peerDid);
+      if (profile) held[contact.peerDid] = profile;
+    }
+    if (Object.keys(held).length > 0) {
+      setPeerProfiles((prev) => ({ ...prev, ...held }));
+    }
+
+    const unsubscribe = client.client.identity.onPeerProfile((peerDid, profile) => {
+      setPeerProfiles((prev) => ({ ...prev, [peerDid]: profile }));
+    });
+    return unsubscribe;
+  }, [client, did]);
 
   // Listen to peer connection events from DicsussionClient
   useEffect(() => {
@@ -796,6 +836,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
     });
   };
 
+  /**
+   * Publish our profile.
+   *
+   * The returned count is how many peers were connected to receive it, not
+   * whether it saved. Zero is the ordinary case for someone editing their
+   * profile with nobody online, and a screen that reported it as a failure
+   * would be wrong most of the time.
+   */
+  const saveMyProfile = async (draft: MyProfileDraft): Promise<number> => {
+    if (!client) throw new Error("Client not ready");
+    const reached = await publishProfile(client, draft);
+    setMyProfile(client.client.identity.getMyProfile());
+    return reached;
+  };
+
   // Pair with a pasted ticket and dial the peer
   const pairAndConnect = async (ticketString: string, name: string) => {
     if (!client || !did) throw new Error("Client not ready");
@@ -1138,6 +1193,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setAcceptRequests,
         acceptPairingRequest: acceptPairingRequestByDid,
         ignorePairingRequest,
+        myProfile,
+        saveMyProfile,
+        peerProfiles,
       }}
     >
       {children}

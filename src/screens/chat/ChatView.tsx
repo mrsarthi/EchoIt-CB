@@ -8,6 +8,9 @@ import { TwoStepsChecklist, type PairingState } from "../../components/pairing/T
 import { shouldLoadMore, preservedScrollTop } from "../../services/history-window";
 import { SwipeToReply } from "../../components/chat/SwipeToReply";
 import { TypingBubble } from "../../components/chat/TypingBubble";
+import { Avatar } from "../../components/profile/Avatar";
+import { PeerProfileSheet } from "../../components/profile/PeerProfileSheet";
+import type { PeerProfile } from "../../services/profile-format";
 import {
   toggleTarget,
   previewOfMessage,
@@ -62,6 +65,16 @@ export interface ChatViewProps {
   hasOlder?: boolean;
   /** The peer is composing right now — shows the bubble at the end of the stream. */
   peerIsTyping?: boolean;
+  /** Their self-published profile, if they have sent one. */
+  peerProfile?: PeerProfile;
+  /**
+   * How many *other* conversations are waiting, shown on Back.
+   *
+   * On a phone the conversation fills the screen and the nav is gone, so
+   * without this there is nothing to say that someone else has written — the
+   * badge only exists on a surface you cannot see from in here.
+   */
+  otherUnreadCount?: number;
 }
 
 export function ChatView({
@@ -86,8 +99,11 @@ export function ChatView({
   onTyping,
   hasOlder = false,
   peerIsTyping = false,
+  peerProfile,
+  otherUnreadCount = 0,
 }: ChatViewProps) {
   const [inputText, setInputText] = useState("");
+  const [profileOpen, setProfileOpen] = useState(false);
   /**
    * Messages this reply answers, in the order they were swiped.
    *
@@ -462,32 +478,77 @@ export function ChatView({
                 color: "var(--color-text)",
                 cursor: "pointer",
                 padding: 0,
+                // The unread badge is absolutely positioned against this.
+                position: "relative",
               }}
-              title="Back to conversation list"
-              aria-label="Back"
+              title={otherUnreadCount > 0
+                ? `Back to conversation list — ${otherUnreadCount} waiting`
+                : "Back to conversation list"}
+              aria-label={otherUnreadCount > 0
+                ? `Back, ${otherUnreadCount} other ${otherUnreadCount === 1 ? "conversation has" : "conversations have"} new messages`
+                : "Back"}
             >
               <ArrowLeftIcon size={20} />
+              {otherUnreadCount > 0 && (
+                /*
+                 * Positioned on the arrow rather than beside it: the header is
+                 * a fixed row and a badge that takes width pushes the name and
+                 * presence line along, which is the shape of bug that only
+                 * appears once someone has several unread conversations.
+                 */
+                <span
+                  aria-hidden="true"
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    right: 0,
+                    transform: "translate(35%, -20%)",
+                    minWidth: 16,
+                    height: 16,
+                    padding: "0 4px",
+                    boxSizing: "border-box",
+                    borderRadius: 8,
+                    backgroundColor: "var(--color-primary)",
+                    color: "var(--color-on-primary, #fff)",
+                    fontSize: 10,
+                    lineHeight: "16px",
+                    fontWeight: "var(--font-weight-semibold)",
+                    textAlign: "center",
+                  }}
+                >
+                  {otherUnreadCount > 9 ? "9+" : otherUnreadCount}
+                </span>
+              )}
             </button>
           )}
 
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <div
-              style={{
-                width: 36,
-                height: 36,
-                borderRadius: "var(--radius-full)",
-                backgroundColor: "var(--color-surface-dim)",
-                border: "1px solid var(--color-border)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontWeight: "var(--font-weight-semibold)",
-                fontSize: "var(--font-size-body-sm)",
-                color: "var(--color-text)",
-              }}
-            >
-              {peerName.slice(0, 1).toUpperCase()}
-            </div>
+          {/*
+            The whole identity block is one button, not just the name: a
+            tap target the width of two words is hard to hit on a phone, and
+            the picture is the thing people reach for. `text-align: left`
+            and the reset below keep it looking like a header rather than a
+            control — it is a way in to their profile, not an action.
+          */}
+          <button
+            type="button"
+            onClick={() => setProfileOpen(true)}
+            aria-label={`View ${peerName}'s profile`}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              minWidth: 0,
+              background: "none",
+              border: "none",
+              padding: 0,
+              margin: 0,
+              font: "inherit",
+              color: "inherit",
+              textAlign: "left",
+              cursor: "pointer",
+            }}
+          >
+            <Avatar profile={peerProfile} name={peerName} size={36} />
 
             <div style={{ minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
@@ -556,7 +617,7 @@ export function ChatView({
                 </div>
               )}
             </div>
-          </div>
+          </button>
         </div>
 
         {/* Security Bilateral Pairing Indicator */}
@@ -1069,6 +1130,14 @@ export function ChatView({
           saveError={saveError}
         />
       )}
+
+      <PeerProfileSheet
+        isOpen={profileOpen}
+        onClose={() => setProfileOpen(false)}
+        peerDid={peerDid}
+        localName={peerName}
+        profile={peerProfile}
+      />
     </div>
   );
 }

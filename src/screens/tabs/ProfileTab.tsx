@@ -5,6 +5,7 @@ import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { AlertBanner } from "../../components/ui/AlertBanner";
 import { UserIcon, CopyIcon, CheckIcon, RefreshIcon } from "../../components/ui/Icons";
+import { MyProfileEditor } from "../../components/profile/MyProfileEditor";
 
 export function ProfileTab() {
   const { client, recordActiveInvite } = useApp();
@@ -120,6 +121,8 @@ export function ProfileTab() {
           below, which is the only thing anyone needs to share. Third time a
           bare did:key has turned out to be noise rather than information.
         */}
+
+        <MyProfileEditor />
 
         {/* Connection Ticket Card */}
         <section style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>

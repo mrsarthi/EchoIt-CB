@@ -18,7 +18,7 @@ import { newestOf, byRecency } from "../services/conversation-order";
 import { pushBackHandler } from "../services/back-stack";
 import { saveToDevice, type Attachment } from "../services/attachments";
 import { describeBlobError, previewOf } from "../services/attachment-format";
-import { countUnread, lastInboundAt, loadReadMarks, saveReadMarks, type ReadMarks } from "../services/unread";
+import { countUnread, countWaitingConversations, lastInboundAt, loadReadMarks, saveReadMarks, type ReadMarks } from "../services/unread";
 import type { MessageItem } from "./chat/ChatView";
 
 export function AppShell() {
@@ -36,6 +36,7 @@ export function AppShell() {
     did,
     presenceEvidence,
     client,
+    peerProfiles,
   } = useApp();
   const [activeTab, setActiveTab] = useState<AppTab>("chats");
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
@@ -321,6 +322,23 @@ export function AppShell() {
     .sort(byRecency);
 
   /*
+   * How many conversations are waiting, for the nav badge.
+   *
+   * Conversations, not messages. Twelve unread messages from one person is
+   * one thing to go and look at, and a nav badge reading "12" that resolves to
+   * a single row is the kind of number that trains people to ignore badges.
+   * The per-row count in the list is where the message total belongs.
+   *
+   * Excludes whatever is open: a conversation you are reading is not
+   * something you have yet to look at, and its own read mark has not
+   * necessarily caught up while you sit in it.
+   */
+  const unreadConversations = countWaitingConversations(
+    conversationsWithPreview,
+    selectedChatId,
+  );
+
+  /*
    * Deliberately the enriched list, not raw `conversations`.
    *
    * The raw objects carry an `isOnline` fixed when the conversation was first
@@ -557,6 +575,8 @@ export function AppShell() {
           <ChatView
             peerDid={selectedConversation.peerDid}
             peerName={selectedConversation.name}
+            peerProfile={peerProfiles[selectedConversation.peerDid]}
+            otherUnreadCount={unreadConversations}
             pairingState={selectedContact?.pairingState || "unilateral_waiting"}
             isOnline={selectedConversation.isOnline}
             presenceLabel={selectedPresenceLabel}
@@ -599,7 +619,18 @@ export function AppShell() {
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
           {renderTabContent()}
         </div>
-        <BottomNav activeTab={activeTab} onSelectTab={(tab) => navigate({ tab, chatId: null })} />
+        {/*
+          Both counts, which this call site never passed. The nav has drawn a
+          badge and a dot since it was written and neither had ever appeared on
+          a phone, because the props defaulted to zero here. Same omission as
+          `unreadCount: 0` in the two places `services/unread.ts` names.
+        */}
+        <BottomNav
+          activeTab={activeTab}
+          onSelectTab={(tab) => navigate({ tab, chatId: null })}
+          unreadChatsCount={unreadConversations}
+          pendingRequestsCount={pendingRequests.length}
+        />
       </div>
     );
   }
@@ -618,6 +649,7 @@ export function AppShell() {
       <SidebarNavRail
         activeTab={activeTab}
         onSelectTab={(tab) => navigate({ tab, chatId: null })}
+        unreadChatsCount={unreadConversations}
         pendingRequestsCount={pendingRequests.length}
       />
 
@@ -656,6 +688,8 @@ export function AppShell() {
           <ChatView
             peerDid={selectedConversation.peerDid}
             peerName={selectedConversation.name}
+            peerProfile={peerProfiles[selectedConversation.peerDid]}
+            otherUnreadCount={unreadConversations}
             pairingState={selectedContact?.pairingState || "unilateral_waiting"}
             isOnline={selectedConversation.isOnline}
             presenceLabel={selectedPresenceLabel}
