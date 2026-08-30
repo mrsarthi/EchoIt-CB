@@ -15,8 +15,14 @@
  * shipped.
  *
  * That class of bug is invisible until someone with larger text opens the
- * screen, so this walks every tab at several scales and reports anything whose
- * right edge escapes its parent or the viewport.
+ * screen, so this walks every tab at several scales and reports anything that
+ * has actually gone missing: past the right edge of the window, or cut off by
+ * a parent that clips.
+ *
+ * Not merely past a parent. Overhanging a parent that does not clip is what a
+ * corner badge is *for*, and counting it reported four failures on every tab at
+ * every scale including 1.0 — a check that always fails is a check nobody
+ * reads.
  *
  * ## It changes a device setting, and puts it back
  *
@@ -64,20 +70,29 @@ const PROBE = `JSON.stringify((function () {
     var p = el.parentElement;
     if (!p) continue;
     var pr = p.getBoundingClientRect();
-    // A scroll container is allowed to hold content taller or wider than
-    // itself; that is what it is for. Only unscrollable parents count.
     var ps = getComputedStyle(p);
-    var scrolls = ps.overflowX === 'auto' || ps.overflowX === 'scroll'
-      || ps.overflow === 'auto' || ps.overflow === 'scroll';
-    var pastParent = !scrolls && r.right > pr.right + 1;
+    var ox = ps.overflowX === 'visible' ? ps.overflow : ps.overflowX;
+    // A scroll container is allowed to hold content wider than itself; that is
+    // what it is for.
+    var scrolls = ox === 'auto' || ox === 'scroll';
+    // So is a parent that does not clip. A badge deliberately hung on the
+    // corner of an icon overhangs its parent by design and always will --
+    // flagging that reported four failures on every tab at every scale,
+    // including 1.0, which is a checker nobody would read twice.
+    var clips = ox === 'hidden' || ox === 'clip';
+    // Cut off without a scrollbar to reach it: invisible on screen, which is
+    // the quiet half of this failure.
+    var clippedAway = clips && r.right > pr.right + 1;
+    // Off the side of the screen entirely, which is what the System button did.
     var pastWindow = r.right > vw + 1;
-    if (pastParent || pastWindow) {
+    if ((clippedAway || pastWindow) && !scrolls) {
       out.push({
         tag: el.tagName,
         text: (el.innerText || '').trim().split(String.fromCharCode(10))[0].slice(0, 24),
         right: Math.round(r.right),
         parentRight: Math.round(pr.right),
-        offScreen: pastWindow
+        offScreen: pastWindow,
+        clipped: clippedAway
       });
     }
   }
@@ -149,7 +164,8 @@ try {
         console.log(`  ${tab.padEnd(9)} ${result.count} overflowing:`);
         for (const item of result.items) {
           console.log(`      ${item.tag} "${item.text}" right ${item.right} vs parent ${item.parentRight}`
-            + (item.offScreen ? ' — OFF SCREEN' : ''));
+            + (item.offScreen ? ' — OFF SCREEN' : '')
+            + (item.clipped ? ' — CLIPPED BY PARENT' : ''));
         }
         failures.push(`${tab} at ${scale}`);
       }

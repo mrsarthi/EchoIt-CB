@@ -30,14 +30,16 @@ export interface ReadStatusProps {
 }
 
 /**
- * Matched to the timestamp beside it.
+ * One line of text tall, whatever that turns out to be.
  *
- * 16 was reported as too big and measuring agreed: it sat in an 18px row of
- * 12px text, and the read state's ring took it to 24px — wider than the row.
- * At 12 it is the same height as the words it sits with, and the ring keeps it
- * inside the line.
+ * 16px was reported as too big and measuring agreed: it sat in an 18px row of
+ * 12px text, and the read ring took it to 24px — wider than the row. A fixed
+ * 12px fixed that at the default and broke it elsewhere, because Android
+ * scales CSS px for text and not for boxes: at system font 1.5 the label was
+ * 18px and the circle still 12. `1em` is the size that is right at both ends,
+ * and it is what "matches the timestamp" actually means.
  */
-const DEFAULT_SIZE = 12;
+const DEFAULT_SIZE = 1;
 
 export function ReadStatus({ status, peerName, peerProfile, size = DEFAULT_SIZE }: ReadStatusProps) {
   const label = describeStatus(status, peerName);
@@ -49,8 +51,8 @@ export function ReadStatus({ status, peerName, peerProfile, size = DEFAULT_SIZE 
         aria-label={label}
         role="img"
         style={{
-          width: size,
-          height: size,
+          width: `${size}em`,
+          height: `${size}em`,
           borderRadius: "50%",
           backgroundColor: "var(--color-surface-dim)",
           border: "1px solid var(--color-border)",
@@ -62,7 +64,10 @@ export function ReadStatus({ status, peerName, peerProfile, size = DEFAULT_SIZE 
           boxSizing: "border-box",
         }}
       >
-        <CheckIcon size={Math.round(size * 0.62)} />
+        {/* The tick is drawn in px; 62% of a 12px line, which is where it was
+            already, and it is a glyph rather than a box so it reads the same
+            at larger sizes. */}
+        <CheckIcon size={8} />
       </span>
     );
   }
@@ -78,6 +83,7 @@ export function ReadStatus({ status, peerName, peerProfile, size = DEFAULT_SIZE 
         profile={peerProfile}
         name={peerName}
         size={size}
+        unit="em"
         muted={status === "delivered"}
         ring={status === "read" ? "var(--color-success)" : undefined}
       />
