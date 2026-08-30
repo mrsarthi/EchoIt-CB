@@ -16,11 +16,10 @@ no groups. iOS is deferred rather than abandoned: the runtime was chosen so that
 adding it later is a build exercise, not a rewrite.
 
 > **On what EchoIt tells a server:** the precise, approved wording lives in
-> `design/PRODUCT.md` §1 and is **currently under revision** — see Finding 18 in
-> `.agents/PROGRESS.md`. The app contacts a connection helper to reach the
-> other device, which the existing copy does not account for. Do not copy a
-> server claim out of this README or anywhere else; take it from §1 once it is
-> settled.
+> `design/PRODUCT.md` §1 and was **settled on 2026-08-30**. There are two
+> servers, not one — a connection helper on every launch (§4.4) and the daily
+> update check (§4.3). Do not write a server claim of your own here or
+> anywhere else; copy §1 exactly.
 
 ---
 

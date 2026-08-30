@@ -17,6 +17,7 @@ import { useApp } from "../../context/AppContext";
 import { AddContactModal } from "../../components/pairing/AddContactModal";
 import { TwoStepsChecklist } from "../../components/pairing/TwoStepsChecklist";
 import type { Contact } from "../../services/pairing-store";
+import { displayNameFor, isClaimedName, localNameOf } from "../../services/profile-format";
 
 export interface ContactsTabProps {
   onSelectContact?: (peerDid: string) => void;
@@ -32,6 +33,15 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
     acceptPairingRequest,
     peerProfiles,
   } = useApp();
+
+  /**
+   * What to call a contact.
+   *
+   * Their own name is used when you never gave them one -- and is labelled as
+   * a claim below, because that is all it is. See `profile-format.ts`.
+   */
+  const nameOf = (c: Contact): string =>
+    displayNameFor(localNameOf(c.name), peerProfiles[c.peerDid], c.peerDid, c.claimedName);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [addModalOpen, setAddModalOpen] = useState(false);
@@ -61,7 +71,7 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
 
   const filteredContacts = contacts.filter(
     (c) =>
-      c.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      nameOf(c).toLowerCase().includes(searchQuery.toLowerCase()) ||
       c.peerDid.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
@@ -217,7 +227,16 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-md)" }}>
               {pendingRequests.map((req) => {
-                const displayName = req.claimedName || `Device ending in ...${req.peerDid.slice(-6)}`;
+                /*
+                  A knock does not have to carry a name, and when it does not,
+                  the card used to fill one in and then attribute it to them:
+                  "says their name is Device ending in ...poVTQW". That is the
+                  app putting words in a stranger's mouth on the one screen
+                  whose whole job is telling you what is claimed and what is
+                  proven. Seen on a device, not in review.
+                */
+                const claimedName = req.claimedName?.trim();
+                const displayName = claimedName || `Device ending in ...${req.peerDid.slice(-6)}`;
                 return (
                   <Card
                     key={req.peerDid}
@@ -249,7 +268,7 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
                             marginTop: 2,
                           }}
                         >
-                          says their name is {displayName} · code{" "}
+                          {claimedName ? `says their name is ${claimedName} · ` : "sent no name · "}code{" "}
                           <span style={{ fontFamily: "var(--font-family-mono)" }}>
                             {fingerprintOf(req.peerDid)}
                           </span>
@@ -400,7 +419,7 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
                       >
                         <Avatar
                           profile={peerProfiles[contact.peerDid]}
-                          name={contact.name}
+                          name={nameOf(contact)}
                           size={40}
                         />
                         {isConnected && (
@@ -421,22 +440,57 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
 
                       {/* Info */}
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--space-sm)", minWidth: 0 }}>
                           <span
                             style={{
                               fontSize: "var(--font-size-body)",
                               fontWeight: "var(--font-weight-semibold)",
                               color: "var(--color-text)",
+                              display: "flex",
+                              alignItems: "baseline",
+                              gap: 6,
+                              minWidth: 0,
                             }}
                           >
-                            {contact.name}
+                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {nameOf(contact)}
+                            </span>
                           </span>
                           <TwoStepsChecklist
                             pairingState={contact.pairingState}
-                            peerName={contact.name}
+                            peerName={nameOf(contact)}
                             variant="compact"
                           />
                         </div>
+
+                        {/*
+                          A name you did not choose is their claim, and the app
+                          has to say so -- the request card already does. This
+                          row could not show one before, because an unnamed
+                          contact was stored with a placeholder; now that their
+                          own name comes through, the label comes with it.
+
+                          On its own line, not beside the name. Inline, it cost
+                          the name the horizontal room it needed: with
+                          "Connected directly" already on that line, "Sarthi"
+                          rendered as "Sa...". A ten-character aside must not
+                          crowd out the thing the row exists to show.
+                        */}
+                        {isClaimedName(
+                          localNameOf(contact.name),
+                          peerProfiles[contact.peerDid],
+                          contact.claimedName,
+                        ) && (
+                          <div
+                            style={{
+                              fontSize: "var(--font-size-label)",
+                              color: "var(--color-text-muted)",
+                              marginTop: 2,
+                            }}
+                          >
+                            the name they chose for themselves
+                          </div>
+                        )}
 
                         <div
                           style={{
@@ -458,7 +512,7 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
                     {!isConnected && (
                       <TwoStepsChecklist
                         pairingState="unilateral_waiting"
-                        peerName={contact.name}
+                        peerName={nameOf(contact)}
                         peerDid={contact.peerDid}
                       />
                     )}

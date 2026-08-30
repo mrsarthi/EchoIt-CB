@@ -18,6 +18,91 @@
 | **1. Core Application (v1)** | Chats, local storage, recovery | **In progress** | 0 | Onboarding + navigation shell done & audited. **Next: pairing (2.3)** |
 | **Pre-UI hardening** | CSP locked down before the UI grows | ✅ **PASSED** | 2 | Strict policy, 0 violations, message flow intact — see below |
 
+## 2026-08-30 — the server claim corrected, and four UI reports fixed on two phones
+
+Two unrelated pieces of work in one commit, at the user's request.
+
+### The server claim (Finding 18, copy half — closed)
+
+§1's load-bearing sentence said the update check was the only server EchoIt
+talks to. It never was: the app reaches a connection helper and publishes its
+own addresses on every launch. Approved wording is now in §1, §4.3 is corrected,
+and a new §4.4 describes the helper, its limits, and the fact that **there is no
+toggle**. Two things are deliberately not claimed, because they are untested:
+whether a helper can tell which two devices are reaching for each other, and
+anything about what our own relay logs.
+
+The app carries the disclosure too, under **CONNECTING** in Settings — which was
+the real complaint. Fixing only the document would have left the one place a
+user could check saying less than watching their own network would.
+
+**`npm run check:claims` enforces it.** §1's "do not write, anywhere, ever" list
+had no enforcement, which is how the false sentence survived nine days. Two
+rules: no banned sentence in `src/`, and the Settings copy must match §4.4 word
+for word — the second catches an approved claim being quietly softened, which is
+the likelier drift. Both were broken deliberately and both caught.
+
+### Four reports from the phones
+
+**1. Names disagreed between the two devices.** Whoever accepted a request saw
+the other person's chosen name; whoever *sent* one saw `Device ending in ...`
+forever. Not a sync fault: every contact-creating path filled an empty nickname
+with the placeholder **before storing it**, so "unnamed" became indistinguishable
+from a chosen nickname, and the local-name rule then did exactly what it is
+supposed to do. Contacts now store the nickname you typed and nothing else;
+`localNameOf` recognises the rows already on disk, including the legacy
+mixed-case spelling, so no migration and no lost nicknames. Verified on a phone:
+with the placeholder stored, the row went from `Device ending in ...1jRYnL` to
+**Sarthi**, labelled as their claim.
+
+A knock's name is now kept as `claimedName` rather than as a nickname, so it can
+be shown immediately, labelled honestly, and superseded by a profile.
+
+**2. The status repeated under every message.** A watermark describes everything
+before it, so three messages in a row carried three identical Read markers.
+`statusBoundaries` marks the last message of each run that shares a status — at
+most three in a conversation of any length. "Only the newest" was rejected: it
+hides that anything was read once a newer message is merely sent. Measured on
+hardware: three messages, **one** marker.
+
+**3. Timestamps moved inside the bubble**, bottom right, at `0.68em` — the same
+ratio the reference app uses, and an `em` so it holds at every font scale. The
+status stayed outside, below the bubble, where it was.
+
+**4. The request card put words in a stranger's mouth.** A knock with no name
+rendered *"says their name is Device ending in ...poVTQW"*. It now says **"sent
+no name"**.
+
+### Two mistakes worth recording
+
+**A float is not the WhatsApp trick.** The first timestamp attempt floated the
+corner, which pins to the *top* right — a wrapped message put its clock 137px
+above the bottom of its own bubble. What works is an absolutely positioned copy
+plus an identical hidden one inline, reserving exactly its width.
+
+**A checker that cannot fail.** The first overlap probe asked `elementFromPoint`
+what was under the clock. The answer is always the clock, since it is positioned
+on top by construction — it reported "clean" on a page broken in front of it.
+`harness/cdp/drive-chat-timestamps.mjs` measures the text's own `Range`
+rectangles instead, and was proven both ways: nothing on the shipped layout,
+every bubble once the corner is shoved 80px out of place.
+
+### Not verified
+
+**The first-run profile screen has never been rendered.** `needsProfileSetup` is
+unit-tested and the gate is deliberately conservative — either a published name
+or a knock name counts as answered, so nobody upgrading is stopped — but showing
+it needs an account that has never been named, and both phones have one. Say so
+rather than implying it works.
+
+**`npm run test:knock` is flaky**, and was before this work: two fresh Node peers
+over the real network with a 5-second ceiling for the request to arrive. It
+failed three runs, passed three on unmodified code, then passed again *with* the
+changes — so the correlation was coincidence. The tolerance was left alone rather
+than loosened to make it green.
+
+---
+
 ## 2026-08-30 — reachability-gated sending, verified on two phones (0.4.0)
 
 The send path asked "is there a connection?" and should have asked "is anyone
@@ -3059,7 +3144,26 @@ contact, so message counts, timing, and the channel id — which carries both
 did:keys — continue to leak the social graph.
 
 
-### Finding 18 — the relay and discovery servers are undisclosed, and unchosen — 🔴 **OPEN** *(found 2026-08-21)*
+### Finding 18 — the relay and discovery servers are undisclosed, and unchosen — 🟡 **COPY FIXED, INFRASTRUCTURE OPEN** *(found 2026-08-21, copy settled 2026-08-30)*
+
+**Resolved half — the copy.** Approved and applied 2026-08-30. §1's claim now
+names the helper, §4.3 no longer says the update check is the only server, and a
+new §4.4 describes the helper in §3-compliant language. The app carries the
+disclosure too, in Settings under **CONNECTING** — which was the real complaint,
+since the app previously said less than watching the network would show.
+`README.md`, `RELEASING.md` and `START_HERE.md` were updated to match.
+
+Two things were deliberately **not** claimed, because they are not tested:
+whether a helper can tell which two devices are reaching for each other, and
+anything about what our own AWS relay logs.
+
+**Open half — the infrastructure**, unchanged and below. `presets::N0` still
+publishes this device's addresses through `dns.iroh.link/pkarr` on every launch,
+and n0's relays are still in the pool alongside ours by choice
+(`iroh_bridge.rs:163`). Phase 7.
+
+*Original finding follows.*
+
 
 `PRODUCT.md` §1 states the product's most load-bearing sentence:
 
@@ -3103,9 +3207,10 @@ cannot read end-to-end encrypted content.
    There is no arrangement with them.
 
 **Fix, in two halves.** The urgent half is copy — §1 and §4 need to describe the
-connection helper honestly. Rule #4 makes the exact wording the user's to set,
-so what follows is a **draft awaiting approval, not an applied change.** §1 is
-untouched.
+connection helper honestly. The drafts below were **approved and applied on
+2026-08-30**; the shipped wording is plainer than these drafts and covers
+address publishing, which these did not. Read §1 and §4.4 for what is actually
+in force — these are kept only as the record of how it was arrived at.
 
 > **Draft replacement for the §1 claim**
 >

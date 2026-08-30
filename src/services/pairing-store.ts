@@ -2,7 +2,22 @@ import { decodeTicket, type PeerTicket } from "@dicsussion/core/transport";
 
 export interface Contact {
   peerDid: string;
+  /**
+   * The nickname *you* typed, and **empty when you did not type one**.
+   *
+   * It used to be filled in with `Device ending in ...abc123` at every place a
+   * contact was created, which made "unnamed" indistinguishable from a chosen
+   * nickname and meant the peer's own name could never be shown. Nothing may
+   * write a placeholder here again; screens resolve a name at render time
+   * through `displayNameFor`. Old rows still hold one, and `localNameOf`
+   * recognises it.
+   */
   name: string;
+  /**
+   * The name they sent with their pairing request, kept only until a profile
+   * arrives. A claim, never treated as a nickname.
+   */
+  claimedName?: string;
   pairingState: "unilateral_waiting" | "bilateral_connected";
   addedAt: number;
   ticketString?: string;

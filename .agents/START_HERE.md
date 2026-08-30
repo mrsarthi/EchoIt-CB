@@ -186,9 +186,10 @@ bitten three times. Check both.
 - **A second unrecoverable secret now exists.** `src-tauri/echoit-updater.key`
   plus `updater.properties`. Lose either and no existing install can ever be
   updated. Back it up with the keystore.
-- **`PRODUCT.md` §4.3's Settings copy contains a false sentence** — *"It's the
-  only time the app talks to a server"* (Finding 18). The clause is omitted in
-  the shipped UI rather than reworded, because rule #4 makes the wording yours.
+- **`PRODUCT.md` §1/§4.3 were corrected on 2026-08-30** and §4.4 added: the app
+  reaches a connection helper on every launch and now says so in Settings. The
+  old *"only time the app talks to a server"* sentence is gone — do not
+  reintroduce any "only server" phrasing (Finding 18, copy half closed).
 - **Both copies of the Android keystore need backing up off-machine.** Losing it
   means testers must uninstall, and uninstalling destroys their message history.
 - **Android**: keychain and CSP have never been exercised on a device.

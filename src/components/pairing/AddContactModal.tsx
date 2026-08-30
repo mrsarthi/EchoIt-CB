@@ -48,8 +48,9 @@ export function AddContactModal({
 
     try {
       setConnecting(true);
-      const displayName = nameInput.trim() || `Device ending in ...${validation.ticket!.didKey.slice(-6)}`;
-      await onConnect(ticketInput.trim(), displayName);
+      // Blank stays blank. Filling it in here is what stopped the peer's own
+      // name from ever being shown -- see `localNameOf`.
+      await onConnect(ticketInput.trim(), nameInput.trim());
       onClose();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -124,12 +125,17 @@ export function AddContactModal({
           />
         </div>
 
+        {/*
+          The hint used to say only where the name was stored, which left the
+          blank case unexplained -- and blank is the common case. Saying what
+          happens instead is what makes leaving it empty a choice.
+        */}
         <Input
           label="NAME OR NICKNAME (OPTIONAL)"
           placeholder="e.g. Alice"
           value={nameInput}
           onChange={(e) => setNameInput(e.target.value)}
-          hint="This name is saved locally on your phone."
+          hint="Only you see this, and it is kept on this device. Leave it blank to use the name they chose for themselves."
         />
       </form>
     </Modal>

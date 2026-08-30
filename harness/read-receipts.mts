@@ -17,6 +17,7 @@
  */
 
 import {
+  statusBoundaries,
   encodeReceipt,
   decodeReceipt,
   applyReceipt,
@@ -78,6 +79,44 @@ check('and does not leave a gap that reads as merely sent',
     applyReceipt(w, { kind: 'read', upTo: 999 }).readUpTo === 999);
   check('a message does not flip from read back to delivered on a stale replay',
     statusFor(300, applyReceipt(w, { kind: 'delivered', upTo: 10 })) === 'read');
+}
+
+/*
+ * Where the status marker goes.
+ *
+ * Reported as "seen status is visible after every msg" -- three messages in a
+ * row carried three identical Read markers. A watermark says one thing about
+ * all of them, so it should be said once.
+ */
+{
+  const out = (id: string, at: number) => ({ id, at, isOutgoing: true });
+  const marks = { deliveredUpTo: 300, readUpTo: 200 };
+
+  const run = [out('a', 100), out('b', 150), out('c', 200)];
+  const shown = statusBoundaries(run, marks);
+  check('three messages of the same status collapse to one marker',
+    shown.size === 1 && shown.has('c'), [...shown].join(','));
+
+  const mixed = [out('a', 100), out('b', 200), out('c', 250), out('d', 400)];
+  const marked = statusBoundaries(mixed, marks);
+  check('a change of status is always visible',
+    marked.size === 3 && marked.has('b') && marked.has('c') && marked.has('d'),
+    [...marked].join(','));
+  check('and never more than three, however long the thread',
+    statusBoundaries([...mixed, out('e', 401), out('f', 402)], marks).size === 3);
+
+  const interrupted = [out('a', 100), { id: 'theirs', at: 120, isOutgoing: false }, out('b', 150)];
+  check('a reply in the middle does not restart the run',
+    statusBoundaries(interrupted, marks).size === 1);
+
+  const waiting = [out('a', 100), { id: 'w', at: 999, isOutgoing: true, status: 'waiting' }];
+  check('a message still waiting is not a boundary of its own',
+    !statusBoundaries(waiting, marks).has('w'));
+
+  check('one message still gets its marker', statusBoundaries([out('a', 100)], marks).has('a'));
+  check('an empty thread shows nothing', statusBoundaries([], marks).size === 0);
+  check('with no receipts at all, only the newest is marked',
+    statusBoundaries(run, undefined).size === 1);
 }
 
 // The words a person actually sees.

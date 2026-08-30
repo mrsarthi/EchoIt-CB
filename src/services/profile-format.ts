@@ -55,15 +55,78 @@ export function displayNameFor(
   localName: string | undefined,
   profile: PeerProfile | undefined,
   peerDid: string,
+  claimedAtPairing?: string,
 ): string {
   const local = localName?.trim();
   if (local) return local;
   const claimed = profile?.displayName?.trim();
   if (claimed) return claimed;
+  // The name they sent with their knock, before any profile has synced. Same
+  // standing as a published name -- a claim -- so it sits on the same side of
+  // the local name, just behind the fresher of the two.
+  const knock = claimedAtPairing?.trim();
+  if (knock) return knock;
   // The same six characters the request card calls a "code", in the same
   // case. Two renderings of one fingerprint is one too many when the whole
   // point is that a person can read it out and compare.
+  return placeholderNameFor(peerDid);
+}
+
+/**
+ * Whether to ask someone what they are called.
+ *
+ * Asked once, for an account that has never answered. Both stores are checked
+ * because a name lives in two places for two audiences: the published profile,
+ * which paired contacts read, and the knock name, which a stranger sees on a
+ * request card. Either one being set means the question has been answered.
+ *
+ * Getting this wrong in the permissive direction is loud -- everyone upgrading
+ * would be stopped and asked to name themselves again -- so it errs towards
+ * not asking.
+ */
+export function needsProfileSetup(
+  published: string | undefined,
+  knockName: string | undefined,
+): boolean {
+  return !published?.trim() && !knockName?.trim();
+}
+
+/** What someone is called before anyone has said anything about them. */
+export function placeholderNameFor(peerDid: string): string {
   return `Device ending in ...${fingerprintOf(peerDid)}`;
+}
+
+/**
+ * A stored nickname, or `undefined` when there is not really one.
+ *
+ * ## The bug this exists for
+ *
+ * The nickname field is optional, and every place that created a contact
+ * filled a blank one in with `Device ending in ...abc123` **before storing
+ * it**. That turned "the user did not name this person" into "the user named
+ * this person `Device ending in ...abc123`", which `displayNameFor` then
+ * preferred over the peer's own name forever -- correctly, by its own rule,
+ * since a local name is supposed to win.
+ *
+ * The symptom was asymmetric and looked like a sync fault: whoever accepted a
+ * request saw the other person's chosen name, because the accept path stored
+ * the knock's claimed name, while whoever *sent* the request kept seeing
+ * `Device ending in ...` no matter what the other side published.
+ *
+ * Contacts are stored in `localStorage` and already carry the baked-in
+ * placeholder, so recognising it is how those rows get better without a
+ * migration that could lose a nickname someone actually chose. The risk is
+ * someone genuinely typing a name of this exact shape; they would lose their
+ * nickname and see the same six characters, which is a small and self-inflicted
+ * loss next to never seeing anyone's real name.
+ */
+const BAKED_PLACEHOLDER = /^Device ending in \.\.\.[0-9A-Za-z]{6}$/;
+
+export function localNameOf(stored: string | undefined): string | undefined {
+  const name = stored?.trim();
+  if (!name) return undefined;
+  if (BAKED_PLACEHOLDER.test(name)) return undefined;
+  return name;
 }
 
 /**
@@ -75,8 +138,10 @@ export function displayNameFor(
 export function isClaimedName(
   localName: string | undefined,
   profile: PeerProfile | undefined,
+  claimedAtPairing?: string,
 ): boolean {
-  return !localName?.trim() && !!profile?.displayName?.trim();
+  if (localName?.trim()) return false;
+  return !!profile?.displayName?.trim() || !!claimedAtPairing?.trim();
 }
 
 /** Initials for the placeholder shown when a peer has published no picture. */

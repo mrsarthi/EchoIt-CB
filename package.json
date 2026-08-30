@@ -35,7 +35,9 @@
     "android:icon": "node scripts/apply-android-icon.mjs",
     "android:prepare": "npm run android:sign && npm run android:activity && npm run android:icon",
     "release:manifest": "node scripts/make-latest-json.mjs",
-    "check:icon": "node scripts/check-icon.mjs"
+    "check:icon": "node scripts/check-icon.mjs",
+    "check:claims": "node scripts/check-claims.mjs",
+    "test:timestamps-device": "node harness/cdp/drive-chat-timestamps.mjs"
   },
   "dependencies": {
     "@dicsussion/core": "^0.8.0",

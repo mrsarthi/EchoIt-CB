@@ -17,6 +17,9 @@
 import {
   displayNameFor,
   isClaimedName,
+  localNameOf,
+  needsProfileSetup,
+  placeholderNameFor,
   initialsOf,
   validateDraft,
   MAX_BIO_LENGTH,
@@ -46,6 +49,60 @@ check('with neither, the peer is identified by something proven',
   displayNameFor(undefined, undefined, DID));
 check('and an empty published name does not produce a blank row',
   displayNameFor(undefined, profile('  '), DID) === 'Device ending in ...1JRYNL');
+
+/*
+ * The reported bug, pinned.
+ *
+ * Every contact-creating path filled an empty nickname with the placeholder
+ * *before storing it*, so "unnamed" became indistinguishable from "named
+ * `Device ending in ...`" -- and the local-name rule above then did exactly
+ * what it is supposed to do, forever. The result looked like a sync failure
+ * and was a storage bug: whoever accepted a knock saw a real name, whoever
+ * sent one never did.
+ */
+check('a stored placeholder is not a nickname',
+  localNameOf(placeholderNameFor(DID)) === undefined);
+check('so the peer’s own name comes through',
+  displayNameFor(localNameOf(placeholderNameFor(DID)), profile('Sunny'), DID) === 'Sunny');
+/*
+ * The rows already on disk do not use `fingerprintOf`. The code that baked them
+ * used `peerDid.slice(-6)` -- the DID's own mixed case -- while the placeholder
+ * shown today is upper-cased. Matching only the modern spelling would leave
+ * every existing contact broken, which is the only case that actually exists on
+ * a phone right now.
+ */
+check('the legacy mixed-case placeholder is recognised too',
+  localNameOf('Device ending in ...1jRYnL') === undefined);
+check('a real nickname still survives the same check',
+  localNameOf('Mum') === 'Mum');
+check('and a blank one is not a nickname either',
+  localNameOf('   ') === undefined && localNameOf(undefined) === undefined);
+check('a name that merely mentions a device is left alone',
+  localNameOf('Device ending in the shed') === 'Device ending in the shed');
+
+/*
+ * A knock carries a name too, and it has to be usable before any profile has
+ * synced -- otherwise accepting a request shows six characters where a name
+ * was on the card a second earlier.
+ */
+check('the knock name shows before a profile arrives',
+  displayNameFor(undefined, undefined, DID, 'Sunny') === 'Sunny');
+check('a synced profile is fresher than the knock',
+  displayNameFor(undefined, profile('Sunny Renamed'), DID, 'Sunny') === 'Sunny Renamed');
+check('but a nickname still beats both',
+  displayNameFor('Mum', profile('Sunny Renamed'), DID, 'Sunny') === 'Mum');
+check('a knock name is a claim, and is labelled as one',
+  isClaimedName(undefined, undefined, 'Sunny'));
+
+/*
+ * Who gets asked to choose a name. Wrong in the permissive direction, everyone
+ * upgrading is stopped and asked again -- so these cases are the point.
+ */
+check('a brand new account is asked', needsProfileSetup(undefined, undefined));
+check('a published name means it was answered', !needsProfileSetup('Sarthi', ''));
+check('so does a name only ever typed for knocking',
+  !needsProfileSetup(undefined, 'Sarthi'));
+check('blanks in both are still unanswered', needsProfileSetup('  ', '   '));
 
 // Screens have to label a claim as a claim, so they must be able to tell.
 check('a local name is not flagged as claimed', !isClaimedName('Mum', profile('X')));

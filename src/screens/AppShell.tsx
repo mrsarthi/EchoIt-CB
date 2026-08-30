@@ -23,6 +23,7 @@ import type { MessageItem } from "./chat/ChatView";
 import { loadHidden, saveHidden, visibleMessages, joinForForward } from "../services/hidden-messages";
 import { ForwardPicker, type ForwardTarget } from "../components/chat/ForwardPicker";
 import { pendingFor } from "../services/pending-sends";
+import { displayNameFor, localNameOf } from "../services/profile-format";
 
 export function AppShell() {
   const isWide = useBreakpoint(840);
@@ -233,6 +234,26 @@ export function AppShell() {
     window.history.back();
   }, []);
 
+  /**
+   * What to call a peer, resolved rather than stored.
+   *
+   * A contact row holds only the nickname you typed, which is usually nothing.
+   * The name on screen is worked out from that, the profile they published,
+   * and the name they knocked with -- in that order, and never the other way
+   * round (`profile-format.ts`). Doing it here means a profile arriving late
+   * renames every row that mentions them, instead of a stale string sitting in
+   * `localStorage` forever.
+   */
+  const nameOf = useCallback((peerDid: string): string => {
+    const contact = contacts.find((c) => c.peerDid === peerDid);
+    return displayNameFor(
+      localNameOf(contact?.name),
+      peerProfiles[peerDid],
+      peerDid,
+      contact?.claimedName,
+    );
+  }, [contacts, peerProfiles]);
+
   // Sync conversations with contacts
   useEffect(() => {
     setConversations((prev) => {
@@ -242,7 +263,7 @@ export function AppShell() {
       contacts.forEach((contact) => {
         const existing = updated.find((c) => c.peerDid === contact.peerDid);
         if (existing) {
-          existing.name = contact.name;
+          existing.name = nameOf(contact.peerDid);
           // isOnline is derived below from real inbound activity. It used to be
           // set from pairingState here, which meant "we have both added each
           // other" -- true whether or not the peer was anywhere near the app.
@@ -250,7 +271,7 @@ export function AppShell() {
           updated.push({
             id: `chat-${contact.peerDid.slice(0, 16)}`,
             peerDid: contact.peerDid,
-            name: contact.name,
+            name: nameOf(contact.peerDid),
             // Placeholder only until a message exists; the real preview is
           // derived below so it cannot drift from what was actually sent.
           lastMessage:
@@ -265,7 +286,7 @@ export function AppShell() {
 
       return updated;
     });
-  }, [contacts]);
+  }, [contacts, nameOf]);
 
   /**
    * Conversation rows with their preview taken from the message store.
@@ -577,7 +598,7 @@ export function AppShell() {
     .filter((c) => c.peerDid !== selectedConversation?.peerDid)
     .map((c) => ({
       peerDid: c.peerDid,
-      name: c.name,
+      name: nameOf(c.peerDid),
       profile: peerProfiles[c.peerDid],
     }));
 
@@ -635,7 +656,7 @@ export function AppShell() {
       const newChat: ConversationItem = {
         id: `chat-${peerDid.slice(0, 16)}`,
         peerDid,
-        name: contact?.name || `Device ending in ...${peerDid.slice(-6)}`,
+        name: nameOf(peerDid),
         lastMessage: contact?.pairingState === "bilateral_connected" ? "Connected directly" : "Waiting for them to connect back",
         timestamp: "Recently",
         unreadCount: 0,

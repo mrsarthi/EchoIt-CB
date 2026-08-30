@@ -219,8 +219,9 @@ State these to testers rather than letting them discover them:
 - **Message history is not encrypted at rest** (Finding 11). The Profile tab
   says so; do not soften it.
 - **Background delivery on Android** — measure it before claiming anything.
-- **`PRODUCT.md` §1 currently overstates the server position** (Finding 18): the
-  app contacts Number 0's relay and discovery services on every launch. Drafted
-  replacement wording is in `PROGRESS.md`, awaiting approval.
+- **`PRODUCT.md` §1 was corrected on 2026-08-30** to disclose the connection
+  helper the app reaches on every launch (Finding 18, copy half closed). §4.4 is
+  new and the app now carries the disclosure in Settings. The remaining half is
+  infrastructure ownership — address publishing still goes through Number 0.
 - **Whoever adds a contact second can message first.** The other side's composer
   unlocks on the first incoming message. Expected, not a bug.

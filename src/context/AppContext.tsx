@@ -390,7 +390,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
               ...prev,
               {
                 peerDid,
-                name: `Device ending in ...${peerDid.slice(-6)}`,
+                // No nickname: nobody typed one. The screens resolve a name.
+                name: "",
                 pairingState: "bilateral_connected",
                 addedAt: Date.now(),
               },
@@ -756,7 +757,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
           ...prev,
           {
             peerDid,
-            name: claimed?.trim() || `Device ending in ...${peerDid.slice(-6)}`,
+            // The knock's name is theirs, not ours. Stored as a claim so it can
+            // be shown immediately and labelled honestly, and so a profile can
+            // supersede it -- storing it as a nickname froze it forever and
+            // made the two devices disagree about what to call each other.
+            name: "",
+            ...(claimed?.trim() ? { claimedName: claimed.trim() } : {}),
             addedAt: now,
             // They knocked and we accepted, so both sides hold each other's
             // material -- there is no "waiting for them to add us back" here,
@@ -1181,7 +1187,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     // 3. Update local contact list
     const now = Date.now();
-    const displayName = name.trim() || `Device ending in ...${peer.didKey.slice(-6)}`;
+    const displayName = name.trim();
 
     setContacts((prev) => {
       const existingIndex = prev.findIndex((c) => c.peerDid === peer.didKey);

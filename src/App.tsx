@@ -4,6 +4,9 @@ import { BridgeScreen } from "./bridge-screen";
 import { AppProvider, useApp } from "./context/AppContext";
 import { OnboardingScreen } from "./screens/OnboardingScreen";
 import { AppShell } from "./screens/AppShell";
+import { ProfileSetupScreen } from "./screens/ProfileSetupScreen";
+import { loadDisplayName } from "./services/reach";
+import { needsProfileSetup } from "./services/profile-format";
 import { Card } from "./components/ui/Card";
 import { Button } from "./components/ui/Button";
 import { Modal } from "./components/ui/Modal";
@@ -16,7 +19,15 @@ import { ShieldIcon, RefreshIcon } from "./components/ui/Icons";
 const BRIDGE_MODE = import.meta.env.VITE_HARNESS === "bridge";
 
 function AppContent() {
-  const { state, error, resetApp } = useApp();
+  const { state, error, resetApp, myProfile } = useApp();
+  /**
+   * Whether the profile prompt has been finished in this session.
+   *
+   * `saveMyProfile` publishes the name and writes the knock copy, so the test
+   * below stops being true on its own -- but only after the context updates,
+   * and a screen that reappears for a frame is worse than one flag.
+   */
+  const [profileDone, setProfileDone] = useState(false);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
 
@@ -163,6 +174,19 @@ function AppContent() {
 
   if (state === "onboarding") {
     return <OnboardingScreen />;
+  }
+
+  /*
+   * A new account has never said what it is called, so the first thing its
+   * contacts would see is six characters of a key. Asked once, here.
+   *
+   * Both halves are checked because the two are stored separately: the profile
+   * is what paired contacts read, `loadDisplayName` is what a knock carries.
+   * Anyone who has ever set either has answered this question already and must
+   * not be asked again -- including everyone upgrading from an earlier build.
+   */
+  if (needsProfileSetup(myProfile?.displayName, loadDisplayName()) && !profileDone) {
+    return <ProfileSetupScreen onDone={() => setProfileDone(true)} />;
   }
 
   return <AppShell />;

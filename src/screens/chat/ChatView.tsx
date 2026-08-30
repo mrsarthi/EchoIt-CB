@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { ClockIcon, ArrowLeftIcon, LockIcon, PaperclipIcon, SendIcon } from "../../components/ui/Icons";
 import { AttachmentBubble } from "../../components/media/AttachmentBubble";
 import { MediaViewer, type ViewableMedia } from "../../components/media/MediaViewer";
@@ -12,7 +12,7 @@ import { Avatar } from "../../components/profile/Avatar";
 import { PeerProfileSheet } from "../../components/profile/PeerProfileSheet";
 import type { PeerProfile } from "../../services/profile-format";
 import { ReadStatus } from "../../components/chat/ReadStatus";
-import { statusFor, type Watermarks } from "../../services/receipts";
+import { statusBoundaries, statusFor, type Watermarks } from "../../services/receipts";
 import { countIncomingSince } from "../../services/unread";
 import { SelectionBar } from "../../components/chat/SelectionBar";
 import { NewMessagePill } from "../../components/chat/NewMessagePill";
@@ -103,6 +103,33 @@ export interface ChatViewProps {
   forwardsSent?: number;
 }
 
+/**
+ * The timestamp block inside a bubble, used for both the visible copy and the
+ * hidden one that reserves its space. One object, because two copies of the
+ * same numbers would eventually stop matching and the text would run under the
+ * clock.
+ */
+const META_INLINE: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
+  marginLeft: 8,
+  /*
+   * Relative to the bubble's own text, not a token.
+   *
+   * `--font-size-label` is 12px against 16px body and still read as part of
+   * the message. This is the ratio the reference app uses, and being an `em`
+   * it stays proportional at every system font scale -- which a hardcoded px
+   * would not.
+   */
+  fontSize: "0.68em",
+  lineHeight: 1,
+  color: "var(--color-text-muted)",
+  userSelect: "none",
+  whiteSpace: "nowrap",
+  verticalAlign: "bottom",
+};
+
 export function ChatView({
   peerDid,
   peerName,
@@ -132,6 +159,18 @@ export function ChatView({
   onForward,
   forwardsSent = 0,
 }: ChatViewProps) {
+  /**
+   * The messages that carry a status indicator.
+   *
+   * One watermark describes every message before it, so repeating the marker
+   * under each of them says the same thing several times over. See
+   * `statusBoundaries` for why this is not simply "the last message".
+   */
+  const showsStatus = useMemo(
+    () => statusBoundaries(messages, peerWatermarks),
+    [messages, peerWatermarks],
+  );
+
   const [inputText, setInputText] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
   /**
@@ -994,6 +1033,8 @@ ${DELETE_WARNING}`)) return;
                   wordBreak: "break-word",
                   whiteSpace: "pre-wrap",
                   boxShadow: "var(--shadow-low)",
+                  // The timestamp corner is positioned against this.
+                  position: "relative",
                 }}
               >
                 {/*
@@ -1061,55 +1102,86 @@ ${DELETE_WARNING}`)) return;
                   );
                 })}
                 {msg.text}
+
+                {/*
+                  The time, inside the bubble at its bottom right.
+
+                  ## Why it is rendered twice
+
+                  A float was the first attempt and is wrong: a float placed
+                  before the text pins to the *top* right, so a message that
+                  wrapped put its timestamp 137px above the bottom of its own
+                  bubble. Measured on a phone.
+
+                  What works is what WhatsApp does. One copy is positioned in
+                  the bottom-right corner and does the showing. The other is
+                  inline at the end of the text, hidden, and does nothing but
+                  take up room -- so the last line of text stops short by
+                  exactly the width of the timestamp and the two never overlap.
+                  Rendering the same markup for both is what keeps those widths
+                  equal as the font scale changes.
+
+                  A short message keeps its timestamp on the same line, because
+                  the reserved space is simply at the end of the only line. A
+                  full last line pushes the spacer onto a new one, and the
+                  corner follows it down.
+
+                  Only the time goes in here. The delivery status stays below
+                  the bubble where it has always been: inside, it read as part
+                  of the message rather than as a note about it.
+                */}
+                <span aria-hidden style={{ ...META_INLINE, visibility: "hidden" }}>
+                  {msg.timestamp}
+                </span>
+                <span style={{ ...META_INLINE, position: "absolute", right: 14, bottom: 8 }}>
+                  {msg.timestamp}
+                </span>
               </div>
 
-              {/* Timestamp & Status Receipt */}
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 4,
-                  marginTop: 4,
-                  padding: "0 4px",
-                  fontSize: "var(--font-size-label)",
-                  color: "var(--color-text-muted)",
-                }}
-              >
-                <span>{msg.timestamp}</span>
-                {msg.isOutgoing && (
-                  <>
-                    <span>•</span>
-                    {/*
-                      Until both sides have added each other nothing can be
-                      delivered, so there is no receipt to wait for and saying
-                      "Sent" would overstate it. Once they can receive, the
-                      status is whatever they have actually confirmed — which
-                      until now was always the word "Staged", because nothing
-                      anywhere ever set `msg.status`.
-                    */}
-                    {msg.status === "waiting" ? (
-                      /*
-                        Never a tick. This message is on this device and
-                        nowhere else, and the whole reason for the change that
-                        introduced it is that such a message used to be
-                        indistinguishable from a delivered one.
-                      */
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
-                        <ClockIcon size={11} />
-                        Waiting for {peerName}
-                      </span>
-                    ) : !isConnected ? (
-                      <span>Staged</span>
-                    ) : (
-                      <ReadStatus
-                        status={statusFor(msg.at ?? 0, peerWatermarks)}
-                        peerName={peerName}
-                        peerProfile={peerProfile}
-                      />
-                    )}
-                  </>
-                )}
-              </div>
+              {/*
+                The delivery status, below the bubble where it has always
+                been. Only the time moved inside.
+
+                Shown at the boundaries of a run rather than under every
+                message -- see `statusBoundaries`. Until both sides have added
+                each other nothing can be delivered, so there is no receipt to
+                wait for and saying "Sent" would overstate it.
+              */}
+              {msg.isOutgoing
+                && (msg.status === "waiting" || !isConnected || showsStatus.has(msg.id)) && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 4,
+                    marginTop: 4,
+                    padding: "0 4px",
+                    fontSize: "var(--font-size-label)",
+                    color: "var(--color-text-muted)",
+                  }}
+                >
+                  {msg.status === "waiting" ? (
+                    /*
+                      Never a tick. This message is on this device and nowhere
+                      else, and the whole reason for the change that introduced
+                      it is that such a message used to be indistinguishable
+                      from a delivered one.
+                    */
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                      <ClockIcon size={11} />
+                      Waiting for {peerName}
+                    </span>
+                  ) : !isConnected ? (
+                    <span>Staged</span>
+                  ) : (
+                    <ReadStatus
+                      status={statusFor(msg.at ?? 0, peerWatermarks)}
+                      peerName={peerName}
+                      peerProfile={peerProfile}
+                    />
+                  )}
+                </div>
+              )}
             </div>
             </SwipeToReply>
           ))

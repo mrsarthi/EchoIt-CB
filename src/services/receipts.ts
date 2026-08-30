@@ -139,6 +139,60 @@ export function statusFor(sentAt: number, marks: Watermarks | undefined): Messag
   return "sent";
 }
 
+/**
+ * Which of your messages should carry a status indicator.
+ *
+ * ## Why not all of them
+ *
+ * A watermark covers everything before it, so a tick under every message
+ * repeats one fact as many times as you sent messages. Three messages in a row
+ * produced three identical "Read" markers, which is noise on the screen and,
+ * worse, reads as three separate confirmations.
+ *
+ * ## Why not only the last one either
+ *
+ * "Only the newest message" is the obvious simplification and it silently
+ * throws information away: send three, have them read, then send two more
+ * while they are away, and the newest is `sent` while the earlier three are
+ * `read`. Showing only the newest hides that they read anything at all.
+ *
+ * So the marker goes at each **boundary** — the last message of every run that
+ * shares a status. Identical statuses collapse to one marker, and a change is
+ * always visible. Since a status only ever improves with time, there are at
+ * most three markers in a conversation of any length.
+ *
+ * A message still waiting to be sent is not part of this. It has no status to
+ * repeat and its own explicit line, so it always shows.
+ */
+export interface StatusBearing {
+  readonly id: string;
+  readonly at?: number;
+  readonly isOutgoing: boolean;
+  readonly status?: string;
+}
+
+export function statusBoundaries(
+  messages: readonly StatusBearing[],
+  marks: Watermarks | undefined,
+): ReadonlySet<string> {
+  const shown = new Set<string>();
+  // Incoming messages are irrelevant: a reply in the middle does not make the
+  // watermark say anything new, so it must not restart a run.
+  const mine = messages.filter((m) => m.isOutgoing && m.status !== "waiting");
+
+  for (let i = 0; i < mine.length; i += 1) {
+    const next = mine[i + 1];
+    if (!next) {
+      shown.add(mine[i].id);
+      continue;
+    }
+    if (statusFor(mine[i].at ?? 0, marks) !== statusFor(next.at ?? 0, marks)) {
+      shown.add(mine[i].id);
+    }
+  }
+  return shown;
+}
+
 /** What the status means, for a tooltip and for a screen reader. */
 export function describeStatus(status: MessageStatus, peerName: string): string {
   switch (status) {

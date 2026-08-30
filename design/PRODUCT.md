@@ -18,20 +18,35 @@ We speak to the user's desire for personal space. We do not sell high-tech sover
 ### The Claim, Stated Exactly
 
 Because the posture above is absolute, every narrower claim has to survive
-inspection. There is exactly one thing EchoIt sends to a server, and we say it
-rather than let someone discover it:
+inspection. EchoIt reaches a server in two places — finding the person you are
+talking to, and asking whether there is a new version — and we say both rather
+than let someone discover them:
 
-> **"The only thing EchoIt asks a server is whether there's a new version.
-> Everything else goes straight between your device and theirs."**
+> **"Phones move around and have no fixed address, so EchoIt uses a helper to
+> introduce your device to your friend's. After that, your messages go straight
+> from your phone to theirs. If the two phones can't reach each other directly,
+> the helper passes the messages along still sealed — it cannot open them. The
+> only other server EchoIt talks to is the one it asks whether there's a new
+> version."**
 
-This is deliberately checkable — anyone can watch the network and confirm it.
-The strict CSP means the app *cannot* reach anywhere else even if a dependency
-tried.
+Still deliberately checkable — anyone can watch the network — and now what they
+see matches what we said. A helper can tell that a device is online and roughly
+where it is connecting from. It cannot read a word of what it carries, and it
+never holds anything: a message for someone who is offline is dropped, not
+stored. Whether a helper can work out *which two* devices are reaching for each
+other has not been tested here, so we do not claim that it cannot. See §4.4 for
+the helper and §4.3 for the update check.
+
+The strict CSP still means the app's screens cannot fetch from anywhere on the
+web. It was never the reason the earlier claim held: the helper is reached by
+the app's networking layer rather than by the web layer, so the CSP never
+covered it, which is how this went unnoticed for as long as it did.
 
 **Do not write, anywhere, ever:** "EchoIt never connects to a server", "nothing
-ever leaves your device", or "no data is ever transmitted". Each is false by a
-small margin, and a small false claim is what makes people doubt the large true
-ones. See §4.3 for the update check itself.
+ever leaves your device", "no data is ever transmitted", or "the only time the
+app talks to a server is to check for updates". Each is false by a small
+margin, and a small false claim is what makes people doubt the large true
+ones.
 
 ---
 
@@ -67,6 +82,7 @@ To ensure the app remains accessible to ordinary people, **never lead with crypt
 | *Cryptographic identifier (DID)* | "Your private identity ticket" or "your safe address." |
 | *Decentralized architecture* | "There is no central server holding your history; it lives only on your phone." |
 | *Pairing handshake / key exchange* | "Connecting your devices directly." |
+| *Relay / STUN / NAT traversal / discovery* | "A helper that introduces your device to theirs." |
 
 ---
 
@@ -80,22 +96,53 @@ EchoIt values radical transparency. We must tell the truth about what our techno
 *   **UI Warning Copy**:
     > *"Your chat history is stored locally on this phone. Because message files are not encrypted on your device's disk, someone who gains physical access to your phone might be able to read them. We recommend keeping a strong lock screen password or PIN enabled."*
 
-### 3. Update Checks — the one server EchoIt talks to *(settled 2026-08-20)*
+### 3. Update Checks *(settled 2026-08-20; server claim corrected 2026-08-30)*
 
 *   **The Reality**: EchoIt checks GitHub once a day to see whether a newer
-    version exists. That is the only server it ever contacts. The request
-    carries no identifier, no counter, and nothing about you — but GitHub can
-    see an IP address and roughly when the app was opened.
+    version exists. The request carries no identifier, no counter, and nothing
+    about you — but GitHub can see an IP address and roughly when the app was
+    opened. It is **not** the only server the app contacts; see §4.4.
 *   **Verbal Rule**: We say this out loud rather than hoping nobody asks. We
-    never write "EchoIt never connects to a server" — that would be false, and a
-    small false claim undermines the large true ones. The honest framing is
-    *"the only thing EchoIt asks a server is whether there's a new version."*
+    never write "EchoIt never connects to a server", and — since 2026-08-30 —
+    we no longer write *"it's the only time the app talks to a server"* either.
+    Both are false, and a small false claim undermines the large true ones.
 *   **UI Copy** (Settings, beside the toggle):
     > *"Check for updates — EchoIt asks GitHub once a day whether a newer
-    > version is available. It's the only time the app talks to a server, and it
-    > sends nothing about you or your conversations. You can turn this off, but
-    > then you'll need to check for new versions yourself."*
+    > version is available. It sends nothing about you or your conversations.
+    > You can turn this off, but then you'll need to check for new versions
+    > yourself."*
 *   **Control**: A toggle in Settings, on by default.
+
+### 4. The connection helper — the other server *(settled 2026-08-30)*
+
+*   **The Reality**: Two phones on mobile networks cannot normally dial each
+    other, so on every launch EchoIt does two things through infrastructure it
+    does not own end to end. It **publishes** where this device can currently be
+    reached, so the other person's phone can find it. And it keeps a **helper**
+    on standby to introduce the two devices, which also carries the messages if
+    no direct path can be made. Both are contacted whether or not you send
+    anything. Measured on hardware, every conversation so far has gone
+    **directly** between devices — the helper introduced them and then stepped
+    out of the way — but that is the common case, not a guarantee.
+*   **What it can and cannot see**: It can see that a device is online and
+    roughly where it is connecting from. It cannot read anything it carries, and
+    it stores nothing — a message for someone who is offline is dropped rather
+    than held (§AGENT_INSTRUCTIONS §3). Whether it can determine which two
+    devices are reaching for each other is **untested**, so we do not claim it
+    cannot.
+*   **Verbal Rule**: Never call this "peer-to-peer with no servers", and never
+    describe anything we host as "zero knowledge" — true of content, false of
+    metadata, and §4.2 forbids claiming protection we do not have. Say
+    **helper**, not "relay", "STUN", "NAT traversal", or "discovery" (§3).
+*   **UI Copy** (Settings):
+    > *"Connecting — Phones move around and have no fixed address, so EchoIt
+    > uses a helper to introduce your device to the person you're messaging.
+    > Once they've been introduced, messages go straight between the two
+    > phones. If they can't reach each other directly, the helper passes them
+    > along sealed — it can't read them, and it never stores one."*
+*   **Control**: **None today.** The helper cannot be turned off, because
+    without it the app cannot find anyone. Say so if asked; do not imply a
+    choice exists.
 
 ### 2. Spam Protection
 *   **The Reality**: The anti-spam machinery (including rate-limiting RLN proofs for identified channels) is deactivated in the current build.

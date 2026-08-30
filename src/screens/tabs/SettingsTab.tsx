@@ -266,6 +266,45 @@ export function SettingsTab() {
           </Card>
         </section>
 
+        {/*
+          The helper — PRODUCT.md §4.4.
+
+          Finding 18's complaint was not really that a document was wrong; it
+          was that every launch reaches infrastructure and the app said nothing
+          about it, so the one place a user could check told them less than
+          watching their own network would. This is that missing paragraph.
+
+          Copy is §4.4's verbatim and holds to §3: "helper", never "relay" or
+          "discovery". It sits above Updates deliberately — the update check is
+          the smaller of the two and used to be presented as the only one.
+
+          There is no toggle on purpose. Without the helper the app cannot find
+          anyone, and offering a switch that breaks messaging would be worse
+          than saying plainly that there isn't one.
+        */}
+        <section style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
+          <span
+            style={{
+              fontSize: "var(--font-size-label)",
+              fontWeight: "var(--font-weight-semibold)",
+              color: "var(--color-text-muted)",
+              letterSpacing: "0.04em",
+            }}
+          >
+            CONNECTING
+          </span>
+          <Card>
+            <p style={{ fontSize: "var(--font-size-label)", color: "var(--color-text-muted)", lineHeight: 1.5, margin: 0 }}>
+              Phones move around and have no fixed address, so EchoIt uses a
+              helper to introduce your device to the person you&apos;re
+              messaging. Once they&apos;ve been introduced, messages go straight
+              between the two phones. If they can&apos;t reach each other
+              directly, the helper passes them along sealed — it can&apos;t read
+              them, and it never stores one.
+            </p>
+          </Card>
+        </section>
+
         {/* Updates — Q21 / PRODUCT.md §4.3 */}
         <section style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
           <span
@@ -292,13 +331,11 @@ export function SettingsTab() {
             </div>
 
             {/*
-              PRODUCT.md §4.3 specifies this copy, including the sentence
-              "It's the only time the app talks to a server." That sentence is
-              not true: iroh_bridge.rs:170 binds with `presets::N0`, so the app
-              contacts Number 0's relay and discovery services on every launch
-              (Finding 18). Rule #4 makes the approved wording the user's to
-              set, so the false clause is omitted here rather than reworded —
-              everything below is accurate as written.
+              PRODUCT.md §4.3. This used to end "it's the only time the app
+              talks to a server", which was false — the app reaches a helper on
+              every launch (Finding 18). §4.3 was corrected on 2026-08-30 and
+              the clause is gone for good; the helper has its own disclosure
+              below, per §4.4. Do not reintroduce a "only server" claim here.
             */}
             <p style={{ fontSize: "var(--font-size-label)", color: "var(--color-text-muted)", lineHeight: 1.5, margin: 0 }}>
               EchoIt asks GitHub once a day whether a newer version is available.
