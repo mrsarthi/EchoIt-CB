@@ -2,7 +2,7 @@
 
 ## Status at a glance
 
-*Last updated: 2026-08-28 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.7.2` · **🚪 GATE OPEN — two physical phones held a conversation through the real UI** · **0.2.0 published** for Windows and Android*
+*Last updated: 2026-08-30 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.8.0` · **🚪 GATE OPEN — two physical phones held a conversation through the real UI** · **0.3.0 published** for Windows and Android*
 
 | Phase | Target / Deliverable | Status | Tests | Notes |
 |---|---|---|---|---|
@@ -17,6 +17,97 @@
 | **S3. iOS readiness** | Paper check only — no Mac available | **Not Started** | 0 | Deferred by decision, not forgotten |
 | **1. Core Application (v1)** | Chats, local storage, recovery | **In progress** | 0 | Onboarding + navigation shell done & audited. **Next: pairing (2.3)** |
 | **Pre-UI hardening** | CSP locked down before the UI grows | ✅ **PASSED** | 2 | Strict policy, 0 violations, message flow intact — see below |
+
+## 2026-08-30 — profiles, receipts, selection, and the knock verified on hardware
+
+SDK `@dicsussion/*@0.8.0`. Everything below was measured on two phones and the
+Windows build, not read.
+
+### Delivered
+
+- **Knocking works end to end.** The Windows app, a stranger to both phones,
+  knocked each one; the card showed the claimed name and the six-character
+  code; Accept paired; a message crossed afterwards. That last step is what
+  separates pairing from dismissing a card.
+- **Our relay carries real traffic.** Two accepts and two unique client keys in
+  the server's own metrics, and every device's ticket names
+  `https://echoit-relay.duckdns.org/` as its home relay — it is chosen over
+  N0's, not merely reachable.
+- **Profiles.** Name, bio, picture. Phone B shows phone A's picture decoded at
+  96x96, the bio, and the published name under "they call themselves" rather
+  than in place of the local name.
+- **Read status as the receiver's face.** delivered = `grayscale(1)`, read =
+  full colour plus a ring, both confirmed from computed style on a phone.
+- **Selection menu.** Copy, forward to several, delete-for-me.
+
+### Finding — `knock-peer.mts` never could knock a phone
+
+The SDK's native transport opens one QUIC bi-stream per sub-stream; the Tauri
+bridge accepts exactly one (`accept_bi`, once) and multiplexes. Same ALPN, two
+wire formats, so the dial dies at the protocol handshake with
+`FinishedEarly(0)` — which looks exactly like a network fault. It fails
+identically with both peers on one LAN.
+
+**This invalidates the earlier "the phone's default route is cellular"
+diagnosis.** That was wrong. Anything bridged must be knocked from something
+bridged: the desktop app.
+
+### Finding — one pairing request per peer, per app run
+
+`SessionManager` records a peer on its first `0x0a` frame and drops every later
+one for the process lifetime, while `requestPairing` still returns `true` to the
+sender. A knock whose name went missing came back correct after nothing but a
+restart of the *receiving* app, on an unchanged binary.
+
+Consequence: a request consumed while the user had requests switched off, or
+before they set a name, can never be replaced until they restart. The app's own
+"a repeat knock refreshes the name" path cannot fire, because no repeat is
+delivered. `describeKnock` no longer promises "they will see it".
+
+Pinned in `harness/knock-name.mts`.
+
+### Finding — built-then-never-fed, three more times
+
+`status` on every message (so every message anyone ever sent read "Staged"),
+and both nav badges (`AppShell` passed `BottomNav` no counts at all). Added to
+the two `unreadCount: 0` sites `services/unread.ts` already records. None of
+these fail loudly, which is how they survive; each is now fed and tested.
+
+### Upstream request — SDK-9: reactions
+
+Confirmed absent in 0.8.0: no `reaction`, `emoji`, `reactTo` or annotation
+anywhere in the published types, and `SendMessageOptions` has no open metadata
+field, so this cannot be built app-side.
+
+Asked for: six defaults plus a plus-button for any emoji, on long press.
+
+**Wanted, and why each part:**
+
+1. **Its own field or stream, not a marker in `content`.** Exactly the argument
+   `replyTo`'s own doc comment makes: a marker inside `content` is something
+   every client must know to strip, forever, and renders as literal text in any
+   that does not. A reaction is worse than a reply here, because there are many
+   per message.
+2. **Keyed by (message id, author did), last write wins.** One person holds at
+   most one reaction per message, so changing it replaces rather than appends,
+   and re-sending the same one is idempotent. This is what stops a flaky
+   connection producing six thumbs-up from one person.
+3. **Removable.** Clearing must be expressible, which under last-write-wins
+   means an explicit empty value rather than an absent one — the same
+   distinction `ProfileUpdate` draws with `null` versus omitted.
+4. **Not a message.** If a reaction lands in the conversation document as an
+   entry, every reaction is permanent, replicated, and shows up in history
+   windows and unread counts. It needs to behave like a profile — mutable,
+   single-writer, replacing — rather than like a message.
+5. **An arbitrary emoji string, capped.** A closed set of six would make the
+   plus-button impossible. A short cap (a few tens of bytes) keeps it from
+   becoming a second message body.
+6. **Ordering that does not require agreement between devices.** Same treatment
+   as `PeerProfile.updatedAt`: an author's own clock ordering that author's
+   versions against each other, never one peer against another.
+
+Until it lands the selection menu ships without reactions, and long press opens
+selection instead.
 
 ## ✅ M2.4 — messages actually send (2026-08-23)
 
