@@ -58,7 +58,19 @@ export function Avatar({ profile, name, size = 40, ring, muted = false }: Avatar
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",
-    ...(ring ? { boxShadow: `0 0 0 2px var(--color-surface), 0 0 0 4px ${ring}` } : {}),
+    /*
+     * The ring scales with the circle and is capped.
+     *
+     * Fixed at 2px and 4px it added 8px to the width whatever the size, so the
+     * 16px read indicator occupied 24px inside an 18px row of 12px text — it
+     * was the largest thing on the line. Measured on a phone, not guessed.
+     */
+    ...(ring
+      ? {
+        boxShadow: `0 0 0 ${Math.min(2, Math.max(1, Math.round(size * 0.08)))}px var(--color-surface), `
+          + `0 0 0 ${Math.min(4, Math.max(2, Math.round(size * 0.16)))}px ${ring}`,
+      }
+      : {}),
   } as const;
 
   if (url) {

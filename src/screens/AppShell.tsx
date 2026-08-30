@@ -20,6 +20,8 @@ import { saveToDevice, type Attachment } from "../services/attachments";
 import { describeBlobError, previewOf } from "../services/attachment-format";
 import { countUnread, countWaitingConversations, lastInboundAt, loadReadMarks, saveReadMarks, type ReadMarks } from "../services/unread";
 import type { MessageItem } from "./chat/ChatView";
+import { loadHidden, saveHidden, visibleMessages, joinForForward } from "../services/hidden-messages";
+import { ForwardPicker, type ForwardTarget } from "../components/chat/ForwardPicker";
 
 export function AppShell() {
   const isWide = useBreakpoint(840);
@@ -44,6 +46,20 @@ export function AppShell() {
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationItem[]>([]);
   const [readMarks, setReadMarks] = useState<ReadMarks>(() => loadReadMarks());
+  /**
+   * Message ids hidden on this device, per peer.
+   *
+   * A ref, not state: it is a cache read during render, and writing state
+   * during render loops. `hiddenVersion` is the thing that actually re-renders
+   * when something is hidden — one number rather than a new object per
+   * conversation.
+   */
+  const hiddenCache = useRef<Record<string, Set<string>>>({});
+  const [hiddenVersion, setHiddenVersion] = useState(0);
+  /** Texts staged for forwarding, and therefore whether the picker is open. */
+  const [forwarding, setForwarding] = useState<readonly string[] | null>(null);
+  /** Counts completed forwards, so the chat knows when to drop its selection. */
+  const [forwardsSent, setForwardsSent] = useState(0);
 
   /**
    * A ticking "now" so elapsed time re-renders on its own.
@@ -272,9 +288,25 @@ export function AppShell() {
     return Math.max(beat, message);
   };
 
+  const hiddenFor = (peerDid: string): Set<string> => {
+    const held = hiddenCache.current[peerDid];
+    if (held) return held;
+    const loaded = loadHidden(did, peerDid);
+    hiddenCache.current[peerDid] = loaded;
+    return loaded;
+  };
+
   const conversationsWithPreview: ConversationItem[] = conversations
     .map((c) => {
-      const thread = messages[c.peerDid] ?? [];
+      /*
+       * Hidden messages are hidden here too.
+       *
+       * They were not, and the result was a row previewing a message that the
+       * conversation itself no longer showed — "deleted for me" that was still
+       * legible from the list. The time and the sort position come from this
+       * same thread, so all three agree or none do.
+       */
+      const thread = visibleMessages(messages[c.peerDid] ?? [], hiddenFor(c.peerDid));
       // The newest by timestamp, not the last appended: a late sync lands at
       // the end of the array while being older than its neighbour.
       const latest = newestOf(thread);
@@ -501,9 +533,55 @@ export function AppShell() {
   }, [selectedChatId]);
 
   /** SDK messages in the shape ChatView renders. */
+  /**
+   * Hidden ids for a conversation, read from storage the first time it is
+   * asked for. Lazily, because reading every conversation's list at start-up
+   * is work for conversations that may never be opened.
+   */
+  /**
+   * Hide messages on this device.
+   *
+   * The confirmation, including that this cannot reach the other person's
+   * copy, has already been shown by the time this runs — see
+   * `services/hidden-messages.ts` for why that warning is not optional.
+   */
+  const handleDeleteForMe = (peerDid: string, ids: readonly string[]) => {
+    const next = new Set(hiddenFor(peerDid));
+    for (const id of ids) next.add(id);
+    hiddenCache.current[peerDid] = next;
+    saveHidden(did, peerDid, next);
+    setHiddenVersion((v) => v + 1);
+  };
+
+  /** Send the staged texts to everyone picked. */
+  const handleForwardTo = (peerDids: readonly string[]) => {
+    const body = joinForForward(forwarding ?? []);
+    setForwarding(null);
+    if (!body) return;
+    setForwardsSent((n) => n + 1);
+    for (const peerDid of peerDids) {
+      void sendMessage(peerDid, body).catch(() => {
+        // Reported the same way an ordinary send failure is; forwarding to
+        // several must not stop at the first person who is unreachable.
+      });
+    }
+  };
+
+  /** Everyone except whoever is on screen — forwarding to them is a no-op. */
+  const forwardTargets: ForwardTarget[] = contacts
+    .filter((c) => c.peerDid !== selectedConversation?.peerDid)
+    .map((c) => ({
+      peerDid: c.peerDid,
+      name: c.name,
+      profile: peerProfiles[c.peerDid],
+    }));
+
   const messagesFor = (peerDid: string | undefined): MessageItem[] => {
     if (!peerDid || !did) return [];
-    return (messages[peerDid] ?? []).map((m) => ({
+    // Read so this recomputes when something is hidden. The cache behind
+    // `hiddenFor` is a ref, which React does not watch.
+    void hiddenVersion;
+    return visibleMessages(messages[peerDid] ?? [], hiddenFor(peerDid)).map((m) => ({
       id: m.id,
       senderDid: m.authorDid ?? peerDid,
       isOutgoing: m.authorDid === did,
@@ -590,6 +668,9 @@ export function AppShell() {
             peerProfile={peerProfiles[selectedConversation.peerDid]}
             otherUnreadCount={unreadConversations}
             peerWatermarks={receipts[selectedConversation.peerDid]}
+            onDeleteForMe={(ids) => handleDeleteForMe(selectedConversation.peerDid, ids)}
+            onForward={(texts) => setForwarding(texts)}
+            forwardsSent={forwardsSent}
             pairingState={selectedContact?.pairingState || "unilateral_waiting"}
             isOnline={selectedConversation.isOnline}
             presenceLabel={selectedPresenceLabel}
@@ -704,6 +785,9 @@ export function AppShell() {
             peerProfile={peerProfiles[selectedConversation.peerDid]}
             otherUnreadCount={unreadConversations}
             peerWatermarks={receipts[selectedConversation.peerDid]}
+            onDeleteForMe={(ids) => handleDeleteForMe(selectedConversation.peerDid, ids)}
+            onForward={(texts) => setForwarding(texts)}
+            forwardsSent={forwardsSent}
             pairingState={selectedContact?.pairingState || "unilateral_waiting"}
             isOnline={selectedConversation.isOnline}
             presenceLabel={selectedPresenceLabel}
@@ -773,6 +857,19 @@ export function AppShell() {
   return (
     <>
       {renderContent()}
+
+      {/*
+        Outside the layouts so one picker serves both. Open exactly when there
+        is something staged, so there is no second piece of state that can
+        disagree with the first about whether it should be showing.
+      */}
+      <ForwardPicker
+        isOpen={forwarding !== null}
+        onClose={() => setForwarding(null)}
+        targets={forwardTargets}
+        count={forwarding?.length ?? 0}
+        onSend={handleForwardTo}
+      />
 
       {/*
         Asked only when back has nowhere left to go. A messenger that

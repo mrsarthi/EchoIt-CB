@@ -29,7 +29,17 @@ export interface ReadStatusProps {
   size?: number;
 }
 
-export function ReadStatus({ status, peerName, peerProfile, size = 16 }: ReadStatusProps) {
+/**
+ * Matched to the timestamp beside it.
+ *
+ * 16 was reported as too big and measuring agreed: it sat in an 18px row of
+ * 12px text, and the read state's ring took it to 24px — wider than the row.
+ * At 12 it is the same height as the words it sits with, and the ring keeps it
+ * inside the line.
+ */
+const DEFAULT_SIZE = 12;
+
+export function ReadStatus({ status, peerName, peerProfile, size = DEFAULT_SIZE }: ReadStatusProps) {
   const label = describeStatus(status, peerName);
 
   if (status === "sent") {

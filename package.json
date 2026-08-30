@@ -26,6 +26,7 @@
     "test:profile-names": "tsx harness/profile-names.mts",
     "test:badges": "tsx harness/nav-badges.mts",
     "test:receipts": "tsx harness/read-receipts.mts",
+    "test:hidden": "tsx harness/hidden-messages.mts",
     "android:sign": "node scripts/apply-android-signing.mjs",
     "android:activity": "node scripts/apply-android-activity.mjs",
     "android:icon": "node scripts/apply-android-icon.mjs",

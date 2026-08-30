@@ -13,6 +13,8 @@ import { PeerProfileSheet } from "../../components/profile/PeerProfileSheet";
 import type { PeerProfile } from "../../services/profile-format";
 import { ReadStatus } from "../../components/chat/ReadStatus";
 import { statusFor, type Watermarks } from "../../services/receipts";
+import { SelectionBar } from "../../components/chat/SelectionBar";
+import { describeDelete, joinForForward, DELETE_WARNING } from "../../services/hidden-messages";
 import {
   toggleTarget,
   previewOfMessage,
@@ -79,6 +81,19 @@ export interface ChatViewProps {
   otherUnreadCount?: number;
   /** How far they have confirmed receiving and reading. */
   peerWatermarks?: Watermarks;
+  /** Hide these on this device. Already confirmed by the time this is called. */
+  onDeleteForMe?: (ids: readonly string[]) => void;
+  /** Hand these messages to the forward picker. */
+  onForward?: (texts: readonly string[]) => void;
+  /**
+   * Bumped once a forward has actually been sent.
+   *
+   * The selection is not cleared when Forward is *pressed*, because the picker
+   * can still be cancelled — and losing five picked messages because you
+   * changed your mind about who to send them to is a poor trade. It clears
+   * when something was really sent, which is what this reports.
+   */
+  forwardsSent?: number;
 }
 
 export function ChatView({
@@ -106,9 +121,95 @@ export function ChatView({
   peerProfile,
   otherUnreadCount = 0,
   peerWatermarks,
+  onDeleteForMe,
+  onForward,
+  forwardsSent = 0,
 }: ChatViewProps) {
   const [inputText, setInputText] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
+  /**
+   * Ids picked for copy, forward or delete.
+   *
+   * A Set rather than an array: every operation here is membership, and the
+   * one thing that must not happen is the same message being acted on twice
+   * because it was added twice.
+   */
+  const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
+  const selecting = selected.size > 0;
+
+  const toggleSelected = (id: string) => {
+    setSelected((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const clearSelection = () => setSelected(new Set());
+
+  /** The picked messages, in the order they appear rather than picked order. */
+  const selectedTexts = () =>
+    messages.filter((m) => selected.has(m.id)).map((m) => m.text);
+
+  /*
+   * Long press to start selecting; a tap extends it once it has started.
+   *
+   * A timer on pointerdown, cancelled by movement or release. Movement matters
+   * more than it looks: the message list scrolls, and without a cancel on move
+   * every flick that begins on a bubble would select it. 450ms is long enough
+   * not to fire while scrolling and short enough not to feel broken.
+   *
+   * `pointer` events rather than touch, so the same path works with a mouse on
+   * the desktop build and there is only one code path to get right.
+   */
+  const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pressOrigin = useRef<{ x: number; y: number } | null>(null);
+
+  const cancelPress = () => {
+    if (pressTimer.current) clearTimeout(pressTimer.current);
+    pressTimer.current = null;
+    pressOrigin.current = null;
+  };
+
+  const startPress = (id: string, x: number, y: number) => {
+    cancelPress();
+    pressOrigin.current = { x, y };
+    pressTimer.current = setTimeout(() => {
+      pressTimer.current = null;
+      toggleSelected(id);
+    }, 450);
+  };
+
+  const movePress = (x: number, y: number) => {
+    const origin = pressOrigin.current;
+    if (!origin) return;
+    // Ten pixels: below a deliberate press's jitter, above nothing.
+    if (Math.abs(x - origin.x) > 10 || Math.abs(y - origin.y) > 10) cancelPress();
+  };
+
+  // A press interrupted by unmounting must not fire into a dead component.
+  useEffect(() => cancelPress, []);
+
+  // Clear once something was actually forwarded. Skips the initial value, or
+  // mounting would clear a selection nobody made.
+  const lastForwards = useRef(forwardsSent);
+  useEffect(() => {
+    if (forwardsSent === lastForwards.current) return;
+    lastForwards.current = forwardsSent;
+    setSelected(new Set());
+  }, [forwardsSent]);
+
+  const copySelected = async () => {
+    try {
+      await navigator.clipboard.writeText(joinForForward(selectedTexts()));
+    } catch {
+      // A clipboard a webview refuses is not worth an error dialog; the
+      // selection stays up so it can be tried another way.
+      return;
+    }
+    clearSelection();
+  };
   /**
    * Messages this reply answers, in the order they were swiped.
    *
@@ -437,6 +538,32 @@ export function ChatView({
         position: "relative",
       }}
     >
+      {/*
+        While messages are picked the header is replaced rather than
+        supplemented: the screen visibly changes, so the mode is obvious and
+        hard to leave switched on by accident.
+      */}
+      {selecting && (
+        <SelectionBar
+          count={selected.size}
+          onCancel={clearSelection}
+          onCopy={() => void copySelected()}
+          onForward={() => onForward?.(selectedTexts())}
+          onDelete={() => {
+            // The warning is not optional and not buried: a CRDT keeps what it
+            // is given, and someone deleting a message believing it is gone
+            // everywhere is the one outcome this must not produce.
+            if (!window.confirm(`${describeDelete(selected.size)}?
+
+${DELETE_WARNING}`)) return;
+            onDeleteForMe?.([...selected]);
+            clearSelection();
+          }}
+          onSelectAll={() => setSelected(new Set(messages.map((m) => m.id)))}
+          canSelectAll={selected.size < messages.length}
+        />
+      )}
+
       {/* 1:1 Chat Header */}
       {/*
         Room for two lines.
@@ -452,6 +579,7 @@ export function ChatView({
         worse by taking width away, so the name is also kept to one line below.
       */}
       <header
+        hidden={selecting}
         style={{
           minHeight: 68,
           padding: "var(--space-sm) var(--space-md)",
@@ -731,10 +859,27 @@ export function ChatView({
             >
             <div
               data-message-id={msg.id}
+              onPointerDown={(e) => startPress(msg.id, e.clientX, e.clientY)}
+              onPointerMove={(e) => movePress(e.clientX, e.clientY)}
+              onPointerUp={() => {
+                // A plain tap only does something once selecting has begun.
+                // Otherwise every tap in a conversation would select.
+                const wasLongPress = pressTimer.current === null && pressOrigin.current !== null;
+                cancelPress();
+                if (!wasLongPress && selecting) toggleSelected(msg.id);
+              }}
+              onPointerCancel={cancelPress}
+              onPointerLeave={cancelPress}
               style={{
                 display: "flex",
                 flexDirection: "column",
                 alignItems: msg.isOutgoing ? "flex-end" : "flex-start",
+                ...(selected.has(msg.id)
+                  ? {
+                    backgroundColor: "var(--color-primary-subtle)",
+                    borderRadius: "var(--radius-md)",
+                  }
+                  : {}),
                 maxWidth: "100%",
               }}
             >
