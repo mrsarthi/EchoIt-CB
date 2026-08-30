@@ -18,6 +18,50 @@
 | **1. Core Application (v1)** | Chats, local storage, recovery | **In progress** | 0 | Onboarding + navigation shell done & audited. **Next: pairing (2.3)** |
 | **Pre-UI hardening** | CSP locked down before the UI grows | ✅ **PASSED** | 2 | Strict policy, 0 violations, message flow intact — see below |
 
+## 2026-08-30 — two facts that change the mailbox design, read out of 0.8.0
+
+Both were verified in the published SDK rather than assumed, and both make the
+store-and-forward decision easier than the earlier write-ups assume.
+
+### A mailbox does not need its own protocol channel — it needs to be paired
+
+`deliverSealed` was read as "peer-to-peer only, so a server needs a separate
+upload path". What `sendSealedTo` actually requires is narrower:
+
+```js
+const peer = this.deps.peers.getPeer(peerDid);
+if (!peer?.paired || !peer.connection) return false;
+```
+
+`paired && connected`. Nothing says "human". A mailbox can be paired the way a
+contact is and receive envelopes over the existing iroh transport, with no new
+protocol, no HTTP surface, and no second authentication story. The envelope it
+receives is opaque, and the hop is sealed again under the session key it shares
+with the sender — so a courier that is a server is exactly as blind as a courier
+that is a phone, which is what `deliverSealed`'s own documentation describes.
+
+What this does **not** solve is addressing: the mailbox still has to be told
+which recipient an envelope is for, and that is the metadata question.
+
+### The stored archive is bounded to seven days, by the protocol
+
+`DEFAULT_MAX_AGE_S = 7 * 24 * 60 * 60`, and the check is
+
+```js
+if (age > Math.min(body.maxAgeS, DEFAULT_MAX_AGE_S)) return { ok: false, reason: 'expired' };
+```
+
+`Math.min` against the constant, evaluated by the **recipient**. So a sender
+cannot ask for longer, and a server holding older envelopes holds things that
+will be refused on arrival.
+
+This materially changes the forward-secrecy objection. "A key leak opens every
+envelope ever stored" is true of a captured archive but not of the mailbox's own
+contents: it can hold at most seven days of traffic and can delete on that
+schedule knowing nothing deliverable is lost. Seven days of exposure is a real
+risk and a bounded one, and it is enforced rather than promised — which is the
+distinction §3.1 keeps drawing between proof and policy.
+
 ## 2026-08-30 — the profile picture removal that could not be reproduced
 
 Reported: "removing the pfp doesn't work, the contacts still see it (also
