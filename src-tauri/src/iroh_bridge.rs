@@ -63,7 +63,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use iroh::{
     endpoint::{presets, Connection},
-    Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey, TransportAddr,
+    Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, TransportAddr,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -153,6 +153,41 @@ fn hex(bytes: &[u8]) -> String {
 ///
 /// Idempotent: a webview reload calls this again, and rebinding would strand
 /// peers already dialling the previous address.
+/// EchoIt's own relay, in addition to the ones Number 0 runs.
+///
+/// A relay carries traffic between peers that cannot reach each other
+/// directly, so whoever runs it sees connection metadata — who is talking to
+/// whom, and when — even though the traffic itself is sealed. Running our own
+/// moves that from someone else's infrastructure to ours.
+///
+/// **Both are kept, deliberately.** Two peers can only use a relay they share,
+/// and an install that has not updated still knows only Number 0's. Replacing
+/// the list rather than extending it would mean a new build could not reach an
+/// old one except by a direct connection — a partition that would look like
+/// ordinary unreliability and be miserable to diagnose. Number 0's entries can
+/// be dropped once installs in the wild have moved over.
+///
+/// This relays live traffic and stores nothing: a peer who is offline has no
+/// message waiting here. Background delivery is a separate service and needs
+/// protocol support first.
+const ECHOIT_RELAY: &str = "https://echoit-relay.duckdns.org";
+
+fn relay_mode() -> RelayMode {
+    // `urls` is generic over the collection it builds, so the type is named.
+    let mut urls: Vec<RelayUrl> = RelayMode::Default.relay_map().urls();
+
+    match ECHOIT_RELAY.parse::<RelayUrl>() {
+        Ok(ours) => urls.push(ours),
+        Err(e) => {
+            // Keep Number 0's rather than failing to start. A typo in our own
+            // URL should cost us our relay, not the user's ability to connect.
+            eprintln!("echoit: ignoring malformed relay url {ECHOIT_RELAY}: {e}");
+        }
+    }
+
+    RelayMode::Custom(urls.into_iter().collect())
+}
+
 #[tauri::command]
 pub async fn iroh_start(
     secret_key: Vec<u8>,
@@ -168,6 +203,7 @@ pub async fn iroh_start(
 
     if guard.is_none() {
         let endpoint = Endpoint::builder(presets::N0)
+            .relay_mode(relay_mode())
             .secret_key(SecretKey::from_bytes(&bytes))
             .alpns(vec![DICSUSSION_ALPN.to_vec()])
             .bind()

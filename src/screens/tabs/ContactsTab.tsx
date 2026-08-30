@@ -9,6 +9,7 @@ import {
   CheckIcon,
 } from "../../components/ui/Icons";
 import { Card } from "../../components/ui/Card";
+import { fingerprintOf } from "../../services/reach";
 import { Button } from "../../components/ui/Button";
 import { Badge } from "../../components/ui/Badge";
 import { useApp } from "../../context/AppContext";
@@ -27,12 +28,34 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
     pairAndConnect,
     ignoreRequest,
     blockPeer,
+    acceptPairingRequest,
   } = useApp();
 
   const [searchQuery, setSearchQuery] = useState("");
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [connectTargetDid, setConnectTargetDid] = useState<string | null>(null);
   const [copiedDid, setCopiedDid] = useState<string | null>(null);
+  const [accepting, setAccepting] = useState<string | null>(null);
+  const [acceptError, setAcceptError] = useState<string>("");
+
+  /**
+   * Accept a knock.
+   *
+   * The failure worth showing is a request whose material has expired: the SDK
+   * keeps them for the session, while our card survives a restart, so a stale
+   * card is a real state and "nothing happened" would be the wrong answer.
+   */
+  const handleAccept = async (peerDid: string) => {
+    setAccepting(peerDid);
+    setAcceptError("");
+    try {
+      await acceptPairingRequest(peerDid);
+    } catch (error) {
+      setAcceptError((error as Error).message || "Could not accept that request.");
+    } finally {
+      setAccepting(null);
+    }
+  };
 
   const filteredContacts = contacts.filter(
     (c) =>
@@ -51,10 +74,6 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
     }
   };
 
-  const handleOpenConnectForKnock = (peerDid: string) => {
-    setConnectTargetDid(peerDid);
-    setAddModalOpen(true);
-  };
 
   return (
     <div
@@ -211,18 +230,27 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
                     <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
                       <div>
                         <div style={{ fontWeight: "var(--font-weight-semibold)", fontSize: "var(--font-size-body)" }}>
-                          {displayName}
+                          {displayName} wants to connect
                         </div>
+                        {/*
+                          The name is a claim and nothing more -- the SDK is
+                          explicit that rendering it as verified undoes the
+                          point of pairing. The fingerprint beneath it is the
+                          only thing on this card that is proven, and it is
+                          short enough to read out loud to confirm you are
+                          accepting who you think you are.
+                        */}
                         <div
                           style={{
-                            fontFamily: "var(--font-family-mono)",
                             fontSize: "var(--font-size-label)",
                             color: "var(--color-text-muted)",
-                            wordBreak: "break-all",
                             marginTop: 2,
                           }}
                         >
-                          {req.peerDid}
+                          says their name is {displayName} · code{" "}
+                          <span style={{ fontFamily: "var(--font-family-mono)" }}>
+                            {fingerprintOf(req.peerDid)}
+                          </span>
                         </div>
                       </div>
 
@@ -241,13 +269,12 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
                       </button>
                     </div>
 
-                    {/* Option B: Two Steps Checklist */}
-                    <TwoStepsChecklist
-                      pairingState="unilateral_pending"
-                      peerName={displayName}
-                      peerDid={req.peerDid}
-                      onConnectBack={() => handleOpenConnectForKnock(req.peerDid)}
-                    />
+                    {/*
+                      No checklist any more. It walked the user through pasting
+                      the sender's ticket, which was the only way to get their
+                      encryption key before requests carried it. Accepting now
+                      does the whole job.
+                    */}
 
                     {/* Silent Action Controls */}
                     <div
@@ -278,14 +305,31 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
                       >
                         Block
                       </Button>
+                      {/*
+                        Accept is the whole flow now: the request carried their
+                        ticket, so there is nothing left for the user to fetch.
+                      */}
                       <Button
                         variant="primary"
                         size="sm"
-                        onClick={() => handleOpenConnectForKnock(req.peerDid)}
+                        disabled={accepting === req.peerDid}
+                        onClick={() => void handleAccept(req.peerDid)}
                       >
-                        Connect
+                        {accepting === req.peerDid ? "Accepting…" : "Accept"}
                       </Button>
                     </div>
+
+                    {acceptError && accepting === null && (
+                      <div
+                        style={{
+                          fontSize: "var(--font-size-label)",
+                          color: "var(--color-danger)",
+                        }}
+                        role="alert"
+                      >
+                        {acceptError}
+                      </div>
+                    )}
                   </Card>
                 );
               })}

@@ -7,6 +7,13 @@ import {
   type PresenceEvidence,
 } from "../services/heartbeat";
 import { shouldSendTyping } from "../services/typing";
+import { knock, describeKnock } from "../services/pairing-requests";
+import {
+  loadDisplayName,
+  saveDisplayName,
+  loadAcceptRequests,
+  saveAcceptRequests,
+} from "../services/reach";
 import { putAttachment, type Attachment } from "../services/attachments";
 import { describeBlobError } from "../services/attachment-format";
 import { releaseAttachmentUrls } from "../services/attachments";
@@ -87,6 +94,18 @@ export interface AppContextValue {
   ignoreRequest: (peerDid: string) => void;
   blockPeer: (peerDid: string) => void;
   recordActiveInvite: (ticketString: string) => void;
+  /** What the last knock reported. Empty until one is sent. */
+  lastKnockNote: () => string;
+  /** What we call ourselves when knocking. A claim, never an identity. */
+  displayName: string;
+  setDisplayName: (name: string) => void;
+  /** Whether strangers may ask to connect. Off is the recovery for a leaked ticket. */
+  acceptRequests: boolean;
+  setAcceptRequests: (accept: boolean) => void;
+  /** Accept a knock: pairs, opens the conversation, and clears the request. */
+  acceptPairingRequest: (peerDid: string) => Promise<void>;
+  /** Dismiss a knock. Silent — they learn nothing. */
+  ignorePairingRequest: (peerDid: string) => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -116,6 +135,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [pendingRequests, setPendingRequests] = useState<InboundRequest[]>([]);
   const [blockedPeers, setBlockedPeers] = useState<BlockedPeer[]>([]);
   const [activeInvites, setActiveInvites] = useState<ActiveInvite[]>([]);
+  const [displayName, setDisplayNameState] = useState<string>(() => loadDisplayName());
+  const [acceptRequests, setAcceptRequestsState] = useState<boolean>(() => loadAcceptRequests());
+  /**
+   * Tickets from knocks, kept so Accept needs nothing pasted.
+   *
+   * A ref rather than state: only the accept path reads it, and putting a
+   * ticket in React state would re-render every screen that watches the
+   * context to carry material nothing renders.
+   */
+  const requestTickets = useRef<Record<string, unknown>>({});
+  /** What the last knock reported, for the Add Contact screen to show. */
+  const lastKnockNote = useRef<string>("");
 
   // StrictMode guard: prevent duplicate concurrent client initialization on boot
   const bootStarted = useRef(false);
@@ -271,10 +302,67 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
     };
 
+    /*
+     * A stranger knocking, carrying their ticket and a name they chose.
+     *
+     * SDK 0.7.4, stream 0x0a. Before it, an inbound connection from someone
+     * unknown told us only their did:key — proven, but useless: without their
+     * encryption key and addresses we could not encrypt for them or dial them
+     * back, which is why pairing needed a ticket pasted by hand.
+     *
+     * `pendingPairingRequests()` is read as well as subscribed to, because a
+     * knock can arrive before this listener exists and a stranger only gets to
+     * send one. Subscribing alone would drop it.
+     */
+    const handleRequest = (request: {
+      peerDid: string;
+      ticket: unknown;
+      displayName?: string;
+      at: number;
+    }) => {
+      // Blocked, or not accepting: decline without ever showing it. Declining
+      // is indistinguishable from being offline, which is the point.
+      if (
+        blockedPeers.some((b) => b.peerDid === request.peerDid)
+        || !loadAcceptRequests()
+      ) {
+        try {
+          client.client.declinePairingRequest(request as never);
+        } catch {
+          // Nothing to recover: the request is already unreachable to the user.
+        }
+        return;
+      }
+
+      requestTickets.current[request.peerDid] = request.ticket;
+
+      setPendingRequests((prev) => {
+        const existing = prev.find((r) => r.peerDid === request.peerDid);
+        // A repeat knock refreshes the name rather than stacking a second card.
+        const updated = existing
+          ? prev.map((r) => (r.peerDid === request.peerDid
+            ? { ...r, claimedName: request.displayName, receivedAt: Date.now() }
+            : r))
+          : [...prev, {
+            peerDid: request.peerDid,
+            receivedAt: Date.now(),
+            claimedName: request.displayName,
+          }];
+        saveRequests(did, updated);
+        return updated;
+      });
+    };
+
+    for (const waiting of client.client.pendingPairingRequests()) {
+      handleRequest(waiting as never);
+    }
+    client.client.onPairingRequest.on("request", handleRequest);
+
     client.client.onPeerConnected.on("peer", handlePeerConnected);
 
     return () => {
       client.client.onPeerConnected.off("peer", handlePeerConnected);
+      client.client.onPairingRequest.off("request", handleRequest);
     };
   }, [client, did, blockedPeers]);
 
@@ -494,6 +582,114 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [client]);
 
   /** Send to a peer and show it immediately. */
+  /**
+   * Accept a knock.
+   *
+   * The ticket came with the request, so nothing is pasted: `acceptPairingRequest`
+   * registers the peer, and the rest is the same work `pairAndConnect` does —
+   * admit them to the conversation, connect, and record the contact.
+   *
+   * Their name is stored as what they called themselves. It is a claim, and a
+   * local rename should win over it whenever the user sets one.
+   */
+  const acceptPairingRequestByDid = useCallback(
+    async (peerDid: string) => {
+      if (!client || !did) throw new Error("Client not ready");
+
+      const request = client.client
+        .pendingPairingRequests()
+        .find((r) => r.peerDid === peerDid);
+
+      // The SDK keeps requests for the session only; ours outlive a restart in
+      // localStorage, so a card can survive the material behind it.
+      if (!request) {
+        throw new Error(
+          "That request is no longer available — ask them to send it again.",
+        );
+      }
+
+      client.client.acceptPairingRequest(request);
+      openConversation(client, did, peerDid);
+
+      const claimed = pendingRequests.find((r) => r.peerDid === peerDid)?.claimedName;
+      const now = Date.now();
+
+      setContacts((prev) => {
+        if (prev.some((c) => c.peerDid === peerDid)) return prev;
+        const updated: Contact[] = [
+          ...prev,
+          {
+            peerDid,
+            name: claimed?.trim() || `Device ending in ...${peerDid.slice(-6)}`,
+            addedAt: now,
+            // They knocked and we accepted, so both sides hold each other's
+            // material -- there is no "waiting for them to add us back" here,
+            // which is the whole point of the request flow.
+            pairingState: "bilateral_connected" as const,
+          },
+        ];
+        saveContacts(did, updated);
+        return updated;
+      });
+
+      setPendingRequests((prev) => {
+        const updated = prev.filter((r) => r.peerDid !== peerDid);
+        saveRequests(did, updated);
+        return updated;
+      });
+      delete requestTickets.current[peerDid];
+
+      // They dialled us, so they may already be gone; reconnecting is what
+      // makes the conversation usable rather than merely listed.
+      try {
+        await client.client.connect(request.ticket);
+      } catch {
+        // Not fatal: the ticket is registered, so a later reconnect reaches
+        // them. Failing the accept would lose the pairing over a transient dial.
+      }
+    },
+    [client, did, pendingRequests],
+  );
+
+  /**
+   * Dismiss a knock without pairing.
+   *
+   * Deliberately silent. `requestPairing` tells the sender whether it was
+   * delivered, never what was decided, so being ignored is indistinguishable
+   * from being offline — which is what stops "ignore" from working as a signal.
+   */
+  const ignorePairingRequest = useCallback(
+    (peerDid: string) => {
+      const request = client?.client
+        .pendingPairingRequests()
+        .find((r) => r.peerDid === peerDid);
+      if (request && client) {
+        try {
+          client.client.declinePairingRequest(request);
+        } catch {
+          // Already gone; removing our own card is what matters.
+        }
+      }
+      setPendingRequests((prev) => {
+        const updated = prev.filter((r) => r.peerDid !== peerDid);
+        saveRequests(did, updated);
+        return updated;
+      });
+      delete requestTickets.current[peerDid];
+    },
+    [client, did],
+  );
+
+  const setDisplayName = useCallback((name: string) => {
+    saveDisplayName(name);
+    setDisplayNameState(name.trim().slice(0, 128));
+  }, []);
+
+  const setAcceptRequests = useCallback((accept: boolean) => {
+    saveAcceptRequests(accept);
+    setAcceptRequestsState(accept);
+  }, []);
+
   const sendMessage = async (
     peerDid: string,
     text: string,
@@ -639,6 +835,30 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     // 2. Connect to peer
     await client.client.connect(peer);
+
+    /*
+     * 2a. Knock, so they do not have to paste anything.
+     *
+     * Before SDK 0.7.4 both people had to exchange tickets by hand, because a
+     * handshake proves a did:key and discloses nothing else -- not the
+     * encryption key, not the addresses. The request carries our ticket, so
+     * accepting is all they have to do.
+     *
+     * `knock` waits for a relay first. A ticket sent the instant we connect
+     * carries LAN addresses only, works on this network, and is undialable
+     * from anywhere else -- and that failure appears days later as a peer who
+     * cannot be reached, not as anything wrong with pairing.
+     */
+    let knockNote = "";
+    try {
+      knockNote = describeKnock(await knock(client, peer.didKey, loadDisplayName()));
+    } catch {
+      // They are added either way: our side holds their ticket, so the
+      // conversation works as soon as they add us. The knock is what saves
+      // them that step, not what makes pairing possible.
+      knockNote = "Added. They will need to add you back until a request reaches them.";
+    }
+    lastKnockNote.current = knockNote;
 
     // 3. Update local contact list
     const now = Date.now();
@@ -911,6 +1131,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
         ignoreRequest,
         blockPeer,
         recordActiveInvite,
+        lastKnockNote: () => lastKnockNote.current,
+        displayName,
+        setDisplayName,
+        acceptRequests,
+        setAcceptRequests,
+        acceptPairingRequest: acceptPairingRequestByDid,
+        ignorePairingRequest,
       }}
     >
       {children}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useApp } from "../../context/AppContext";
 import { Card } from "../../components/ui/Card";
+import { Input } from "../../components/ui/Input";
 import { Button } from "../../components/ui/Button";
 import { Badge } from "../../components/ui/Badge";
 import { Modal } from "../../components/ui/Modal";
@@ -16,7 +17,16 @@ import {
 } from "../../services/updates";
 
 export function SettingsTab() {
-  const { theme, setTheme, resetApp, keychainAvailable } = useApp();
+  const {
+    theme,
+    setTheme,
+    resetApp,
+    keychainAvailable,
+    displayName,
+    setDisplayName,
+    acceptRequests,
+    setAcceptRequests,
+  } = useApp();
   const [resetModalOpen, setResetModalOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [updatesOn, setUpdatesOn] = useState(true);
@@ -198,6 +208,85 @@ export function SettingsTab() {
                 style={{ flex: "1 1 auto" }}
               >
                 System
+              </Button>
+            </div>
+          </Card>
+        </section>
+
+        {/* Who can reach you */}
+        <section style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
+          <span
+            style={{
+              fontSize: "var(--font-size-label)",
+              fontWeight: "var(--font-weight-semibold)",
+              color: "var(--color-text-muted)",
+              letterSpacing: "0.04em",
+            }}
+          >
+            YOUR NAME &amp; REACHABILITY
+          </span>
+          <Card style={{ display: "flex", flexDirection: "column", gap: "var(--space-md)" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <label
+                htmlFor="display-name"
+                style={{ fontSize: "var(--font-size-body-sm)", fontWeight: "var(--font-weight-semibold)" }}
+              >
+                Name shown when you ask to connect
+              </label>
+              <Input
+                id="display-name"
+                value={displayName}
+                maxLength={128}
+                placeholder="e.g. Sunny"
+                onChange={(e) => setDisplayName(e.target.value)}
+              />
+              {/*
+                Said plainly because it is true of every messenger and almost
+                never stated: a name on a request is only ever a claim. The
+                person deciding sees a short code alongside it, which is the
+                part that is actually proven.
+              */}
+              <span style={{ fontSize: "var(--font-size-label)", color: "var(--color-text-muted)" }}>
+                They see this as a claim, next to a short code from your safe
+                address. Anyone can type any name, so the code is what confirms
+                it is you.
+              </span>
+            </div>
+
+            <div
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                justifyContent: "space-between",
+                gap: "var(--space-md)",
+                borderTop: "1px solid var(--color-border)",
+                paddingTop: "var(--space-md)",
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: "var(--font-size-body-sm)", fontWeight: "var(--font-weight-semibold)" }}>
+                  Let people ask to connect
+                </div>
+                {/*
+                  This is the recovery for a ticket that went somewhere it
+                  should not have. A ticket cannot be revoked -- it is your
+                  identity plus your addresses, and the person knocking never
+                  says which one they used -- so refusing to listen is the only
+                  lever that exists. Worth saying rather than implying.
+                */}
+                <div style={{ fontSize: "var(--font-size-label)", color: "var(--color-text-muted)" }}>
+                  Turn this off if your connection ticket has spread further than
+                  you meant. Requests are then refused without reaching you, and
+                  people you have already added are unaffected.
+                </div>
+              </div>
+              <Button
+                variant={acceptRequests ? "secondary" : "primary"}
+                size="sm"
+                onClick={() => setAcceptRequests(!acceptRequests)}
+                style={{ flexShrink: 0 }}
+              >
+                {acceptRequests ? "On" : "Off"}
               </Button>
             </div>
           </Card>
