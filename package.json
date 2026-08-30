@@ -29,6 +29,7 @@
     "test:hidden": "tsx harness/hidden-messages.mts",
     "test:profile-updates": "tsx harness/profile-updates.mts",
     "test:profile-persist": "tsx harness/profile-persist.mts",
+    "test:reachability": "tsx harness/reachability-gate.mts",
     "android:sign": "node scripts/apply-android-signing.mjs",
     "android:activity": "node scripts/apply-android-activity.mjs",
     "android:icon": "node scripts/apply-android-icon.mjs",

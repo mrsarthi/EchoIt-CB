@@ -18,6 +18,53 @@
 | **1. Core Application (v1)** | Chats, local storage, recovery | **In progress** | 0 | Onboarding + navigation shell done & audited. **Next: pairing (2.3)** |
 | **Pre-UI hardening** | CSP locked down before the UI grows | ✅ **PASSED** | 2 | Strict policy, 0 violations, message flow intact — see below |
 
+## 2026-08-30 — reachability-gated sending, verified on two phones (0.4.0)
+
+The send path asked "is there a connection?" and should have asked "is anyone
+there?". It now asks the second question, using the evidence presence already
+collects: the last time something actually arrived from that peer, judged
+against the same 75s window that lights the green dot — so a contact shown as
+online is exactly a contact this will send to.
+
+If that evidence is stale the message is **not handed to the network**. It waits
+in a persisted local queue, is shown in the conversation as "Waiting for X" with
+no tick, and is sent the moment something is heard from them.
+
+### Measured end to end
+
+```
+phone A frozen by Android (0 CPU ticks), B sends
+   -> held: "gated-112056 | 11:20 | Waiting for Phone A"      no tick
+phone A restarted, B hears from it
+   -> sender: stillWaiting=false, header "Online"
+   -> receiver: DELIVERED gated-112056
+```
+
+Before this, that message was one of the three in four that were reported sent
+and ceased to exist.
+
+### What it does not do
+
+It does not deliver to a sleeping phone — nothing app-side can, the process is
+frozen. It converts silent loss into honest waiting, which is a smaller claim
+and the whole of what was available without a foreground service.
+
+### Found on the way — the app does not reconnect after a freeze
+
+Phone A was frozen for 100s, then foregrounded. **Neither side ever heard from
+the other again**: both showed "last seen 4 minutes ago" while still claiming
+"Connected directly". A force-stop and relaunch fixed it immediately.
+
+`AppContext` does sweep `reconnectKnownContacts` on `visibilitychange` and on
+`focus`, so the handler exists and did not achieve a reconnection here. Not
+caused by the gate — it is why the earlier background measurement recovered its
+one message only after a full restart — and it is now the thing standing between
+a queued message and its delivery, so it matters more than it did.
+
+Worth its own investigation before beta: a queue that holds messages correctly
+and then waits for a reconnection that never comes is not much better than
+losing them, except that nothing is lost and a restart recovers it.
+
 ## 2026-08-30 — background delivery measured against the real app, and the freeze measured from the kernel
 
 `harness/cdp/measure-background-real.mjs`, two phones, SDK 0.8.0, the shipped

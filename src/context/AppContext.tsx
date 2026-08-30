@@ -8,6 +8,16 @@ import {
   type PresenceEvidence,
 } from "../services/heartbeat";
 import { applyReceipt, type Watermarks } from "../services/receipts";
+import { isReachable } from "../services/reachability";
+import {
+  loadPending,
+  savePending,
+  enqueue,
+  remove as removePending,
+  pendingFor,
+  pendingId,
+  type PendingSend,
+} from "../services/pending-sends";
 import { shouldSendTyping } from "../services/typing";
 import { knock, describeKnock } from "../services/pairing-requests";
 import {
@@ -122,6 +132,14 @@ export interface AppContextValue {
   /** How far each peer has confirmed receiving and reading, by their did. */
   receipts: Record<string, Watermarks>;
   /**
+   * Messages written while the other person was not there.
+   *
+   * Held here rather than given to the network, because a write into a
+   * connection that is dead and not yet known to be dead is accepted and lost.
+   * They are sent the moment something is heard from that peer.
+   */
+  pendingSends: PendingSend[];
+  /**
    * Tell a peer we have read their conversation up to now.
    *
    * Safe to call whenever a conversation is on screen; watermarks only move
@@ -163,6 +181,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [peerProfiles, setPeerProfiles] = useState<Record<string, PeerProfile>>({});
   /** What *they* have confirmed about *our* messages, by their did. */
   const [receipts, setReceipts] = useState<Record<string, Watermarks>>({});
+  const [pendingSends, setPendingSends] = useState<PendingSend[]>([]);
+  /*
+   * Mirrors, so the flush can read the current values without being rebuilt
+   * every time either changes.
+   *
+   * The flush is a dependency of the effect that watches for a peer coming
+   * back. If it were rebuilt on every heartbeat — which is what reading the
+   * state directly would mean — that effect would tear down and re-subscribe
+   * every thirty seconds, on every contact.
+   */
+  const pendingSendsRef = useRef<PendingSend[]>([]);
+  const presenceEvidenceRef = useRef<PresenceEvidence>(presenceEvidence);
+  pendingSendsRef.current = pendingSends;
+  presenceEvidenceRef.current = presenceEvidence;
   /**
    * The watermarks we have sent them, so reconnecting can re-send without
    * needing the message list. A ref: nothing renders from it.
@@ -257,6 +289,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
     bootStarted.current = true;
     void checkKeychainAndBoot();
   }, [checkKeychainAndBoot]);
+
+  /*
+   * Whatever was still waiting when the app last closed.
+   *
+   * Read as soon as the identity is known, because the case this exists for —
+   * the other person away for a while — is also long enough for Android to
+   * kill the app. A queue that did not survive that would lose exactly the
+   * messages it was built to protect.
+   */
+  useEffect(() => {
+    if (!did) return;
+    setPendingSends(loadPending(did));
+  }, [did]);
 
   /*
    * Profiles: ours, and everyone else's.
@@ -781,6 +826,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setAcceptRequestsState(accept);
   }, []);
 
+  /**
+   * Send, or hold it until they are actually there.
+   *
+   * The gate is the whole point. `sendMessage` asked "is there a connection?"
+   * and a connection stays writable for as long as it takes QUIC to notice the
+   * far side has gone — tens of seconds, because nothing announces it. Writes
+   * in that window are accepted, `publish()` reports success, and the SDK's own
+   * outbox is never reached, so the message is in local history, in no queue,
+   * and nowhere else. Measured on two phones: three of four sent to a frozen
+   * peer were reported sent and ceased to exist.
+   *
+   * So the decision moves up a layer, and rests on evidence rather than a
+   * prediction: have we heard anything from this peer inside the presence
+   * window? If not, the message waits here instead of being handed to a
+   * connection that cannot carry it.
+   */
   const sendMessage = async (
     peerDid: string,
     text: string,
@@ -790,6 +851,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const trimmed = text.trim();
     if (!trimmed) return;
 
+    if (!isReachable(presenceEvidence.heardAt[peerDid], Date.now())) {
+      const entry: PendingSend = {
+        id: pendingId(),
+        peerDid,
+        text: trimmed,
+        ...(replyTo?.length ? { replyTo } : {}),
+        queuedAt: Date.now(),
+      };
+      setPendingSends((previous) => {
+        const next = enqueue(previous, entry);
+        savePending(did, next);
+        return next;
+      });
+      return;
+    }
+
     const sent = await sendToPeer(client, did, peerDid, trimmed, undefined, replyTo);
     setMessages((prev) => {
       const existing = prev[peerDid] ?? [];
@@ -797,6 +874,70 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return { ...prev, [peerDid]: [...existing, sent] };
     });
   };
+
+  /**
+   * Hand everything waiting for a peer to the network, oldest first.
+   *
+   * Order matters and is not free: each send is awaited so a conversation does
+   * not arrive shuffled. Entries are removed by id as they succeed, so a flush
+   * interrupted half way — the app closed, the peer gone again — loses nothing
+   * and resumes from where it stopped.
+   */
+  const flushPendingFor = useCallback(async (peerDid: string) => {
+    if (!client || !did) return;
+
+    const waiting = pendingFor(pendingSendsRef.current, peerDid);
+    if (waiting.length === 0) return;
+    if (!isReachable(presenceEvidenceRef.current.heardAt[peerDid], Date.now())) return;
+
+    for (const entry of waiting) {
+      // Re-check between sends: they can go away again mid-flush, and
+      // continuing would be the original bug with extra steps.
+      if (!isReachable(presenceEvidenceRef.current.heardAt[peerDid], Date.now())) return;
+
+      let sent;
+      try {
+        sent = await sendToPeer(client, did, peerDid, entry.text, undefined, entry.replyTo);
+      } catch {
+        // Leave it queued. The next time they are heard from, this runs again.
+        return;
+      }
+
+      setMessages((prev) => {
+        const existing = prev[peerDid] ?? [];
+        if (existing.some((m) => m.id === sent.id)) return prev;
+        return { ...prev, [peerDid]: [...existing, sent] };
+      });
+      setPendingSends((previous) => {
+        const next = removePending(previous, [entry.id]);
+        savePending(did, next);
+        return next;
+      });
+    }
+  }, [client, did]);
+
+  /*
+   * Send what was waiting, the moment they are heard from.
+   *
+   * Keyed on the set of peers that are currently reachable rather than on the
+   * evidence itself: `heardAt` changes on every heartbeat, and re-running this
+   * thirty seconds apart forever would be both pointless and a good way to
+   * send something twice. The key only changes when a peer crosses from
+   * unreachable to reachable or back, which is exactly the moment worth acting
+   * on.
+   */
+  const reachableNow = contacts
+    .filter((c) => isReachable(presenceEvidence.heardAt[c.peerDid], Date.now()))
+    .map((c) => c.peerDid)
+    .sort()
+    .join(",");
+
+  useEffect(() => {
+    if (!client || !did || reachableNow === "") return;
+    for (const peerDid of reachableNow.split(",")) {
+      void flushPendingFor(peerDid);
+    }
+  }, [reachableNow, client, did, flushPendingFor]);
 
   /**
    * Reveal an older slice of a conversation.
@@ -1320,6 +1461,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         saveMyProfile,
         peerProfiles,
         receipts,
+        pendingSends,
         markConversationRead,
       }}
     >

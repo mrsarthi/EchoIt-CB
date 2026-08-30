@@ -22,6 +22,7 @@ import { countUnread, countWaitingConversations, lastInboundAt, loadReadMarks, s
 import type { MessageItem } from "./chat/ChatView";
 import { loadHidden, saveHidden, visibleMessages, joinForForward } from "../services/hidden-messages";
 import { ForwardPicker, type ForwardTarget } from "../components/chat/ForwardPicker";
+import { pendingFor } from "../services/pending-sends";
 
 export function AppShell() {
   const isWide = useBreakpoint(840);
@@ -40,6 +41,7 @@ export function AppShell() {
     client,
     peerProfiles,
     receipts,
+    pendingSends,
     markConversationRead,
   } = useApp();
   const [activeTab, setActiveTab] = useState<AppTab>("chats");
@@ -584,7 +586,7 @@ export function AppShell() {
     // Read so this recomputes when something is hidden. The cache behind
     // `hiddenFor` is a ref, which React does not watch.
     void hiddenVersion;
-    return visibleMessages(messages[peerDid] ?? [], hiddenFor(peerDid)).map((m) => ({
+    const sent = visibleMessages(messages[peerDid] ?? [], hiddenFor(peerDid)).map((m) => ({
       id: m.id,
       senderDid: m.authorDid ?? peerDid,
       isOutgoing: m.authorDid === did,
@@ -598,6 +600,32 @@ export function AppShell() {
       attachments: m.attachments,
       replyTo: m.replyTo,
     }));
+
+    /*
+     * Then whatever is still waiting, at the end.
+     *
+     * Shown in the conversation rather than hidden until it goes, because a
+     * message that vanishes when you press send is the failure this whole
+     * change exists to remove — replacing silent loss with a silent absence
+     * would be no better. `status: "waiting"` is what stops it being drawn
+     * with the ordinary sent tick.
+     */
+    return [
+      ...sent,
+      ...pendingFor(pendingSends, peerDid).map((p) => ({
+        id: p.id,
+        senderDid: did,
+        isOutgoing: true,
+        text: p.text,
+        timestamp: new Date(p.queuedAt).toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+        at: p.queuedAt,
+        replyTo: p.replyTo,
+        status: "waiting" as const,
+      })),
+    ];
   };
 
   const handleSelectContact = (peerDid: string) => {

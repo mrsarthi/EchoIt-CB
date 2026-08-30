@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { ArrowLeftIcon, LockIcon, PaperclipIcon, SendIcon } from "../../components/ui/Icons";
+import { ClockIcon, ArrowLeftIcon, LockIcon, PaperclipIcon, SendIcon } from "../../components/ui/Icons";
 import { AttachmentBubble } from "../../components/media/AttachmentBubble";
 import { MediaViewer, type ViewableMedia } from "../../components/media/MediaViewer";
 import { formatSize, isViewable, MAX_ATTACHMENT_BYTES } from "../../services/attachment-format";
@@ -30,7 +30,12 @@ export interface MessageItem {
   isOutgoing: boolean;
   text: string;
   timestamp: string;
-  status?: "staged" | "sent" | "delivered" | "read";
+  /**
+   * `waiting` means it has not been handed to the network at all, because
+   * nothing has been heard from the recipient recently. It is not a weaker
+   * "sent" — it is the honest name for a message this device is still holding.
+   */
+  status?: "staged" | "waiting" | "sent" | "delivered" | "read";
   /** Handles only. The bytes are fetched by AttachmentBubble on demand. */
   attachments?: readonly Attachment[];
   /** Unix ms, for the viewer's caption. */
@@ -1082,7 +1087,18 @@ ${DELETE_WARNING}`)) return;
                       until now was always the word "Staged", because nothing
                       anywhere ever set `msg.status`.
                     */}
-                    {!isConnected ? (
+                    {msg.status === "waiting" ? (
+                      /*
+                        Never a tick. This message is on this device and
+                        nowhere else, and the whole reason for the change that
+                        introduced it is that such a message used to be
+                        indistinguishable from a delivered one.
+                      */
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                        <ClockIcon size={11} />
+                        Waiting for {peerName}
+                      </span>
+                    ) : !isConnected ? (
                       <span>Staged</span>
                     ) : (
                       <ReadStatus
