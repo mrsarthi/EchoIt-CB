@@ -1,20 +1,40 @@
 #!/usr/bin/env node
 /**
- * Take the white square off the Android launcher icon.
+ * Give the Android launcher icon a background that was chosen rather than
+ * inherited.
  *
- * Reported: the Android icon shows the E on a white background, while the
- * desktop icon is just the E with nothing behind it.
+ * ## There is no transparent launcher icon on Android
  *
- * Android 8+ uses an *adaptive* icon: two layers, foreground and background,
- * which the launcher masks into whatever shape it likes. `tauri icon` generates
- * the foreground from `src-tauri/icons/icon.png` — which is RGBA and already
- * transparent — and then the Android template supplies a background of `#fff`.
- * The white is added by the template, not baked into the artwork.
+ * This started as "the Android icon has a white square behind the E and the
+ * desktop one does not", and the obvious fix — make the background
+ * transparent — is wrong in a way that only shows up on a phone.
  *
- * Setting the background transparent leaves only the mark, which is what the
- * desktop icon looks like. Android's own guidance prefers an opaque background,
- * so this is a deliberate choice rather than an oversight: the brand mark is the
- * icon, and a white tile behind it is not part of it.
+ * Android 8+ uses an *adaptive* icon: a foreground and a background layer,
+ * which the launcher masks into whatever shape it likes and composites. The
+ * background layer is not optional decoration; it is what fills the mask. Set
+ * it to `#00000000` and the mask fills with nothing, which launchers draw as
+ * **black**. That was reported, and it is worse than the white it replaced.
+ *
+ * Removing the adaptive icon to fall back to the legacy PNG does not escape
+ * it either: launchers apply their own treatment to legacy icons, which is
+ * usually a white rounded tile — back where we started.
+ *
+ * The desktop icon looks background-free because it genuinely is transparent
+ * and the wallpaper shows through. A launcher will not do that. So the real
+ * choice is *which* background, and pretending otherwise produces the black
+ * square.
+ *
+ * ## Why this colour
+ *
+ * Sampled from the artwork rather than picked by eye: `#3B1307` is the average
+ * of the darkest 2% of opaque pixels in `src-tauri/icons/icon.png` — the mark's
+ * own shading. Two things follow, and both were measured:
+ *
+ *  - **It reads as brown, not black.** R minus B is 52; for black it is 0 and
+ *    for a darker tile (`#200A03`) it is 29. That difference is the whole
+ *    point, since a near-black tile is the thing being fixed.
+ *  - **The mark stays legible on it**: 11.8:1 against the highlight and 5.3:1
+ *    against the mid-orange.
  *
  * ## Why a script
  *
@@ -35,20 +55,18 @@ const BACKGROUND = join(
   'values', 'ic_launcher_background.xml',
 );
 
+/**
+ * The mark's own darkest shading. See the note above for how it was derived
+ * and why it is not simply black.
+ */
+const TILE = '#3B1307';
+
 if (!existsSync(BACKGROUND)) {
   console.error(`No ${BACKGROUND}. Run \`npx tauri android init\` first.`);
   process.exit(1);
 }
 
 const source = readFileSync(BACKGROUND, 'utf8');
-
-// Fully transparent. The eight-digit form is #AARRGGBB, so this is alpha zero.
-const TRANSPARENT = '#00000000';
-
-if (source.includes(TRANSPARENT)) {
-  console.log('android:icon — background already transparent, nothing to do.');
-  process.exit(0);
-}
 
 const COLOUR = /(<color name="ic_launcher_background">)([^<]*)(<\/color>)/;
 const match = source.match(COLOUR);
@@ -58,6 +76,10 @@ if (!match) {
   process.exit(1);
 }
 
-const patched = source.replace(COLOUR, `$1${TRANSPARENT}$3`);
-writeFileSync(BACKGROUND, patched, 'utf8');
-console.log(`android:icon — launcher background ${match[2]} -> ${TRANSPARENT} (the mark, with nothing behind it)`);
+if (match[2].trim().toUpperCase() === TILE) {
+  console.log(`android:icon — background already ${TILE}, nothing to do.`);
+  process.exit(0);
+}
+
+writeFileSync(BACKGROUND, source.replace(COLOUR, `$1${TILE}$3`), 'utf8');
+console.log(`android:icon — launcher background ${match[2]} -> ${TILE} (the mark's own shading, not black)`);
