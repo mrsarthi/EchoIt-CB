@@ -18,6 +18,71 @@
 | **1. Core Application (v1)** | Chats, local storage, recovery | **In progress** | 0 | Onboarding + navigation shell done & audited. **Next: pairing (2.3)** |
 | **Pre-UI hardening** | CSP locked down before the UI grows | ✅ **PASSED** | 2 | Strict policy, 0 violations, message flow intact — see below |
 
+## 2026-08-30 — background delivery measured against the real app, and the freeze measured from the kernel
+
+`harness/cdp/measure-background-real.mjs`, two phones, SDK 0.8.0, the shipped
+app rather than the bridge harness. Two separate questions, two separate
+answers.
+
+### The process is frozen entirely, Rust included
+
+`/proc/<pid>/stat` utime+stime, sampled after HOME:
+
+```
+baseline (foreground)   cpu=6219 ticks
+ 10s   state=S  cpu+ 28 ticks   threads=77
+ 30s   state=S  cpu+  6 ticks   threads=77
+ 90s   state=S  cpu+  0 ticks   threads=77
+180s   state=S  cpu+  0 ticks   threads=77
+```
+
+**Zero ticks from 90s.** Reproduced across three runs. The process exists and is
+scheduled *nothing* — so this is not "the webview is frozen while Rust keeps
+going". Android's cached-app freezer takes the whole process.
+
+This kills the most attractive idea on the table: a native Rust-side spool that
+accepts and stores envelopes while the webview sleeps. There is no Rust running
+to accept them. **A foreground service is not one option among several — it is
+the precondition for every app-side approach**, because nothing app-side runs
+without it.
+
+`pidof` returning a number is what the earlier measurement established, and it
+proves only that the process exists. CPU ticks are the question.
+
+### Delivery: three of four lost, on 0.8.0, in the real app
+
+Four messages sent from a foreground phone to the frozen one, then the receiver
+restarted:
+
+| Sent at | Arrived |
+|---|---|
+| 10s backgrounded | no |
+| 30s | no |
+| 90s | no |
+| 180s | **yes** |
+
+Only the last survives, and it is the one sent late enough that the sender had
+noticed the connection was dead and queued it. That is Finding 20's shape
+exactly, **and it persists on 0.8.0**: `isLive`, `pruneDisconnected` and
+`drainAfterReconnect` fixed the registry's bookkeeping, but the loss window is
+QUIC's detection latency, which no bookkeeping closes.
+
+So step 0 — refuse to publish to a peer not *heard from* recently, and
+`sealForPeer` instead — is not a tidy-up. It is the difference between three
+lost messages and three queued ones, and it needs no server and no decision.
+
+### Two smaller observations
+
+- **The app came back wedged after a long freeze.** After 180s frozen and then
+  foregrounded, the webview showed Settings with no navigation buttons at all
+  and did not respond to tab clicks; a force-stop and relaunch fixed it. Seen
+  once, not yet reproduced, and worth a look before beta.
+- **The driver refuses rather than reporting a false zero.** An early run showed
+  0/4 delivered because the *sender* was not in a conversation and every send
+  returned "no composer", and a later one because the receiver was read on the
+  wrong screen. Both look identical to total loss. It now checks it can compose
+  before starting, and opens the conversation before looking.
+
 ## 2026-08-30 — two facts that change the mailbox design, read out of 0.8.0
 
 Both were verified in the published SDK rather than assumed, and both make the
