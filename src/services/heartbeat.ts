@@ -24,6 +24,7 @@ import type { EchoItClient } from "../transport/create-client";
 import { channelIdFor } from "./conversation";
 import { HEARTBEAT_INTERVAL_MS } from "./presence";
 import { toMillis } from "./timestamps";
+import { decodeReceipt, encodeReceipt, type Receipt } from "./receipts";
 
 /*
  * The signals we put on stream 0x07.
@@ -82,6 +83,14 @@ export function startPresence(
   myDid: string,
   peerDids: string[],
   onEvidence: (update: (previous: PresenceEvidence) => PresenceEvidence) => void,
+  /**
+   * A read or delivery watermark arrived from a peer.
+   *
+   * Handled here because this already owns the `0x07` subscription, and a
+   * second subscriber to the same channel would be a second place that has to
+   * know which payloads are ours.
+   */
+  onReceipt?: (peerDid: string, receipt: Receipt) => void,
 ): () => void {
   const unsubscribes: Array<() => void> = [];
   let stopped = false;
@@ -111,6 +120,19 @@ export function startPresence(
             ...previous,
             typingAt: { ...previous.typingAt, [fromDid]: at },
           }));
+          return;
+        }
+
+        /*
+         * A receipt is also evidence of presence: it can only be sent by a
+         * device that is running and connected. Recording that first means a
+         * conversation being read lights the dot without waiting for the next
+         * heartbeat.
+         */
+        const receipt = decodeReceipt(payload);
+        if (receipt) {
+          heard(fromDid, Date.now());
+          onReceipt?.(fromDid, receipt);
           return;
         }
 
@@ -203,5 +225,29 @@ export async function sendTyping(
   } catch {
     // Undeliverable is ordinary. A typing indicator is the last thing that
     // should surface an error to anybody.
+  }
+}
+
+/**
+ * Send a read or delivery watermark to one peer.
+ *
+ * Ephemeral like everything else on this stream, so it is lost if they are not
+ * connected. That is why `receipts.ts` re-sends watermarks on connecting
+ * rather than only when they change — see the note there.
+ */
+export async function sendReceipt(
+  client: EchoItClient,
+  myDid: string,
+  peerDid: string,
+  receipt: Receipt,
+): Promise<void> {
+  try {
+    await client.client.chat.sendEphemeral(
+      channelIdFor(myDid, peerDid),
+      encodeReceipt(receipt),
+    );
+  } catch {
+    // Undeliverable is ordinary. A tick that fails to update is not worth
+    // putting in front of anybody.
   }
 }

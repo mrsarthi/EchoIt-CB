@@ -11,6 +11,8 @@ import { TypingBubble } from "../../components/chat/TypingBubble";
 import { Avatar } from "../../components/profile/Avatar";
 import { PeerProfileSheet } from "../../components/profile/PeerProfileSheet";
 import type { PeerProfile } from "../../services/profile-format";
+import { ReadStatus } from "../../components/chat/ReadStatus";
+import { statusFor, type Watermarks } from "../../services/receipts";
 import {
   toggleTarget,
   previewOfMessage,
@@ -75,6 +77,8 @@ export interface ChatViewProps {
    * badge only exists on a surface you cannot see from in here.
    */
   otherUnreadCount?: number;
+  /** How far they have confirmed receiving and reading. */
+  peerWatermarks?: Watermarks;
 }
 
 export function ChatView({
@@ -101,6 +105,7 @@ export function ChatView({
   peerIsTyping = false,
   peerProfile,
   otherUnreadCount = 0,
+  peerWatermarks,
 }: ChatViewProps) {
   const [inputText, setInputText] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
@@ -836,7 +841,23 @@ export function ChatView({
                 {msg.isOutgoing && (
                   <>
                     <span>•</span>
-                    <span>{!isConnected ? "Staged" : msg.status === "sent" ? "Sent" : msg.status === "delivered" ? "Delivered" : "Staged"}</span>
+                    {/*
+                      Until both sides have added each other nothing can be
+                      delivered, so there is no receipt to wait for and saying
+                      "Sent" would overstate it. Once they can receive, the
+                      status is whatever they have actually confirmed — which
+                      until now was always the word "Staged", because nothing
+                      anywhere ever set `msg.status`.
+                    */}
+                    {!isConnected ? (
+                      <span>Staged</span>
+                    ) : (
+                      <ReadStatus
+                        status={statusFor(msg.at ?? 0, peerWatermarks)}
+                        peerName={peerName}
+                        peerProfile={peerProfile}
+                      />
+                    )}
                   </>
                 )}
               </div>

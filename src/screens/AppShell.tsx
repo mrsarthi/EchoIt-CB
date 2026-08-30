@@ -37,6 +37,8 @@ export function AppShell() {
     presenceEvidence,
     client,
     peerProfiles,
+    receipts,
+    markConversationRead,
   } = useApp();
   const [activeTab, setActiveTab] = useState<AppTab>("chats");
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
@@ -397,7 +399,17 @@ export function AppShell() {
       saveReadMarks(next);
       return next;
     });
-  }, [openPeerDid, openThreadNewest]);
+    /*
+     * Tell them, as well as remembering it here.
+     *
+     * The same moment serves both: the local mark is what silences our badge,
+     * and the receipt is what colours their tick. Sending it from here rather
+     * than from opening the chat means a message that arrives while the
+     * conversation is already on screen is reported read too, which is the
+     * case a "mark read on open" hook quietly misses.
+     */
+    markConversationRead(openPeerDid);
+  }, [openPeerDid, openThreadNewest, markConversationRead]);
   const selectedContact = selectedConversation
     ? contacts.find((c) => c.peerDid === selectedConversation.peerDid)
     : null;
@@ -577,6 +589,7 @@ export function AppShell() {
             peerName={selectedConversation.name}
             peerProfile={peerProfiles[selectedConversation.peerDid]}
             otherUnreadCount={unreadConversations}
+            peerWatermarks={receipts[selectedConversation.peerDid]}
             pairingState={selectedContact?.pairingState || "unilateral_waiting"}
             isOnline={selectedConversation.isOnline}
             presenceLabel={selectedPresenceLabel}
@@ -690,6 +703,7 @@ export function AppShell() {
             peerName={selectedConversation.name}
             peerProfile={peerProfiles[selectedConversation.peerDid]}
             otherUnreadCount={unreadConversations}
+            peerWatermarks={receipts[selectedConversation.peerDid]}
             pairingState={selectedContact?.pairingState || "unilateral_waiting"}
             isOnline={selectedConversation.isOnline}
             presenceLabel={selectedPresenceLabel}

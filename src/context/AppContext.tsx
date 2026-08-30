@@ -3,9 +3,11 @@ import { createEchoItClient, type EchoItClient } from "../transport/create-clien
 import {
   startPresence,
   sendTyping,
+  sendReceipt,
   emptyEvidence,
   type PresenceEvidence,
 } from "../services/heartbeat";
+import { applyReceipt, type Watermarks } from "../services/receipts";
 import { shouldSendTyping } from "../services/typing";
 import { knock, describeKnock } from "../services/pairing-requests";
 import {
@@ -115,6 +117,17 @@ export interface AppContextValue {
   saveMyProfile: (draft: MyProfileDraft) => Promise<number>;
   /** Every peer profile we hold, by did. A peer absent from it has published none. */
   peerProfiles: Record<string, PeerProfile>;
+
+  // Receipts
+  /** How far each peer has confirmed receiving and reading, by their did. */
+  receipts: Record<string, Watermarks>;
+  /**
+   * Tell a peer we have read their conversation up to now.
+   *
+   * Safe to call whenever a conversation is on screen; watermarks only move
+   * forward, so a repeat is a no-op to them.
+   */
+  markConversationRead: (peerDid: string) => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -148,6 +161,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [acceptRequests, setAcceptRequestsState] = useState<boolean>(() => loadAcceptRequests());
   const [myProfile, setMyProfile] = useState<PeerProfile | undefined>(undefined);
   const [peerProfiles, setPeerProfiles] = useState<Record<string, PeerProfile>>({});
+  /** What *they* have confirmed about *our* messages, by their did. */
+  const [receipts, setReceipts] = useState<Record<string, Watermarks>>({});
+  /**
+   * The watermarks we have sent them, so reconnecting can re-send without
+   * needing the message list. A ref: nothing renders from it.
+   */
+  const sentWatermarks = useRef<Record<string, Watermarks>>({});
   /**
    * Tickets from knocks, kept so Accept needs nothing pasted.
    *
@@ -277,6 +297,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
       // Drop if blocked
       const isBlocked = blockedPeers.some((b) => b.peerDid === peerDid);
       if (isBlocked) return;
+
+      /*
+       * Re-send what we have already confirmed.
+       *
+       * Receipts ride the ephemeral stream, so every one sent while they were
+       * offline was simply dropped — and their ticks would stay wrong forever
+       * on messages we read days ago. Re-sending on connect is what makes the
+       * status eventually right instead of right only when both people
+       * happened to be online at the same instant. Free to repeat, because a
+       * watermark repeated means exactly what it meant the first time.
+       */
+      const confirmed = sentWatermarks.current[peerDid];
+      if (confirmed && client && did) {
+        if (confirmed.deliveredUpTo) {
+          void sendReceipt(client, did, peerDid, { kind: "delivered", upTo: confirmed.deliveredUpTo });
+        }
+        if (confirmed.readUpTo) {
+          void sendReceipt(client, did, peerDid, { kind: "read", upTo: confirmed.readUpTo });
+        }
+      }
 
       // `event.paired` is a purely LOCAL flag — the SDK emits
       // `paired: this.peers.getPeer(peerDid)?.paired === true`, which only
@@ -524,6 +564,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
           // connection the first side opened is still live.
           if (message.authorDid && message.authorDid !== did) {
             markBilateral(contact.peerDid);
+            /*
+             * Confirm receipt the moment it lands, not when the conversation
+             * is opened. "Delivered" is a claim about this device holding it,
+             * and this is the instant that becomes true.
+             */
+            confirmDelivered(contact.peerDid, message.timestamp);
           }
           // An inbound message is only in memory until this runs. Without it a
           // received conversation is gone on the next launch, exactly as a
@@ -591,7 +637,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!client || !did || state !== "ready") return;
     const peerDids = contacts.map((c) => c.peerDid);
     if (peerDids.length === 0) return;
-    return startPresence(client, did, peerDids, setPresenceEvidence);
+    return startPresence(client, did, peerDids, setPresenceEvidence, (peerDid, receipt) => {
+      setReceipts((previous) => ({
+        ...previous,
+        [peerDid]: applyReceipt(previous[peerDid] ?? {}, receipt),
+      }));
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, did, state, contacts.map((c) => c.peerDid).join(",")]);
 
@@ -835,6 +886,61 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return { ...prev, [peerDid]: [...existing, sent] };
     });
   };
+
+  /**
+   * Record and send a watermark, keeping what we sent so it can be re-sent.
+   *
+   * Watermarks only move forward here as well as on the receiving side: a
+   * message arriving out of order must not lower what we have already told
+   * them, or they would see a message go from read back to delivered.
+   */
+  const pushWatermark = useCallback(
+    (peerDid: string, kind: "delivered" | "read", upTo: number) => {
+      if (!client || !did) return;
+
+      const held = sentWatermarks.current[peerDid] ?? {};
+      const field = kind === "read" ? "readUpTo" : "deliveredUpTo";
+      if ((held[field] ?? 0) >= upTo) return;
+
+      sentWatermarks.current = {
+        ...sentWatermarks.current,
+        [peerDid]: { ...held, [field]: upTo },
+      };
+      void sendReceipt(client, did, peerDid, { kind, upTo });
+    },
+    [client, did],
+  );
+
+  /** Their message is on this device now. */
+  const confirmDelivered = useCallback(
+    (peerDid: string, at: number) => {
+      pushWatermark(peerDid, "delivered", at);
+    },
+    [pushWatermark],
+  );
+
+  /**
+   * Tell them we have read up to now.
+   *
+   * `Date.now()` rather than the newest message's timestamp: the two agree for
+   * anything already here, and using now also covers a message that arrives
+   * while the conversation is on screen without needing to re-derive the list.
+   *
+   * A `useCallback` because callers use it as an effect dependency, and an
+   * unstable identity combined with `Date.now()` means a receipt on every
+   * render — the watermark guard cannot stop that, since each call carries a
+   * later time than the last.
+   */
+  const markConversationRead = useCallback(
+    (peerDid: string) => {
+      const now = Date.now();
+      // Read implies delivered, and saying so keeps the two consistent even if
+      // a delivery watermark was lost.
+      pushWatermark(peerDid, "delivered", now);
+      pushWatermark(peerDid, "read", now);
+    },
+    [pushWatermark],
+  );
 
   /**
    * Publish our profile.
@@ -1196,6 +1302,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         myProfile,
         saveMyProfile,
         peerProfiles,
+        receipts,
+        markConversationRead,
       }}
     >
       {children}
