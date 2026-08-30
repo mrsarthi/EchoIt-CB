@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { useApp } from "../../context/AppContext";
 import { Card } from "../../components/ui/Card";
-import { Input } from "../../components/ui/Input";
 import { Button } from "../../components/ui/Button";
 import { Badge } from "../../components/ui/Badge";
 import { Modal } from "../../components/ui/Modal";
@@ -23,7 +22,6 @@ export function SettingsTab() {
     resetApp,
     keychainAvailable,
     displayName,
-    setDisplayName,
     acceptRequests,
     setAcceptRequests,
   } = useApp();
@@ -223,33 +221,28 @@ export function SettingsTab() {
               letterSpacing: "0.04em",
             }}
           >
-            YOUR NAME &amp; REACHABILITY
+            REACHABILITY
           </span>
           <Card style={{ display: "flex", flexDirection: "column", gap: "var(--space-md)" }}>
+            {/*
+              The name field lived here as well as in Profile, and "why are
+              there two?" was a fair question with no good answer. One name,
+              typed once, next to the picture and the bio it belongs with.
+
+              Still worth stating where the name is shown, because a name on a
+              request is only ever a claim: the person deciding sees a short
+              code beside it, and that is the part that is actually proven.
+            */}
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <label
-                htmlFor="display-name"
-                style={{ fontSize: "var(--font-size-body-sm)", fontWeight: "var(--font-weight-semibold)" }}
-              >
-                Name shown when you ask to connect
-              </label>
-              <Input
-                id="display-name"
-                value={displayName}
-                maxLength={128}
-                placeholder="e.g. Sunny"
-                onChange={(e) => setDisplayName(e.target.value)}
-              />
-              {/*
-                Said plainly because it is true of every messenger and almost
-                never stated: a name on a request is only ever a claim. The
-                person deciding sees a short code alongside it, which is the
-                part that is actually proven.
-              */}
+              <div style={{ fontSize: "var(--font-size-body-sm)", fontWeight: "var(--font-weight-semibold)" }}>
+                The name you show people
+              </div>
               <span style={{ fontSize: "var(--font-size-label)", color: "var(--color-text-muted)" }}>
-                They see this as a claim, next to a short code from your safe
-                address. Anyone can type any name, so the code is what confirms
-                it is you.
+                {displayName
+                  ? `You are shown as "${displayName}". Change it in Profile.`
+                  : "Set a name in Profile, and it is what contacts and connection requests show."}
+                {" "}Anyone can type any name, so the short code beside it is what
+                confirms it is you.
               </span>
             </div>
 

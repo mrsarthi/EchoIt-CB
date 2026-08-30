@@ -12,7 +12,7 @@
  * So the counting is pinned here, away from the component that draws it.
  */
 
-import { countWaitingConversations, countUnread } from '../src/services/unread.js';
+import { countWaitingConversations, countUnread, countIncomingSince } from '../src/services/unread.js';
 
 let failures = 0;
 const check = (label: string, ok: boolean, detail = '') => {
@@ -57,6 +57,30 @@ check('only their messages count', countUnread(thread, ME, 0) === 2);
 check('your own never do', countUnread([{ authorDid: ME, timestamp: 9 }], ME, 0) === 0);
 check('a read mark drops what came before it', countUnread(thread, ME, 200) === 1);
 check('a mark past everything leaves nothing', countUnread(thread, ME, 999) === 0);
+
+/*
+ * The in-conversation pill: "N new messages", shown only while the reader is
+ * scrolled away from the end.
+ */
+const out = (n: number) => ({ isOutgoing: true, n });
+const inc = (n: number) => ({ isOutgoing: false, n });
+
+check('nothing new counts as nothing',
+  countIncomingSince([inc(1), inc(2)], 2) === 0);
+check('one of theirs counts',
+  countIncomingSince([inc(1), inc(2)], 1) === 1);
+check('your own messages never count',
+  countIncomingSince([inc(1), out(2), out(3)], 1) === 0,
+  String(countIncomingSince([inc(1), out(2), out(3)], 1)));
+check('a mixed burst counts only theirs',
+  countIncomingSince([inc(1), out(2), inc(3), out(4), inc(5)], 1) === 2);
+check('an empty thread is zero, not NaN',
+  countIncomingSince([], 0) === 0);
+check('a shrinking thread announces nothing',
+  countIncomingSince([inc(1)], 5) === 0,
+  'messages can be hidden, or the conversation switched');
+check('the whole thread arriving at once is counted',
+  countIncomingSince([inc(1), inc(2), inc(3)], 0) === 3);
 
 console.log(`\n${'─'.repeat(60)}`);
 console.log(failures ? `FAIL  ${failures} check(s)` : 'PASS  badges count what they claim to count');

@@ -25,6 +25,7 @@ import { AlertBanner } from "../ui/AlertBanner";
 import { Avatar } from "./Avatar";
 import { fileToAvatar, type Avatar as AvatarBytes } from "../../services/avatar";
 import { MAX_BIO_LENGTH, MAX_DISPLAY_NAME_LENGTH } from "../../services/profile-format";
+import { loadDisplayName } from "../../services/reach";
 
 export function MyProfileEditor() {
   const { myProfile, saveMyProfile } = useApp();
@@ -41,7 +42,10 @@ export function MyProfileEditor() {
   // Seed the form from what is published, and re-seed if it changes under us
   // (another device, or the first load arriving after mount).
   useEffect(() => {
-    setName(myProfile?.displayName ?? "");
+    // Falls back to the name already given for knocking. Settings used to ask
+    // for that separately; when the field moved here, anyone who had typed a
+    // name there would otherwise open this screen and find it blank.
+    setName(myProfile?.displayName ?? loadDisplayName());
     setBio(myProfile?.bio ?? "");
     setAvatar(undefined);
   }, [myProfile?.updatedAt]);
@@ -132,7 +136,7 @@ export function MyProfileEditor() {
         value={name}
         maxLength={MAX_DISPLAY_NAME_LENGTH}
         onChange={(e) => setName(e.target.value)}
-        hint="Contacts who gave you their own name for you will keep seeing that one."
+        hint="Shown to your contacts, and to anyone you ask to connect. Contacts who gave you their own name for you keep seeing that one."
       />
 
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>

@@ -954,6 +954,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!client) throw new Error("Client not ready");
     const reached = await publishProfile(client, draft);
     setMyProfile(client.client.identity.getMyProfile());
+
+    /*
+     * One name, stored twice, because the two have different audiences.
+     *
+     * The profile reaches *paired* peers only — a ticket deliberately does not
+     * carry it, so a stranger who dials one learns nothing about you. A knock
+     * has to name you to someone who is not paired yet, by definition, so it
+     * cannot read the profile and needs its own copy.
+     *
+     * They are the same answer to the same question, so the app must not ask
+     * it twice. It was asked twice: a name field in Settings and another in
+     * Profile, which is what prompted "why are there two?". Profile is where a
+     * name belongs, next to the picture and the bio, so that is the one that
+     * is typed and this keeps the knock's copy in step.
+     */
+    setDisplayName(draft.displayName);
+
     return reached;
   };
 

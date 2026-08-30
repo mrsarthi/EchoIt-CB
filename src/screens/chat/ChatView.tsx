@@ -13,7 +13,9 @@ import { PeerProfileSheet } from "../../components/profile/PeerProfileSheet";
 import type { PeerProfile } from "../../services/profile-format";
 import { ReadStatus } from "../../components/chat/ReadStatus";
 import { statusFor, type Watermarks } from "../../services/receipts";
+import { countIncomingSince } from "../../services/unread";
 import { SelectionBar } from "../../components/chat/SelectionBar";
+import { NewMessagePill } from "../../components/chat/NewMessagePill";
 import { describeDelete, joinForForward, DELETE_WARNING } from "../../services/hidden-messages";
 import {
   toggleTarget,
@@ -127,6 +129,15 @@ export function ChatView({
 }: ChatViewProps) {
   const [inputText, setInputText] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
+  /**
+   * How many of their messages have arrived while the reader was scrolled up.
+   *
+   * Reported: reading older messages, a new one arrives, and nothing says so —
+   * the view deliberately does not follow you down, so the arrival is silent
+   * and off screen. The nav badge cannot help, because the nav is not on
+   * screen while a conversation is.
+   */
+  const [missedWhileAway, setMissedWhileAway] = useState(0);
   /**
    * Ids picked for copy, forward or delete.
    *
@@ -312,6 +323,52 @@ export function ChatView({
     requestAnimationFrame(step);
   }, [jumpToBottom]);
 
+  /*
+   * The part `holdBottom` cannot do: notice growth that arrives after it gave up.
+   *
+   * Reported again as "it still doesn't open at the latest message", and
+   * measured on a phone rather than reasoned about: eight seconds after
+   * opening, scrollHeight 2822, clientHeight 672, scrollTop parked at 1925 —
+   * 225px short — and the height *never changed* during the whole sample. So
+   * nothing was still loading by then. The jump had landed when the content
+   * was 2597px tall and it grew by 225 afterwards, which is to say the growth
+   * arrived after three unchanged frames had already been counted.
+   *
+   * A stability heuristic will always lose that race, because "three frames
+   * without a change" and "finished" are not the same claim. An observer makes
+   * no guess: whatever changes the content's height re-anchors the view, for as
+   * long as the conversation is open and the reader has not scrolled away.
+   */
+  useEffect(() => {
+    const stream = streamRef.current;
+    if (!stream || typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(() => {
+      if (pinnedRef.current) jumpToBottom();
+    });
+
+    // The children, not the container: a scroll container's own box does not
+    // change when its contents grow, which is the whole event of interest.
+    for (const child of Array.from(stream.children)) observer.observe(child);
+
+    // Children come and go as messages arrive, so the set observed has to be
+    // maintained rather than captured once.
+    const mutations = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of Array.from(record.addedNodes)) {
+          if (node instanceof Element) observer.observe(node);
+        }
+      }
+      if (pinnedRef.current) jumpToBottom();
+    });
+    mutations.observe(stream, { childList: true });
+
+    return () => {
+      observer.disconnect();
+      mutations.disconnect();
+    };
+  }, [peerDid, jumpToBottom]);
+
   // Opening a conversation: be at the bottom, not travel there.
   useEffect(() => {
     pinnedRef.current = true;
@@ -322,9 +379,29 @@ export function ChatView({
 
   // New messages follow only while pinned, so reading older ones is not
   // interrupted by an arrival.
+  const lastCount = useRef(messages.length);
   useEffect(() => {
-    if (pinnedRef.current) holdBottom();
-  }, [messages.length, holdBottom]);
+    const previous = lastCount.current;
+    lastCount.current = messages.length;
+
+    if (pinnedRef.current) {
+      holdBottom();
+      return;
+    }
+    // Scrolled up. Only what someone else sent counts; see `countIncomingSince`.
+    const theirs = countIncomingSince(messages, previous);
+    if (theirs > 0) setMissedWhileAway((n) => n + theirs);
+  }, [messages.length, messages, holdBottom]);
+
+  // Arriving at the bottom, by any route, means they have been seen.
+  const clearMissed = useCallback(() => setMissedWhileAway(0), []);
+
+  // Changing conversation starts the count again.
+  useEffect(() => {
+    setMissedWhileAway(0);
+    lastCount.current = messages.length;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [peerDid]);
 
   // The typing bubble appearing and disappearing changes the height too, and
   // it is the one thing guaranteed to happen right before a message arrives.
@@ -481,7 +558,11 @@ export function ChatView({
     // Only a person's scroll changes the pin. The browser fires this event
     // during layout too, and treating that as intent is what left the view
     // parked short of the newest message.
-    if (userDrivingRef.current) pinnedRef.current = nearBottom();
+    if (userDrivingRef.current) {
+      pinnedRef.current = nearBottom();
+      // Scrolling back down to the end is the same as pressing the pill.
+      if (pinnedRef.current) clearMissed();
+    }
 
     if (!onLoadOlder) return;
     if (!shouldLoadMore(stream.scrollTop, { size: 0, hasMore: hasOlder }, loadingRef.current)) return;
@@ -787,7 +868,14 @@ ${DELETE_WARNING}`)) return;
         </div>
       )}
 
-      {/* Message Stream Area */}
+      {/*
+        A positioning context for the pill, which must float over the stream
+        rather than scroll with it. The wrapper takes the flex sizing and the
+        stream inside it keeps the scrolling — putting `position: relative` on
+        the scroller itself would anchor the pill to the *scrolled* content, so
+        it would sit at the bottom of the conversation instead of the screen.
+      */}
+      <div style={{ flex: 1, position: "relative", display: "flex", minHeight: 0 }}>
       <div
         ref={streamRef}
         onScroll={onStreamScroll}
@@ -1017,6 +1105,21 @@ ${DELETE_WARNING}`)) return;
         {peerIsTyping && <TypingBubble peerName={peerName} />}
 
         <div ref={messagesEndRef} />
+      </div>
+
+      <NewMessagePill
+        count={missedWhileAway}
+        onClick={() => {
+          // Pin first: the jump changes scrollTop, which fires `scroll`, and
+          // an unpinned view would re-derive the flag from a position it has
+          // not reached yet.
+          pinnedRef.current = true;
+          userDrivingRef.current = false;
+          clearMissed();
+          jumpToBottom();
+          holdBottom();
+        }}
+      />
       </div>
 
       {/*

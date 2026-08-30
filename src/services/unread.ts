@@ -61,6 +61,34 @@ export function countWaitingConversations(
 }
 
 /**
+ * How many of the newly-arrived messages came from the other person.
+ *
+ * Feeds the "N new messages" pill inside a conversation, which only appears
+ * while the reader is scrolled away from the end.
+ *
+ * Your own messages never count. Sending one from this screen is not something
+ * you need telling about, and counting it raises a pill announcing your own
+ * words — which is both useless and the obvious way to get this wrong, since
+ * the list grows identically either way.
+ *
+ * @param messages The thread as it is now.
+ * @param previousLength How long it was when this was last checked.
+ */
+export function countIncomingSince(
+  messages: ReadonlyArray<{ isOutgoing?: boolean }>,
+  previousLength: number,
+): number {
+  const arrived = messages.length - previousLength;
+  // Negative when messages were removed — hidden, or a conversation switched
+  // under it. Nothing arrived, so nothing is announced.
+  if (arrived <= 0) return 0;
+  return messages.slice(-arrived).reduce(
+    (total, message) => (message.isOutgoing ? total : total + 1),
+    0,
+  );
+}
+
+/**
  * Read marks survive a restart.
  *
  * Without persistence every relaunch reports every message as unread, which is
