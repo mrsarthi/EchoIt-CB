@@ -2515,7 +2515,28 @@ component it fed was wired wrong.
 
 ## Findings
 
-### Finding 20 — a backgrounded peer loses messages the sender reported as delivered — 🔴 **BLOCKS BETA** *(measured 2026-08-24)*
+### Finding 20 — a backgrounded peer loses messages the sender reported as delivered — ✅ **THE SDK HALF IS FIXED IN 0.8.0** *(measured 2026-08-24, re-checked 2026-08-30)*
+
+> **Re-checked against `@dicsussion/*@0.8.0`.** The cause named below — a dead
+> connection still counting as live, so `publish()` wrote into it and the outbox
+> was never involved — no longer holds:
+>
+> - `peer-registry.js` now has `isLive(peer)` reading `ConnectionState`, and
+>   `listConnected()` filters on it, so `connectedCount` and
+>   `listPairedConnected()` are honest.
+> - `pruneDisconnected()` exists and calls `detachConnection()`, which the
+>   original finding recorded as defined and never called.
+> - `drainAfterReconnect()` prunes and flushes the outbox on reconnection, which
+>   answers "what is missing is the *trigger*" below.
+>
+> **What remains is narrower and is not a bug.** QUIC takes tens of seconds to
+> notice a peer has gone, so a send during that window still enters a connection
+> that is dead and not yet known to be. The fix for that is Option 3 below —
+> treat a peer as reachable only if *heard from* recently — which is a
+> pessimism choice, not a defect.
+>
+> **What is entirely unchanged is the other half**: a frozen webview receives
+> nothing, and no amount of sender-side correctness alters that.
 
 **The question Q8 was written to answer, answered.** Two physical phones, an
 I2404 (Android 16) and an RMX3785 (Android 15), `harness/cdp/test-background.mjs`:
