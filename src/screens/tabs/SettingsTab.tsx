@@ -21,7 +21,6 @@ export function SettingsTab() {
     setTheme,
     resetApp,
     keychainAvailable,
-    displayName,
     acceptRequests,
     setAcceptRequests,
   } = useApp();
@@ -225,35 +224,17 @@ export function SettingsTab() {
           </span>
           <Card style={{ display: "flex", flexDirection: "column", gap: "var(--space-md)" }}>
             {/*
-              The name field lived here as well as in Profile, and "why are
-              there two?" was a fair question with no good answer. One name,
-              typed once, next to the picture and the bio it belongs with.
-
-              Still worth stating where the name is shown, because a name on a
-              request is only ever a claim: the person deciding sees a short
-              code beside it, and that is the part that is actually proven.
+              The name lived here as well as in Profile. Removing the field but
+              keeping a paragraph about it left the screen still talking about
+              something it no longer does — so the paragraph went too. Profile
+              is where the name is, and Profile is where it explains itself.
             */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <div style={{ fontSize: "var(--font-size-body-sm)", fontWeight: "var(--font-weight-semibold)" }}>
-                The name you show people
-              </div>
-              <span style={{ fontSize: "var(--font-size-label)", color: "var(--color-text-muted)" }}>
-                {displayName
-                  ? `You are shown as "${displayName}". Change it in Profile.`
-                  : "Set a name in Profile, and it is what contacts and connection requests show."}
-                {" "}Anyone can type any name, so the short code beside it is what
-                confirms it is you.
-              </span>
-            </div>
-
             <div
               style={{
                 display: "flex",
                 alignItems: "flex-start",
                 justifyContent: "space-between",
                 gap: "var(--space-md)",
-                borderTop: "1px solid var(--color-border)",
-                paddingTop: "var(--space-md)",
               }}
             >
               <div style={{ minWidth: 0 }}>

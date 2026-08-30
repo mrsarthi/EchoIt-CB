@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Avatar } from "../../components/profile/Avatar";
 import {
   SearchIcon,
   AddressBookIcon,
@@ -29,6 +30,7 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
     ignoreRequest,
     blockPeer,
     acceptPairingRequest,
+    peerProfiles,
   } = useApp();
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -385,25 +387,22 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
                     }}
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: "var(--space-md)" }}>
-                      {/* Avatar */}
+                      {/* Their picture, or initials. Same component as the
+                          chat list and the chat header, so a contact does not
+                          change appearance depending on which screen shows
+                          them. */}
                       <div
                         style={{
-                          width: 40,
-                          height: 40,
-                          borderRadius: "var(--radius-full)",
-                          backgroundColor: "var(--color-surface-dim)",
-                          border: "1px solid var(--color-border)",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          fontWeight: "var(--font-weight-semibold)",
-                          fontSize: "var(--font-size-body)",
-                          color: "var(--color-text)",
                           flexShrink: 0,
                           position: "relative",
+                          display: "flex",
                         }}
                       >
-                        {contact.name.slice(0, 1).toUpperCase()}
+                        <Avatar
+                          profile={peerProfiles[contact.peerDid]}
+                          name={contact.name}
+                          size={40}
+                        />
                         {isConnected && (
                           <span
                             style={{

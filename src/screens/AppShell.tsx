@@ -318,6 +318,9 @@ export function AppShell() {
 
       const enriched: ConversationItem = {
         ...c,
+        // The row's picture. Looked up here rather than in the list so the
+        // list stays a rendering of what it is handed.
+        profile: peerProfiles[c.peerDid],
         // Shown in place of the message preview, which is what makes a typing
         // contact findable from the list without opening anything.
         isTyping: isTyping(presenceEvidence.typingAt[c.peerDid], now),

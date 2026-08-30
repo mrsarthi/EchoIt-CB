@@ -18,6 +18,56 @@
 | **1. Core Application (v1)** | Chats, local storage, recovery | **In progress** | 0 | Onboarding + navigation shell done & audited. **Next: pairing (2.3)** |
 | **Pre-UI hardening** | CSP locked down before the UI grows | ✅ **PASSED** | 2 | Strict policy, 0 violations, message flow intact — see below |
 
+## 2026-08-30 — the profile picture removal that could not be reproduced
+
+Reported: "removing the pfp doesn't work, the contacts still see it (also
+check updating)". Everything tested came back working, so what follows is the
+evidence rather than a fix, and the one thing that was hardened.
+
+### Tested, all passing
+
+- **Removal reaches a contact.** Two phones, both in the conversation. Removed
+  on A, saved; B went from 17 avatar images to 0 within seconds.
+- **Replacement reaches a contact, and is the new picture.** Read the pixel
+  rather than counting elements: B rendered 72x72 with pixel [40,200,90],
+  exactly the generated green, not the previous artwork. Counting `img` tags
+  has produced a false pass on this project before.
+- **Removal survives the owner restarting.** Remove, save, force-stop, relaunch:
+  no picture, button reads "Add picture".
+- **A contact who was offline gets the current profile on return.**
+  `harness/profile-updates.mts`, with the returning peer on disk so it is the
+  same identity — a fresh `:memory:` client is a different person and proves
+  nothing.
+- **Clearing persists.** `harness/profile-persist.mts` reopens a store and
+  checks a cleared picture and bio are still cleared.
+
+### A false alarm of my own making, recorded because it nearly shipped as a bug report
+
+The first "reproduction" was invalid: the driver clicked Remove and Save in one
+evaluation, so React had not re-rendered and Save still closed over the old
+`avatar` value — publishing "keep the picture", correctly. The picture being
+there after a restart was the app doing exactly the right thing. Separating the
+clicks made it pass.
+
+Worth remembering when driving this app through CDP: a click that changes React
+state and a click that reads it must be separate calls, or the second sees the
+state before the first.
+
+### Hardened: the avatar cache key
+
+`Avatar` keyed its object-URL effect on `profile.updatedAt`. That is the
+author's own clock, which orders one person's versions and means nothing across
+people — so a reused list row handed a different person's profile with a
+coincidentally equal `updatedAt` would keep showing the previous face. Now keyed
+on the avatar object itself, which the profile service holds stable until it is
+replaced. This matters more now that list rows show pictures and reorder by
+recency.
+
+### Still unexplained
+
+The reported failure. Everything above passes, so either it predates the
+08:37 build, or it is a path none of these cover. Not claimed as fixed.
+
 ## 2026-08-30 — profiles, receipts, selection, and the knock verified on hardware
 
 SDK `@dicsussion/*@0.8.0`. Everything below was measured on two phones and the

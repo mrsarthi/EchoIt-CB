@@ -1,4 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
+import { Avatar } from "../../components/profile/Avatar";
+import type { PeerProfile } from "../../services/profile-format";
 import { SearchIcon, PlusIcon } from "../../components/ui/Icons";
 import { Logo } from "../../components/ui/Logo";
 import { Badge } from "../../components/ui/Badge";
@@ -7,6 +9,8 @@ export interface ConversationItem {
   id: string;
   peerDid: string;
   name: string;
+  /** Their published profile, for the row's picture. */
+  profile?: PeerProfile;
   lastMessage?: string;
   /** Composing right now. Outranks the preview. */
   isTyping?: boolean;
@@ -255,25 +259,22 @@ export function ChatsTab({
                     }
                   }}
                 >
-                  {/* Peer Avatar Initial */}
+                  {/*
+                    Their picture, falling back to initials.
+                    
+                    The list was the one place a face never appeared, which is
+                    the place people actually scan — every other messenger puts
+                    it here first. `Avatar` owns both cases, so the row does not
+                    carry a second copy of the "no picture published" rule.
+                  */}
                   <div
                     style={{
-                      width: 40,
-                      height: 40,
-                      borderRadius: "var(--radius-full)",
-                      backgroundColor: "var(--color-surface-dim)",
-                      border: "1px solid var(--color-border)",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      fontWeight: "var(--font-weight-semibold)",
-                      fontSize: "var(--font-size-body)",
-                      color: "var(--color-text)",
                       flexShrink: 0,
                       position: "relative",
+                      display: "flex",
                     }}
                   >
-                    {chat.name.slice(0, 1).toUpperCase()}
+                    <Avatar profile={chat.profile} name={chat.name} size={40} />
                     {chat.isOnline && (
                       <span
                         style={{

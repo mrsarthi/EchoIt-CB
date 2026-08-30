@@ -44,9 +44,22 @@ export interface AvatarProps {
 
 export function Avatar({ profile, name, size = 40, ring, muted = false, unit = "px" }: AvatarProps) {
   const avatar = profile?.avatar;
-  const version = profile?.updatedAt;
   const [url, setUrl] = useState<string | undefined>(undefined);
 
+  /*
+   * Keyed on the avatar itself, not on `updatedAt`.
+   *
+   * The version number looks like the right key and is not. Two profiles can
+   * carry the same `updatedAt` — it is the author's own clock, so it orders one
+   * person's versions and says nothing across people — and a component
+   * instance does get handed a different person's profile: a list row reused
+   * as the conversation order changes is exactly that. Keyed on the number,
+   * such a row would keep displaying the previous person's face.
+   *
+   * The object is the honest key. The service hands back a stable reference
+   * until the profile is replaced, so this creates one URL per picture and
+   * revokes it when that picture goes.
+   */
   useEffect(() => {
     if (!avatar) {
       setUrl(undefined);
@@ -55,9 +68,7 @@ export function Avatar({ profile, name, size = 40, ring, muted = false, unit = "
     const { url: made, revoke } = avatarUrl(avatar);
     setUrl(made);
     return revoke;
-    // `version` stands in for the bytes; see the note at the top.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [version, !avatar]);
+  }, [avatar]);
 
   // In px the ring is clamped, because a fixed 2px/4px is right across the
   // whole range of pixel sizes used here. In em everything is already relative,
