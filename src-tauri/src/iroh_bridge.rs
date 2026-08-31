@@ -153,35 +153,59 @@ fn hex(bytes: &[u8]) -> String {
 ///
 /// Idempotent: a webview reload calls this again, and rebinding would strand
 /// peers already dialling the previous address.
-/// EchoIt's own relay, in addition to the ones Number 0 runs.
+/// EchoIt's own relay. **Ours only, since 2026-08-31.**
 ///
 /// A relay carries traffic between peers that cannot reach each other
 /// directly, so whoever runs it sees connection metadata — who is talking to
-/// whom, and when — even though the traffic itself is sealed. Running our own
-/// moves that from someone else's infrastructure to ours.
+/// whom, and when — even though the traffic itself is sealed. That is the
+/// whole reason not to leave it with a third party.
 ///
-/// **Both are kept, deliberately.** Two peers can only use a relay they share,
-/// and an install that has not updated still knows only Number 0's. Replacing
-/// the list rather than extending it would mean a new build could not reach an
-/// old one except by a direct connection — a partition that would look like
-/// ordinary unreliability and be miserable to diagnose. Number 0's entries can
-/// be dropped once installs in the wild have moved over.
+/// Number 0's relays used to be kept alongside this one so that an install
+/// which had not updated could still find a shared relay. They are gone now,
+/// by decision, and the partition that argued for keeping them does not
+/// happen: every build that ever shipped with our relay has it in its list
+/// too, so an old install and a new one still share exactly this one.
+///
+/// **What it costs.** One relay is one point of failure. If this host is down,
+/// peers who cannot hole-punch cannot reach each other at all, where before
+/// they would have fallen back to Number 0's. That is the trade being made
+/// deliberately: fewer parties see the metadata, less redundancy behind it.
+/// `RELAY_URL` in Settings is the release valve — anyone can point at their
+/// own, or back at a public one.
 ///
 /// This relays live traffic and stores nothing: a peer who is offline has no
 /// message waiting here. Background delivery is a separate service and needs
 /// protocol support first.
 const ECHOIT_RELAY: &str = "https://echoit-relay.duckdns.org";
 
-fn relay_mode() -> RelayMode {
-    // `urls` is generic over the collection it builds, so the type is named.
-    let mut urls: Vec<RelayUrl> = RelayMode::Default.relay_map().urls();
+/// Which relay to use: the caller's, or ours.
+///
+/// A custom URL comes from Settings. It is validated here rather than trusted,
+/// and a bad one falls back to ours instead of leaving the endpoint with an
+/// empty relay map — typing a broken URL should cost you your own relay, not
+/// your ability to reach anyone.
+fn relay_mode(custom: Option<&str>) -> RelayMode {
+    let mut urls: Vec<RelayUrl> = Vec::new();
 
-    match ECHOIT_RELAY.parse::<RelayUrl>() {
-        Ok(ours) => urls.push(ours),
-        Err(e) => {
-            // Keep Number 0's rather than failing to start. A typo in our own
-            // URL should cost us our relay, not the user's ability to connect.
-            eprintln!("echoit: ignoring malformed relay url {ECHOIT_RELAY}: {e}");
+    if let Some(raw) = custom.map(str::trim).filter(|s| !s.is_empty()) {
+        match raw.parse::<RelayUrl>() {
+            Ok(theirs) => {
+                eprintln!("echoit: using custom relay {raw}");
+                urls.push(theirs);
+            }
+            Err(e) => eprintln!("echoit: ignoring malformed custom relay url {raw}: {e}"),
+        }
+    }
+
+    if urls.is_empty() {
+        match ECHOIT_RELAY.parse::<RelayUrl>() {
+            Ok(ours) => urls.push(ours),
+            Err(e) => {
+                // Nothing left to fall back to. Number 0's used to be the
+                // safety net and are gone by decision, so say so loudly rather
+                // than binding with no relay and calling it a network fault.
+                eprintln!("echoit: OUR OWN relay url {ECHOIT_RELAY} is malformed: {e}");
+            }
         }
     }
 
@@ -191,6 +215,7 @@ fn relay_mode() -> RelayMode {
 #[tauri::command]
 pub async fn iroh_start(
     secret_key: Vec<u8>,
+    relay_url: Option<String>,
     app: AppHandle,
     state: State<'_, IrohState>,
 ) -> Result<EndpointIdentity, String> {
@@ -203,7 +228,7 @@ pub async fn iroh_start(
 
     if guard.is_none() {
         let endpoint = Endpoint::builder(presets::N0)
-            .relay_mode(relay_mode())
+            .relay_mode(relay_mode(relay_url.as_deref()))
             .secret_key(SecretKey::from_bytes(&bytes))
             .alpns(vec![DICSUSSION_ALPN.to_vec()])
             .bind()

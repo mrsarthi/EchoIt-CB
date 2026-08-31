@@ -5,6 +5,7 @@ import type {
   BridgePipe,
   BridgeTarget,
 } from '@dicsussion/core/transport';
+import { loadRelayUrl } from '../services/relay';
 
 /**
  * `BridgePipe.addresses()` returns `BridgeAddresses`, but that type is not
@@ -132,8 +133,15 @@ export class TauriBridgePipe implements BridgePipe {
     // before anything is listening.
     await this.subscribe();
 
+    /*
+     * The relay map is fixed when the endpoint binds, so the chosen relay has
+     * to be handed over here. Nothing later can move a running endpoint to a
+     * different one -- which is why Settings says a change needs a restart
+     * rather than pretending it applies at once.
+     */
     const identity = await invoke<EndpointIdentity>('iroh_start', {
       secretKey: Array.from(transportSecret),
+      relayUrl: loadRelayUrl() ?? null,
     });
     this.started = true;
     return identity;

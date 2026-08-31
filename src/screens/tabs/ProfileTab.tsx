@@ -176,11 +176,19 @@ export function ProfileTab() {
           </Card>
         </section>
 
-        {/* Mandatory At-Rest Disclosure Notice */}
+        {/*
+          Mandatory At-Rest Disclosure — PRODUCT.md §4.1, rewritten for SDK
+          0.8.1, which seals message text and CRDT snapshots. The columns
+          around them are not sealed, so "who and when" is still readable off
+          the disk and this copy says so rather than rounding up to "your
+          history is private".
+        */}
         <AlertBanner variant="info" title="Local Storage Security Notice">
-          Your chat history is stored locally on this device. Because message files are not
-          encrypted on your device&apos;s disk, someone who gains physical access to it might
-          be able to read them. We recommend keeping a strong lock screen password or PIN enabled.
+          Your chat history is kept on this device and the messages themselves are
+          encrypted, so someone who copies the files off your device cannot read them.
+          They could still see who you have spoken to and when. And anyone holding your
+          unlocked device can simply open the app &mdash; so a strong lock screen password
+          or PIN is still what protects you.
         </AlertBanner>
       </div>
     </div>

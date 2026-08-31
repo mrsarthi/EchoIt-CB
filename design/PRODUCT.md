@@ -90,11 +90,32 @@ To ensure the app remains accessible to ordinary people, **never lead with crypt
 
 EchoIt values radical transparency. We must tell the truth about what our technology can and cannot do. We never create a false sense of security.
 
-### 1. Local Device Security (At-Rest Encryption)
-*   **The Reality**: The application security key protects your cryptographic identity secrets. However, **message bodies and history are not currently encrypted at rest on the device**. Anyone with access to the phone's filesystem can read your messages and chat history in plaintext. *(Verified against SDK 0.3.1: `storageKey` reaches only `SecretBox`, which seals the identity secret columns. Message bodies go to `message_stream` verbatim and CRDT state to `crdt_documents` as raw Automerge bytes — neither passes through a cipher.)*
-*   **Verbal Rule**: We say *"Your messages stay on your phone."* We **never** write copy implying that *"Your messages are protected on your phone"* or *"Your local history is encrypted."* We must explicitly guide the user to secure their physical device.
+### 1. Local Device Security (At-Rest Encryption) *(rewritten 2026-08-31 for SDK 0.8.1)*
+*   **The Reality**: **Message text is now encrypted on the device.** *(Verified
+    against SDK 0.8.1 by reading it: `message-store.js` seals `content` through
+    `SecretBox`, and `document-store.js` seals the CRDT snapshot bytes. The key
+    is derived from the recovery phrase and held in the OS keychain, and the SDK
+    refuses to open an on-disk database without one.)*
+
+    **What is still readable** matters and must not be glossed over. The
+    surrounding columns are not sealed: `author_did`, `timestamp` and
+    `channel_id` are stored as they are, because the database is queried by
+    them. So someone with the phone's filesystem can establish **that** you had
+    a conversation, **with whom**, and **when** — but not **what was said**.
+
+    Before 0.8.1 none of it was encrypted. That was disclosed while it was true,
+    and this section is the record of it changing rather than a quiet edit.
+*   **Verbal Rule**: We may now say the words are encrypted. We must **not**
+    stretch that into "your history is private on your device", because who and
+    when are not covered. Never imply that encryption at rest protects a phone
+    someone else is holding **unlocked** — the app opens the messages for
+    whoever is using it. Keep guiding people to a lock screen.
 *   **UI Warning Copy**:
-    > *"Your chat history is stored locally on this phone. Because message files are not encrypted on your device's disk, someone who gains physical access to your phone might be able to read them. We recommend keeping a strong lock screen password or PIN enabled."*
+    > *"Your chat history is kept on this phone and the messages themselves are
+    > encrypted, so someone who copies the files off your device cannot read
+    > them. They could still see who you have spoken to and when. And anyone
+    > holding your unlocked phone can simply open the app — so a strong lock
+    > screen password or PIN is still what protects you."*
 
 ### 3. Update Checks *(settled 2026-08-20; server claim corrected 2026-08-30)*
 

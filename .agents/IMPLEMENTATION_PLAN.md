@@ -549,9 +549,13 @@ however, free of consequence, and the terms matter:
 Not who you talk to, not what you said, not your `did:key`. Worth stating plainly
 rather than pretending it is nothing.
 
-**The upside, which is real:** this makes a strong claim checkable — the *only*
-server EchoIt ever contacts is GitHub, to ask whether a newer version exists.
-Everything else is device to device.
+**The upside, which is real:** the update check is a single unauthenticated GET
+that carries nothing about you, and that is checkable by watching the network.
+
+*(Corrected 2026-08-31. This paragraph used to say GitHub was the **only**
+server EchoIt ever contacts. That was false — the app reaches a connection
+helper and publishes its addresses on every launch. See Finding 18 and
+`PRODUCT.md` §4.4; do not reintroduce any "only server" phrasing.)*
 
 ---
 

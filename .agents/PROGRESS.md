@@ -2,7 +2,7 @@
 
 ## Status at a glance
 
-*Last updated: 2026-08-30 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.8.0` · **🚪 GATE OPEN — two physical phones held a conversation through the real UI** · **0.3.0 published** for Windows and Android*
+*Last updated: 2026-08-31 · Runtime: **Tauri v2** · SDK `@dicsussion/*@0.8.1` · **🚪 GATE OPEN — two physical phones held a conversation through the real UI** · **0.4.0 published** for Windows and Android · **`.agents/START_HERE.md` is the complete project briefing; read it before this file***
 
 | Phase | Target / Deliverable | Status | Tests | Notes |
 |---|---|---|---|---|
@@ -17,6 +17,89 @@
 | **S3. iOS readiness** | Paper check only — no Mac available | **Not Started** | 0 | Deferred by decision, not forgotten |
 | **1. Core Application (v1)** | Chats, local storage, recovery | **In progress** | 0 | Onboarding + navigation shell done & audited. **Next: pairing (2.3)** |
 | **Pre-UI hardening** | CSP locked down before the UI grows | ✅ **PASSED** | 2 | Strict policy, 0 violations, message flow intact — see below |
+
+## 2026-08-31 — SDK 0.8.1, ten decisions settled, and the briefing rewritten
+
+No phones available today. Everything below was done without them, and what
+needs them is listed at the end rather than guessed at.
+
+### SDK 0.8.1 — both claims verified by reading it, not by trusting the note
+
+**Reactions exist.** `chat-service.d.ts` now carries `react(channelId,
+messageId, emoji)`, `unreact`, `getReactions`, `onReaction` and
+`emitSyncedReactions`, with `ReactionSummary` / `ReactionEvent` exported. It is
+what SDK-9 asked for: its own emitter rather than a marker inside `content`, one
+reaction per person per message, and removable. **The app does not use it yet.**
+
+**Encryption at rest is real, and narrower than "encrypted".**
+`storage/message-store.js` seals `content` through `SecretBox`;
+`storage/document-store.js` seals the CRDT snapshot bytes. The app already
+derives `storageKey` from the recovery phrase and holds it in the OS keychain,
+and `create-client.ts` passes it, so this is live rather than merely available —
+`new SecretBox(null)` is a pass-through, which is what an unconfigured key
+means.
+
+**What is still readable, and must not be glossed over:** `author_did`,
+`timestamp` and `channel_id` are unsealed columns, because the database is
+queried by them. Someone with the filesystem learns **that** you spoke, **with
+whom**, and **when** — not **what**. `PRODUCT.md` §4.1 was rewritten to say
+exactly that, and both in-app banners with it.
+
+While there, one more overclaim went: onboarding said *"no central server
+recording your history or your contacts"*. Contacts are precisely what §4.4
+refuses to claim a helper cannot observe. Narrowed to *"no server stores them"*.
+
+### Ten decisions settled
+
+D1 foreground service (not FCM, not a mailbox — neither adds a server or a
+party). D2 notifications name the sender, never the text. D3 reactions in. D4
+**link highlighting with a confirm prompt, no previews** — a preview fetch asks
+a third-party host for metadata and needs the CSP widened. D5 1.0.0 is 1:1,
+Windows + Android. D6 at-rest fixed upstream. D7 the relay sentence in plain
+words. D8 **our relay only**. D9 custom relay URL in Settings. D10 a phone may
+be wiped to test onboarding.
+
+Full reasoning for each is in `START_HERE.md` §4, which is now the place
+decisions live.
+
+### The relay is ours alone — and this is untested
+
+`relay_mode()` no longer merges Number 0's relay map. It takes an optional URL
+from Settings, validates it, and falls back to ours. The partition that argued
+for keeping Number 0's does not arise: every build that shipped with our relay
+has it listed too, so old and new installs still share exactly one.
+
+**What it costs, stated plainly:** one relay is one point of failure. A peer who
+cannot hole-punch and cannot reach our host now cannot connect at all, where
+before it would have fallen back. `RELAY_URL` in Settings is the release valve.
+
+**This has not been run on hardware.** It changes the transport, which is the
+one layer with real proof behind it, and it must be tested on two phones before
+any release. `src/services/relay.ts` exists; the Settings UI does not yet.
+
+### Documents
+
+`START_HERE.md` **rewritten end to end** as a complete briefing — stack,
+architecture, every settled decision Q1–Q21 and D1–D10, open and closed
+findings, the traps, the lessons, and where everything lives. The previous
+version had drifted: it claimed Finding 17 was fixed on 2026-08-22 while this
+file still lists it open, and described read receipts and unread counts as not
+built. Contradictions are flagged in place rather than silently resolved.
+
+Deleted, spent: `ECHOIT_MIGRATION_PROMPT.md`, `SDK-REQUESTS.md`,
+`UI_AGENT_PROMPT{,_2,_3}.md`. Their conclusions are folded into `START_HERE.md`.
+
+`docs/legacy/UNIFIED_SECURITY_AUDIT.md` is untracked and gitignored, along with
+a pattern for future audits. **It remains in git history** — untracking does not
+rewrite the past, and rewriting it is the owner's call.
+
+### Needs the phones
+
+The foreground service and its notifications; verifying the relay switch;
+rendering the first-run profile screen; Finding 17; the no-reconnect-after-freeze
+bug.
+
+---
 
 ## 2026-08-30 — the server claim corrected, and four UI reports fixed on two phones
 

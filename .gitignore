@@ -77,3 +77,13 @@ Thumbs.db
 
 # MACCO analysis transcripts — local only
 .macco/
+
+# Security reports and audits — kept locally, never published.
+# A findings document is a map of what is weakest and where, which is worth
+# more to someone attacking the app than to anyone reading the repo. Removed
+# from tracking on 2026-08-31; the file itself stays on disk.
+docs/legacy/UNIFIED_SECURITY_AUDIT.md
+**/*SECURITY_AUDIT*.md
+**/*security-audit*.md
+**/*SECURITY_REPORT*.md
+**/*penetration*.md

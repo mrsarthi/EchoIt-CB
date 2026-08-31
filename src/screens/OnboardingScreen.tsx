@@ -161,16 +161,24 @@ export function OnboardingScreen() {
                   lineHeight: "var(--line-height-body)",
                 }}
               >
-                EchoIt connects you directly to the people you talk with. Conversations live only on
-                your device, with no central server recording your history or your contacts.
+                {/*
+                  "no central server recording your history or your contacts"
+                  claimed more than §4.4 is willing to: whether a helper can
+                  tell which two devices reach for each other is untested, and
+                  contacts are exactly that. Narrowed to what is known.
+                */}
+                EchoIt connects you directly to the people you talk with. Your conversations
+                are kept on your device, and no server stores them.
               </p>
             </div>
 
-            {/* Mandatory At-Rest Disclosure per PRODUCT.md §4.1 */}
+            {/* Mandatory At-Rest Disclosure per PRODUCT.md §4.1 (SDK 0.8.1). */}
             <AlertBanner variant="info" title="Local Storage Security Notice">
-              Your chat history is stored locally on this phone. Because message files are not
-              encrypted on your device&apos;s disk, someone who gains physical access to your phone might
-              be able to read them. We recommend keeping a strong lock screen password or PIN enabled.
+              Your chat history is kept on this phone and the messages themselves are
+              encrypted, so someone who copies the files off your device cannot read them.
+              They could still see who you have spoken to and when. And anyone holding your
+              unlocked phone can simply open the app &mdash; so a strong lock screen password
+              or PIN is still what protects you.
             </AlertBanner>
 
             <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)", marginTop: "var(--space-sm)" }}>

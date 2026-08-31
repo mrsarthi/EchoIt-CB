@@ -40,8 +40,8 @@
     "test:timestamps-device": "node harness/cdp/drive-chat-timestamps.mjs"
   },
   "dependencies": {
-    "@dicsussion/core": "^0.8.0",
-    "@dicsussion/sdk": "^0.8.0",
+    "@dicsussion/core": "^0.8.1",
+    "@dicsussion/sdk": "^0.8.1",
     "@scure/bip39": "^1.6.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
