@@ -56,6 +56,17 @@ export async function reconnectKnownContacts(
   blockedDids: ReadonlySet<string>,
   myDid: string | null,
   now: number = Date.now(),
+  /**
+   * Dial even if this peer was tried inside the cooldown.
+   *
+   * The cooldown stops a resume storm from dialling the same peer repeatedly.
+   * It is wrong for the case it was never designed for: a connection the SDK
+   * still believes in because the webview was suspended when it closed, and
+   * which therefore never gets re-established. Liveness is read from the
+   * transport's `ConnectionState`, and a transport nobody was running to
+   * observe never marked it closed.
+   */
+  force: boolean = false,
 ): Promise<ReconnectResult> {
   const result: ReconnectResult = { attempted: 0, connected: 0, failed: 0, skipped: 0 };
 
@@ -64,7 +75,7 @@ export async function reconnectKnownContacts(
     if (blockedDids.has(c.peerDid)) return false;
     if (myDid && c.peerDid === myDid) return false;
     const last = lastAttempt.get(c.peerDid);
-    if (last !== undefined && now - last < COOLDOWN_MS) {
+    if (!force && last !== undefined && now - last < COOLDOWN_MS) {
       result.skipped += 1;
       return false;
     }

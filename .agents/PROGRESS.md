@@ -98,6 +98,76 @@ no-reconnect-after-freeze bug.
 
 ---
 
+## 2026-09-02 — background reception works; the message does not survive the trip
+
+### The service now survives the app being closed
+
+Reported: closing EchoIt closed the service, which is the one thing it exists
+not to do. Two causes, both fixed in `apply-android-foreground.mjs`:
+
+- **`android:stopWithTask="false"`** was missing, so swiping the app out of
+  recents took the service with it. `onTaskRemoved` now asks for a restart as
+  well, because several OEM builds ignore the flag and then honour the intent.
+- **The applier was not idempotent.** Its guard looked for
+  `<service android:name=".EchoItService"` on one line while the block it
+  writes puts the attribute on the next, so it never matched and every run
+  appended another copy — a device was found with **three** identical service
+  declarations. It now strips whatever is there and writes one, which repairs
+  the manifests it already damaged rather than merely declining to damage new
+  ones.
+
+### The webview is not the problem — measured
+
+A counter incremented on a 1 s interval reached **59 in 60 seconds** while the
+app was backgrounded. The webview's JavaScript runs the whole time. That closes
+off the "TauriActivity suspends the webview" theory; the keep-alive is kept
+because it is correct, but it was not the blocker.
+
+Also visible in logcat, and worth knowing on this hardware:
+`OplusHansManager: cannot transition from R to M, importance=fg-service` — the
+foreground service is what holds the app out of Oplus's process reaper.
+
+### Reception works. Display does not.
+
+The driver still reports 0/4, and **the driver is wrong about what that means.**
+logcat during a send to a backgrounded receiver:
+
+```
+NotificationService: PostNotification : {channel_name=Messages,
+  notification_id=1004, channel_id=echoit_messages, ...}
+```
+
+That notification is posted by `announceIncoming`, which is called from the
+SDK's `onMessage` handler. **The message arrived, while backgrounded, and the
+phone said so.** D2's sender-name-only notification works end to end.
+
+What does not work is the message being there afterwards: opening the
+conversation shows nothing from that run. So the remaining fault is between
+"the SDK handed us the message" and "it is in the conversation on the next
+launch" — persistence or redisplay, not transport, not the freezer, and not
+delivery.
+
+This is a materially better position than the three previous runs suggested.
+Everything below the app is now working.
+
+### A bug introduced and removed the same day
+
+`announceIncoming` was first called from **inside** a `setMessages` updater.
+An updater must be pure — React may invoke it more than once for a single
+update — so one message could ring twice. Moved out, with a `seenMessages` ref
+doing the de-duplication.
+
+### Reconnect
+
+`reconnectKnownContacts` gained a `force` flag that bypasses the 30 s cooldown,
+and the app now sweeps **every two minutes while backgrounded**, which the
+foreground service is what makes possible. Resume is forced too: coming back is
+exactly when a stale connection needs replacing, and the cooldown would skip
+the peer that most needs it. Neither changed the delivery result, which is
+consistent with the fault being above the transport.
+
+---
+
 ## 2026-08-31 (evening) — reactions, links, the relay control, and the foreground service half-works
 
 ### The foreground service unfreezes the process. It does not fix delivery.

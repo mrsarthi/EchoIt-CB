@@ -196,6 +196,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
    * reaction changes.
    */
   const [reactions, setReactions] = useState<Record<string, Record<string, readonly ReactionGroup[]>>>({});
+  /**
+   * Message ids already announced.
+   *
+   * A ref rather than state: it must be readable and writable from inside a
+   * subscription callback without causing a render, and it exists only to stop
+   * one message ringing twice.
+   */
+  const seenMessages = useRef<Set<string>>(new Set());
   const [peerProfiles, setPeerProfiles] = useState<Record<string, PeerProfile>>({});
   /** What *they* have confirmed about *our* messages, by their did. */
   const [receipts, setReceipts] = useState<Record<string, Watermarks>>({});
@@ -575,7 +583,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!client || state !== "ready") return;
 
-    const sweep = () => {
+    const sweep = (force = false) => {
       const d = reconnectDeps.current;
       if (!d.client) return;
       void reconnectKnownContacts(
@@ -583,13 +591,39 @@ export function AppProvider({ children }: { children: ReactNode }) {
         d.contacts,
         new Set(d.blockedPeers.map((b) => b.peerDid)),
         d.did,
+        Date.now(),
+        force,
       );
     };
 
     sweep();
 
+    /*
+     * Keep dialling while the app is in the background.
+     *
+     * This is what the foreground service buys. Until it existed the process
+     * was frozen at ~90s and a timer here would simply not run; the sweep
+     * could only happen on resume, which is far too late for a message sent
+     * while the screen was off.
+     *
+     * Forced, because the case being repaired is precisely a connection the
+     * SDK still believes in: the webview was not running when the transport
+     * closed it, so nothing marked it dead and an unforced dial is skipped as
+     * "recently attempted" against a connection that no longer exists.
+     *
+     * Two minutes is a compromise. Dialling is not free -- it wakes the radio
+     * -- and a messenger that flattens a battery to save a few seconds of
+     * latency has made the wrong trade for the audience this is built for.
+     */
+    const BACKGROUND_SWEEP_MS = 120_000;
+    const backgroundSweep = window.setInterval(() => {
+      if (document.visibilityState === "hidden") sweep(true);
+    }, BACKGROUND_SWEEP_MS);
+
     const onVisible = () => {
-      if (document.visibilityState === "visible") sweep();
+      // Forced: coming back is exactly when a stale connection needs
+      // replacing, and the cooldown would skip the peer that most needs it.
+      if (document.visibilityState === "visible") sweep(true);
     };
     document.addEventListener("visibilitychange", onVisible);
     // Android does not always fire visibilitychange on resume; `focus` covers
@@ -598,6 +632,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     window.addEventListener("focus", onVisible);
 
     return () => {
+      window.clearInterval(backgroundSweep);
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
     };
@@ -689,16 +724,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
             // de-duplicates by id for its own emit, but a reconnect can still
             // deliver something we already hold, so the UI checks too.
             if (existing.some((m) => m.id === message.id)) return prev;
-            /*
-             * Tell the phone, but only what D2 allows: the sender's name,
-             * never the text. Inside the de-duplication guard deliberately --
-             * a replayed message on reconnect must not ring twice for
-             * something already delivered.
-             *
-             * `announceIncoming` is itself a no-op while EchoIt is on screen;
-             * the unread badge covers that case and a banner over the
-             * conversation you are reading is noise.
-             */
+            return { ...prev, [contact.peerDid]: [...existing, message] };
+          });
+
+          /*
+           * Tell the phone, but only what D2 allows: the sender's name, never
+           * the text.
+           *
+           * Outside the state updater, not inside it. An updater has to be
+           * pure -- React may call it more than once for a single update, and
+           * a notification fired from in there can ring twice for one message.
+           * The de-duplication that guards this now lives in `seenMessages`,
+           * which is a ref and therefore safe to consult and write here.
+           *
+           * `announceIncoming` is itself a no-op while EchoIt is on screen:
+           * the unread badge covers that, and a banner over the conversation
+           * you are reading is noise.
+           */
+          if (!seenMessages.current.has(message.id)) {
+            seenMessages.current.add(message.id);
             announceIncoming(displayNameFor(
               localNameOf(contact.name),
               // Read from the SDK rather than from React state: this closure
@@ -709,8 +753,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
               contact.peerDid,
               contact.claimedName,
             ));
-            return { ...prev, [contact.peerDid]: [...existing, message] };
-          });
+          }
         }),
       );
 

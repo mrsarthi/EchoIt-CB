@@ -75,20 +75,38 @@ for (const perm of PERMISSIONS) {
 
 // ─── 2. Service declaration in AndroidManifest.xml ──────────────────────────
 
-const SERVICE_TAG = '<service android:name=".EchoItService"';
+/*
+ * Rewritten rather than appended-if-absent.
+ *
+ * The guard used to look for `<service android:name=".EchoItService"` on one
+ * line while the block it writes puts the attribute on the next, so it never
+ * matched and every run added another copy. A manifest with three identical
+ * service declarations was found on a device.
+ *
+ * Stripping whatever is there and writing one is self-healing, which an
+ * `includes` check can never be: it repairs the manifests this script already
+ * damaged instead of only declining to damage new ones.
+ *
+ * `android:stopWithTask="false"` is the reported bug -- swiping EchoIt out of
+ * the recents list took the service with it, and with it the whole reason the
+ * service exists. `onTaskRemoved` in the service asks to be restarted as well,
+ * because the flag alone is not honoured on every OEM build.
+ */
+const EXISTING_SERVICE = /\s*<service\s+android:name="\.EchoItService"[\s\S]*?\/>\s*/g;
+manifest = manifest.replace(EXISTING_SERVICE, `
+`);
 
-if (!manifest.includes(SERVICE_TAG)) {
-  manifest = manifest.replace(
-    '</application>',
-    `
+manifest = manifest.replace(
+  '</application>',
+  `
         <service
             android:name=".EchoItService"
             android:foregroundServiceType="dataSync"
+            android:stopWithTask="false"
             android:exported="false" />
 
     </application>`,
-  );
-}
+);
 
 writeFileSync(MANIFEST, manifest, 'utf8');
 console.log('android:foreground — permissions and service declaration applied');
@@ -232,6 +250,23 @@ class EchoItService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    /**
+     * Swiping EchoIt out of the recents list must not stop the service.
+     *
+     * Reported on a device: closing the app closed the service, which is the
+     * one thing it exists not to do -- a messenger that only receives while
+     * you are looking at it is the problem, not the feature.
+     *
+     * android:stopWithTask="false" in the manifest is the declaration; this
+     * is the belt to its braces, because several OEM builds stop the service
+     * anyway and then honour an explicit restart.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        val restart = Intent(applicationContext, EchoItService::class.java)
+        startForegroundService(restart)
+        super.onTaskRemoved(rootIntent)
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         return START_STICKY
