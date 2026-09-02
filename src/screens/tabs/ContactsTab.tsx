@@ -18,6 +18,7 @@ import { AddContactModal } from "../../components/pairing/AddContactModal";
 import { TwoStepsChecklist } from "../../components/pairing/TwoStepsChecklist";
 import type { Contact } from "../../services/pairing-store";
 import { displayNameFor, isClaimedName, localNameOf } from "../../services/profile-format";
+import { isReachable } from "../../services/reachability";
 
 export interface ContactsTabProps {
   onSelectContact?: (peerDid: string) => void;
@@ -32,6 +33,7 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
     blockPeer,
     acceptPairingRequest,
     peerProfiles,
+    presenceEvidence,
   } = useApp();
 
   /**
@@ -392,7 +394,17 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
               {filteredContacts.map((contact: Contact) => {
-                const isConnected = contact.pairingState === "bilateral_connected";
+                /*
+                  Paired, and actually there, are different questions.
+                  `pairingState` is written once when pairing completes and
+                  never revisited, so a contact whose phone was reset keeps
+                  showing a green dot and "Connected directly" forever -- which
+                  is how a dead contact became indistinguishable from a live
+                  one after a peer re-registered. Finding 17.
+                */
+                const paired = contact.pairingState === "bilateral_connected";
+                const heardAt = presenceEvidence.heardAt[contact.peerDid];
+                const isConnected = paired && isReachable(heardAt, Date.now());
                 return (
                   <Card
                     key={contact.peerDid}
@@ -459,6 +471,7 @@ export function ContactsTab({ onSelectContact }: ContactsTabProps) {
                           <TwoStepsChecklist
                             pairingState={contact.pairingState}
                             peerName={nameOf(contact)}
+                            lastHeardAt={heardAt}
                             variant="compact"
                           />
                         </div>

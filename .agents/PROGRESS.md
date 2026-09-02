@@ -98,6 +98,113 @@ no-reconnect-after-freeze bug.
 
 ---
 
+## 2026-09-03 — 🔴 **Finding 21 — an OS kill emptied the message database.** Release blocker
+
+Found while testing screen-off delivery. **This outranks everything else open.**
+
+### What happened
+
+The receiver was backgrounded with the screen off. Messages were sent at 30 s,
+120 s, 300 s and 600 s. Between 120 s and 300 s the process was killed:
+
+```
+ 120s  cpu+28023  send: sent
+cat: /proc/12238/stat: No such file or directory
+ 300s  cpu+  NaN  send: sent
+```
+
+It came back — pid 12238 → 15186, service running again. **And its database was
+empty.**
+
+| | before | after |
+|---|---|---|
+| `message_stream` | 76 | **0** |
+| `crdt_documents` | 5 | **0** |
+| `blobs` | 5 | **0** |
+
+The identity survived: `localStorage` still holds the same DID and all four
+contacts. The app opens to *"No conversations yet"*. On disk,
+`app_webview/Default/IndexedDB` is **31 KB, created 01:20** — the moment of the
+restart. The store was recreated, not read.
+
+### Why this is the worst possible bug for this product
+
+EchoIt keeps history **only** on the device. That is the promise, and it means
+there is no server copy to restore from. A user who loses this loses
+everything, permanently, with no action of their own — the phone simply killed
+a backgrounded app, which Android does routinely.
+
+### What it is not
+
+The reset path did not run. `echoit_pending_db_reset` is absent and the
+contacts it does not touch are intact, so this is not `pending-reset.ts` firing
+by accident.
+
+### Most likely cause, and what would confirm it
+
+A hard kill while IndexedDB had work in flight, with Chromium discarding a
+database it could not recover. That fits the timing and fits the identity
+surviving — identity is in `localStorage` and the keychain, both outside the
+IndexedDB store.
+
+**Not yet reproduced deliberately**, and it must be before anything is claimed
+about a fix: kill the app repeatedly under write load and see how often the
+store comes back empty. If it reproduces, the questions are whether the SDK
+checkpoints in a way that can leave the store unrecoverable, and whether
+anything can be done app-side — a periodic export, or a second copy the app
+writes itself.
+
+### Effect on today's other results
+
+The screen-off run is **void** — its messages were in the database that was
+wiped, so 0/4 there says nothing about delivery. The screen-*on* result stands:
+4/4 at 10/30/90/180 s, measured before this happened.
+
+---
+
+## 2026-09-03 — background delivery confirmed 4/4, and Finding 17 closed
+
+### 4/4, against the live contact
+
+`measure-background-real.mjs` with the correct peer name on both ends:
+
+```
+ 10s  cpu+  ..  send: sent      YES  bg-mtkhfal7-10
+ 30s  cpu+  ..  send: sent      YES  bg-mtkhfal7-30
+ 90s  cpu+ 241  send: sent      YES  bg-mtkhfal7-90
+180s  cpu+ 476  send: sent      YES  bg-mtkhfal7-180
+```
+
+**4/4 arrived.** The earlier 0/4 runs were reading a dead conversation, as
+recorded above. Background delivery works while the app is open, out to three
+minutes, with the process demonstrably running the whole time.
+
+### Finding 17 — closed
+
+*"A unilateral contact reports Connected directly"*, open since 2026-08-21.
+
+The row's status came from `contact.pairingState`, a flag written once when
+pairing completes and never revisited. So it answered "did we add each other",
+while presenting as an answer to "are we connected". Anything that changed
+afterwards -- a peer turning their phone off, reinstalling, or **re-registering
+with a new identity** -- left the row claiming a live connection forever.
+
+That last case is not hypothetical: it is what made the dead `Phone A` row
+indistinguishable from the live `Phone A (Mutual)` one, and it cost hours of
+measurements today.
+
+`TwoStepsChecklist` now takes an optional `lastHeardAt` and separates the two
+questions: **paired** stays a fact about pairing, **here** requires having
+actually heard from them inside the presence window. Paired-but-absent gets
+`describeWaiting` and *"Anything you send now waits on this device until they
+are back"*, which is also exactly what the 0.4.0 send gate does. The green dot
+in `ContactsTab` follows the same rule.
+
+Callers that genuinely only know about pairing omit `lastHeardAt` and keep the
+old wording, so nothing else had to change.
+
+---
+
 ## 2026-09-03 (evening) — the service stops with the app, deliberately
 
 Asked: why not keep the notification alive the way uTorrent does, so it works

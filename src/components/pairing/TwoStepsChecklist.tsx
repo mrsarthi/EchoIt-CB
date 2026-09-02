@@ -1,4 +1,5 @@
 import { CheckIcon, ClockIcon, ShareIcon, ShieldIcon } from "../ui/Icons";
+import { isReachable, describeWaiting } from "../../services/reachability";
 import { Button } from "../ui/Button";
 
 export type PairingState = "unilateral_waiting" | "unilateral_pending" | "bilateral_connected";
@@ -10,6 +11,20 @@ export interface TwoStepsChecklistProps {
   onShareTicket?: () => void;
   onConnectBack?: () => void;
   variant?: "card" | "banner" | "compact";
+  /**
+   * When we last heard from them, if ever.
+   *
+   * `pairingState` says whether the two of you added each other. It does not
+   * say whether they are *there* -- it is a flag written once and never
+   * revisited, so a contact whose device was reset, reinstalled or simply
+   * turned off keeps reading "Connected directly" forever. That is Finding 17,
+   * and it is what made a peer who no longer exists indistinguishable from one
+   * who does.
+   *
+   * Omit it and the old flag-only wording is used, which is right for the
+   * screens that genuinely only know about pairing.
+   */
+  lastHeardAt?: number;
   style?: React.CSSProperties;
 }
 
@@ -19,9 +34,18 @@ export function TwoStepsChecklist({
   onShareTicket,
   onConnectBack,
   variant = "card",
+  lastHeardAt,
   style,
 }: TwoStepsChecklistProps) {
-  const isConnected = pairingState === "bilateral_connected";
+  const paired = pairingState === "bilateral_connected";
+  /*
+   * Paired is not the same as present. Only claim a live connection when
+   * something has actually been heard inside the presence window; a caller
+   * that cannot know passes nothing and keeps the old behaviour.
+   */
+  const knowsPresence = lastHeardAt !== undefined;
+  const here = paired && (!knowsPresence || isReachable(lastHeardAt, Date.now()));
+  const isConnected = paired;
   const isWaiting = pairingState === "unilateral_waiting";
   const isPending = pairingState === "unilateral_pending";
 
@@ -38,14 +62,18 @@ export function TwoStepsChecklist({
     ? `Waiting for ${peerName} to connect back`
     : `${peerName} added you`;
 
-  const primaryCopy = isConnected
+  const primaryCopy = here
     ? "Connected directly"
+    : paired
+    ? describeWaiting(lastHeardAt, Date.now())
     : isWaiting
     ? `Waiting for ${peerName} to connect back.`
     : `${peerName} wants to connect with you.`;
 
-  const explanatoryCopy = isConnected
+  const explanatoryCopy = here
     ? "Messages are moving safely, directly between your phones."
+    : paired
+    ? "You are both set up. Anything you send now waits on this device until they are back."
     : isWaiting
     ? `You've added ${peerName}, but they haven't added you yet. To start messaging, ${peerName} needs to scan your ticket or copy your connection link.`
     : `Once you accept their ticket, you will be able to exchange messages directly. No messages can be delivered until you connect back.`;
