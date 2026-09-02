@@ -112,6 +112,11 @@ const send = (text) => evaluate(SENDER, 9700, `(function(){
  * is actually nothing having been sent. That misreading is one edit away at
  * all times, so the run refuses rather than reporting it.
  */
+/** The conversation to open on the sender: the receiver's name in its list. */
+const PEER = process.argv[4] ?? 'Phone B';
+/** The sender's name in the receiver's list, for the check after foregrounding. */
+const SENDER_NAME = process.argv[5] ?? 'Phone A';
+
 async function openConversationOnSender() {
   const opened = await evaluate(SENDER, 9700, `(function(){
     if (document.querySelector('textarea[placeholder="Type a message..."]')) return 'already open';
@@ -123,20 +128,41 @@ async function openConversationOnSender() {
     return 'went to Chats';
   })()`);
   await wait(3000);
+  /*
+   * Two things were wrong here and both reported as "no row".
+   *
+   * It looked for a row called "Phone A" while running *on* Phone A -- the
+   * sender's own name, never in its own conversation list. The peer's name is
+   * an argument now.
+   *
+   * And "the first element under 160px whose text starts with the name" finds
+   * the list *container*, whose centre lands in the gap between two rows, so
+   * the click goes nowhere. The tightest match is the row.
+   */
   await evaluate(SENDER, 9700, `(function(){
-    var rows = [].slice.call(document.querySelectorAll('button,li,div')).filter(function (e) {
-      return e.getBoundingClientRect().height < 160 && (e.innerText || '').trim().length > 0;
-    });
-    var hit = rows.filter(function (e) { return /^Phone A/.test((e.innerText || '').trim()); })[0];
-    if (hit) hit.click();
-    return hit ? 'opened' : 'no row';
+    var best = null;
+    var els = document.querySelectorAll('button,li,div,article');
+    for (var i = 0; i < els.length; i++) {
+      var t = (els[i].innerText || '').trim();
+      if (t.indexOf(${JSON.stringify(PEER)}) !== 0 || t.length > 400) continue;
+      var r = els[i].getBoundingClientRect();
+      if (r.height < 30 || r.width < 200) continue;
+      if (!best || r.height < best.h) best = { el: els[i], h: r.height, r: r };
+    }
+    if (!best) return 'no row';
+    var hit = document.elementFromPoint(best.r.left + best.r.width / 2, best.r.top + best.r.height / 2) || best.el;
+    var opts = { bubbles: true, cancelable: true, composed: true };
+    hit.dispatchEvent(new PointerEvent('pointerdown', opts));
+    hit.dispatchEvent(new PointerEvent('pointerup', opts));
+    hit.dispatchEvent(new MouseEvent('click', opts));
+    return 'opened';
   })()`);
   await wait(4000);
   const ready = await evaluate(SENDER, 9700,
     `!!document.querySelector('textarea[placeholder="Type a message..."]')`);
   if (!ready) {
     throw new Error('sender is not in a conversation — every send would report "no composer" '
-      + 'and the run would report total loss for the wrong reason');
+      + `and the run would report total loss for the wrong reason (looked for a row "${PEER}")`);
   }
   console.log(`sender ready (${opened})`);
 }
@@ -203,13 +229,25 @@ await evaluate(RECEIVER, 9701, `(function(){
   return 'chats';
 })()`);
 await wait(3000);
+// Same two faults as the sender side: the wrong name, and the list container
+// rather than the row. See the note above `openConversationOnSender`.
 await evaluate(RECEIVER, 9701, `(function(){
-  var rows = [].slice.call(document.querySelectorAll('button,li,div')).filter(function (e) {
-    return e.getBoundingClientRect().height < 160;
-  });
-  var hit = rows.filter(function (e) { return /^Phone B/.test((e.innerText || '').trim()); })[0];
-  if (hit) hit.click();
-  return hit ? 'opened' : 'no row';
+  var best = null;
+  var els = document.querySelectorAll('button,li,div,article');
+  for (var i = 0; i < els.length; i++) {
+    var t = (els[i].innerText || '').trim();
+    if (t.indexOf(${JSON.stringify(SENDER_NAME)}) !== 0 || t.length > 400) continue;
+    var r = els[i].getBoundingClientRect();
+    if (r.height < 30 || r.width < 200) continue;
+    if (!best || r.height < best.h) best = { el: els[i], h: r.height, r: r };
+  }
+  if (!best) return 'no row';
+  var hit = document.elementFromPoint(best.r.left + best.r.width / 2, best.r.top + best.r.height / 2) || best.el;
+  var opts = { bubbles: true, cancelable: true, composed: true };
+  hit.dispatchEvent(new PointerEvent('pointerdown', opts));
+  hit.dispatchEvent(new PointerEvent('pointerup', opts));
+  hit.dispatchEvent(new MouseEvent('click', opts));
+  return 'opened';
 })()`);
 await wait(6000);
 

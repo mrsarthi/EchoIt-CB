@@ -44,6 +44,9 @@ export function AppShell() {
     receipts,
     pendingSends,
     markConversationRead,
+    reactionsFor,
+    reactToMessage,
+    unreactToMessage,
   } = useApp();
   const [activeTab, setActiveTab] = useState<AppTab>("chats");
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
@@ -722,6 +725,13 @@ export function AppShell() {
             peerWatermarks={receipts[selectedConversation.peerDid]}
             onDeleteForMe={(ids) => handleDeleteForMe(selectedConversation.peerDid, ids)}
             onForward={(texts) => setForwarding(texts)}
+            reactions={selectedConversation ? reactionsFor(selectedConversation.peerDid) : {}}
+            onReact={(messageId, emoji) => {
+              if (selectedConversation) reactToMessage(selectedConversation.peerDid, messageId, emoji);
+            }}
+            onUnreact={(messageId) => {
+              if (selectedConversation) unreactToMessage(selectedConversation.peerDid, messageId);
+            }}
             forwardsSent={forwardsSent}
             pairingState={selectedContact?.pairingState || "unilateral_waiting"}
             isOnline={selectedConversation.isOnline}
@@ -839,6 +849,13 @@ export function AppShell() {
             peerWatermarks={receipts[selectedConversation.peerDid]}
             onDeleteForMe={(ids) => handleDeleteForMe(selectedConversation.peerDid, ids)}
             onForward={(texts) => setForwarding(texts)}
+            reactions={selectedConversation ? reactionsFor(selectedConversation.peerDid) : {}}
+            onReact={(messageId, emoji) => {
+              if (selectedConversation) reactToMessage(selectedConversation.peerDid, messageId, emoji);
+            }}
+            onUnreact={(messageId) => {
+              if (selectedConversation) unreactToMessage(selectedConversation.peerDid, messageId);
+            }}
             forwardsSent={forwardsSent}
             pairingState={selectedContact?.pairingState || "unilateral_waiting"}
             isOnline={selectedConversation.isOnline}

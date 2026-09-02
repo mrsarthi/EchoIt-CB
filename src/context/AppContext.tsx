@@ -27,6 +27,9 @@ import {
   saveAcceptRequests,
 } from "../services/reach";
 import { publishProfile, type MyProfileDraft, type PeerProfile } from "../services/profiles";
+import { orderReactions, type ReactionGroup } from "../services/reactions";
+import { announceIncoming } from "../services/notify";
+import { displayNameFor, localNameOf } from "../services/profile-format";
 import { putAttachment, type Attachment } from "../services/attachments";
 import { describeBlobError } from "../services/attachment-format";
 import { releaseAttachmentUrls } from "../services/attachments";
@@ -42,6 +45,7 @@ import {
   sendToPeer,
   subscribeToPeer,
   type ConversationMessage,
+  channelIdFor,
 } from "../services/conversation";
 import { markPendingReset, DEFAULT_DATABASE_NAME } from "../services/pending-reset";
 import { reconnectKnownContacts } from "../services/reconnect";
@@ -95,6 +99,12 @@ export interface AppContextValue {
   /** Messages per peer did, oldest first. */
   messages: Record<string, ConversationMessage[]>;
   sendMessage: (peerDid: string, text: string, replyTo?: readonly string[]) => Promise<void>;
+  /** Reactions on each message, by message id, for the open conversation's peer. */
+  reactionsFor: (peerDid: string) => Record<string, readonly ReactionGroup[]>;
+  /** Set our reaction to a message, replacing any we already had. */
+  reactToMessage: (peerDid: string, messageId: string, emoji: string) => void;
+  /** Withdraw ours. Harmless when there is none. */
+  unreactToMessage: (peerDid: string, messageId: string) => void;
   /** Store a file and send a message carrying its handle. */
   sendAttachment: (peerDid: string, file: File, caption?: string) => Promise<void>;
   /** Reveal an older slice of a conversation. Resolves when it is in. */
@@ -178,6 +188,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [displayName, setDisplayNameState] = useState<string>(() => loadDisplayName());
   const [acceptRequests, setAcceptRequestsState] = useState<boolean>(() => loadAcceptRequests());
   const [myProfile, setMyProfile] = useState<PeerProfile | undefined>(undefined);
+  /**
+   * Reactions, by peer then by message.
+   *
+   * Held here rather than read from the SDK at render time: `getReactions` is a
+   * lookup per message, and a conversation redraws far more often than a
+   * reaction changes.
+   */
+  const [reactions, setReactions] = useState<Record<string, Record<string, readonly ReactionGroup[]>>>({});
   const [peerProfiles, setPeerProfiles] = useState<Record<string, PeerProfile>>({});
   /** What *they* have confirmed about *our* messages, by their did. */
   const [receipts, setReceipts] = useState<Record<string, Watermarks>>({});
@@ -331,6 +349,49 @@ export function AppProvider({ children }: { children: ReactNode }) {
     });
     return unsubscribe;
   }, [client, did]);
+
+  /*
+   * Reactions, for every contact.
+   *
+   * Same shape as profiles above, and for the same reason: a reaction can
+   * already be in the CRDT before this mounts -- it arrives with a sync, not
+   * with a live event -- so the held state is read once and the subscription
+   * takes it from there. `emitSyncedReactions` is what replays what a sync
+   * brought in; without it a conversation opened after the fact shows nothing
+   * until somebody taps a new one.
+   */
+  useEffect(() => {
+    if (!client || !did) return;
+
+    const unsubscribes: Array<() => void> = [];
+
+    const refresh = (peerDid: string, channelId: string, messageId: string) => {
+      const summaries = client.client.chat.getReactions(channelId, messageId);
+      setReactions((prev) => {
+        const forPeer = { ...(prev[peerDid] ?? {}) };
+        const groups = orderReactions(
+          summaries.map((s) => ({ emoji: s.emoji, count: s.count, mine: s.mine })),
+        );
+        // An empty row is absence, not an empty array to render around.
+        if (groups.length === 0) delete forPeer[messageId];
+        else forPeer[messageId] = groups;
+        return { ...prev, [peerDid]: forPeer };
+      });
+    };
+
+    for (const contact of loadContacts(did)) {
+      const channelId = channelIdFor(did, contact.peerDid);
+      unsubscribes.push(
+        client.client.chat.onReaction(channelId, (event) => {
+          refresh(contact.peerDid, channelId, event.messageId);
+        }),
+      );
+      // Replay whatever the CRDT already holds for this channel.
+      client.client.chat.emitSyncedReactions(channelId);
+    }
+
+    return () => { for (const off of unsubscribes) off(); };
+  }, [client, did, contacts.length]);
 
   // Listen to peer connection events from DicsussionClient
   useEffect(() => {
@@ -628,6 +689,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
             // de-duplicates by id for its own emit, but a reconnect can still
             // deliver something we already hold, so the UI checks too.
             if (existing.some((m) => m.id === message.id)) return prev;
+            /*
+             * Tell the phone, but only what D2 allows: the sender's name,
+             * never the text. Inside the de-duplication guard deliberately --
+             * a replayed message on reconnect must not ring twice for
+             * something already delivered.
+             *
+             * `announceIncoming` is itself a no-op while EchoIt is on screen;
+             * the unread badge covers that case and a banner over the
+             * conversation you are reading is noise.
+             */
+            announceIncoming(displayNameFor(
+              localNameOf(contact.name),
+              // Read from the SDK rather than from React state: this closure
+              // outlives the render that made it, and a captured profile map
+              // would be whatever was current when the subscription was set
+              // up -- which for a new contact is nothing.
+              client.client.identity.getPeerProfile(contact.peerDid),
+              contact.peerDid,
+              contact.claimedName,
+            ));
             return { ...prev, [contact.peerDid]: [...existing, message] };
           });
         }),
@@ -1121,6 +1202,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return reached;
   };
 
+  const reactionsFor = useCallback(
+    (peerDid: string): Record<string, readonly ReactionGroup[]> => reactions[peerDid] ?? {},
+    [reactions],
+  );
+
+  /**
+   * React, or change what we reacted.
+   *
+   * Not awaited and not reported: the SDK writes into the CRDT, which is the
+   * authority, and the chip redraws from `onReaction` either way. A spinner on
+   * a thumbs-up would be worse than the thing it reports.
+   */
+  const reactToMessage = useCallback((peerDid: string, messageId: string, emoji: string) => {
+    if (!client || !did) return;
+    client.client.chat.react(channelIdFor(did, peerDid), messageId, emoji);
+  }, [client, did]);
+
+  const unreactToMessage = useCallback((peerDid: string, messageId: string) => {
+    if (!client || !did) return;
+    client.client.chat.unreact(channelIdFor(did, peerDid), messageId);
+  }, [client, did]);
+
   // Pair with a pasted ticket and dial the peer
   const pairAndConnect = async (ticketString: string, name: string) => {
     if (!client || !did) throw new Error("Client not ready");
@@ -1448,6 +1551,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         pairAndConnect,
         messages,
         sendMessage,
+        reactionsFor,
+        reactToMessage,
+        unreactToMessage,
         sendAttachment,
         loadOlderMessages,
         hasOlderMessages,

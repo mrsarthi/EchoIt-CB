@@ -33,11 +33,13 @@
     "android:sign": "node scripts/apply-android-signing.mjs",
     "android:activity": "node scripts/apply-android-activity.mjs",
     "android:icon": "node scripts/apply-android-icon.mjs",
-    "android:prepare": "npm run android:sign && npm run android:activity && npm run android:icon",
+    "android:prepare": "npm run android:sign && npm run android:activity && npm run android:icon && npm run android:foreground",
     "release:manifest": "node scripts/make-latest-json.mjs",
     "check:icon": "node scripts/check-icon.mjs",
     "check:claims": "node scripts/check-claims.mjs",
-    "test:timestamps-device": "node harness/cdp/drive-chat-timestamps.mjs"
+    "test:timestamps-device": "node harness/cdp/drive-chat-timestamps.mjs",
+    "test:links": "tsx harness/link-segments.mts",
+    "android:foreground": "node scripts/apply-android-foreground.mjs"
   },
   "dependencies": {
     "@dicsussion/core": "^0.8.1",

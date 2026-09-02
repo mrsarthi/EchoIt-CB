@@ -18,7 +18,149 @@
 | **1. Core Application (v1)** | Chats, local storage, recovery | **In progress** | 0 | Onboarding + navigation shell done & audited. **Next: pairing (2.3)** |
 | **Pre-UI hardening** | CSP locked down before the UI grows | ✅ **PASSED** | 2 | Strict policy, 0 violations, message flow intact — see below |
 
+## 2026-08-31 (cont.) — reactions UI, link highlighting, and relay Settings control
+
+Three items from the "does not need phones" list, all built and verified.
+
+### Reactions UI (D3) — the 0.8.1 API wired end to end
+
+**Service** (`src/services/reactions.ts`). Six quick-pick emojis, ordering
+(most-used first, ties by emoji so the row never reshuffles), tap rules
+(`nextAction`: mine → withdraw, theirs → adopt), and screen-reader labels.
+
+**Context** (`AppContext`). Three new exports: `reactionsFor`, `reactToMessage`,
+`unreactToMessage`. Reactions are held in state rather than read from the SDK at
+render time — `getReactions` is per-message, and a conversation redraws far more
+often than a reaction changes. An `onReaction` subscription per contact, plus
+`emitSyncedReactions` on mount to replay what a sync brought in.
+
+**ChatView**. Two surfaces:
+
+1. **The quick-pick row**, shown only when exactly one message is selected (long
+   press already means "select" and giving it a second meaning would be
+   ambiguous; multiple selections have no sensible answer).
+2. **Chips under each bubble**, outside it. Tapping your own withdraws; tapping
+   anyone else's sets yours to that. A bare "1" is not shown — one reaction
+   needs no count.
+
+### Link highlighting with confirmation (D4)
+
+**Service** (`src/services/links.ts`). `segmentText` splits message text into
+plain and linked runs. Conservative: `http(s)://` or `www.` is required — a bare
+`example.com` is not matched, because false positives invite a tap somewhere
+unintended. Trailing sentence punctuation is trimmed. `describeOpen` generates
+the confirmation dialog, naming the host and what following costs, never claiming
+safety — §4.2's rule.
+
+**ChatView**. Links render underlined and tappable. Clicking shows `describeOpen`
+in `window.confirm`; on accept, `openUrl` from `@tauri-apps/plugin-opener` opens
+the system browser — never the webview, which would sit inside the app's own
+origin and CSP.
+
+**No preview fetched.** A preview would ask a third-party web server for
+metadata, which is neither the update check nor "straight between your device
+and theirs", and would need the CSP widened. Settled D4.
+
+### Relay Settings control (D9)
+
+`src/services/relay.ts` already existed. The missing piece was the Settings UI
+and its wiring. Added under the CONNECTING section, below the §4.4 disclosure.
+
+- An `Input` for the URL, pre-filled from `loadRelayUrl()`.
+- Save validates with `describeRelayProblem` (only https://, has a hostname).
+- "Use the default" resets to ours.
+- Copy says "next time you open the app" — the relay map is fixed at
+  `iroh_start` and nothing here can move a running endpoint.
+
+### In-place desktop update
+
+Already built (`installInPlace` lazily imports `@tauri-apps/plugin-updater`; the
+"Get version X" button calls it, falling back to the releases page on Android or
+when the plugin is absent). Has never been tested end to end — that requires
+having 0.4.0 installed and a newer version published, which is a release-time
+verification, not code work.
+
+### Verified
+
+| Check | Result |
+|---|---|
+| `typecheck` | clean |
+| `check:claims` | PASS |
+| `build` | clean |
+| `test:links` | PASS (18 checks) |
+| `test:two-peer` | 3/3 |
+
+### Still needs phones
+
+Everything from the earlier entry: verifying the relay switch on hardware,
+foreground service + notifications, first-run profile screen, Finding 17, the
+no-reconnect-after-freeze bug.
+
+---
+
+## 2026-08-31 (evening) — reactions, links, the relay control, and the foreground service half-works
+
+### The foreground service unfreezes the process. It does not fix delivery.
+
+**The number that changed.** Backgrounded, the receiver used to accumulate
+**zero** CPU ticks at 90 s and 180 s — measured three times, and the reason a
+native spool was ruled impossible. With `EchoItService` running it accumulates
+**279–326 ticks** over the same window, threads steady at 76. `isForeground=true`,
+`foregroundId=1`, a silent ongoing notification on channel `echoit_service`.
+The cached-app freezer is no longer taking the process.
+
+**The number that did not change: 0 of 4 delivered.** Three runs. And not merely
+late — checked again at +30 s and +60 s after foregrounding, and by opening the
+conversation directly: only messages from earlier sessions are in it.
+
+**What that rules out.** The sender is not the problem: `pending-sends` is empty
+after a run, so the reachability gate did not queue them — the bytes left the
+device. And it is not the freezer, per the ticks above.
+
+**What is left.** The protocol runs in the webview, and the connection does not
+survive the trip. This is the already-recorded *"the app does not reconnect
+after a freeze"* bug, and it is now the whole blocker rather than a side note.
+
+A webview keep-alive was added on the theory that `TauriActivity` pauses the
+WebView in `onPause` and suspends its JavaScript — `onResume()` plus
+`resumeTimers()` immediately after `super.onPause()`. **It did not change the
+result**, so either the pause was not the cause or the override is not
+effective. Kept, because it is correct in itself and only defensible *with* a
+foreground service and its visible notification, but it is not the fix.
+
+Two faults in `measure-background-real.mjs` were repaired first, and both had
+been silently poisoning earlier runs: it looked for a row named "Phone A" while
+running **on** Phone A, and it matched the list *container* rather than a row,
+so the click went nowhere. The peer names are arguments now.
+
+### Shipped alongside
+
+**Reactions** on the 0.8.1 API — `react`/`unreact`/`getReactions`/`onReaction`,
+with `emitSyncedReactions` replayed per channel at mount, because a reaction
+arrives with a sync rather than a live event. Chips sit under the bubble on the
+message's own side; tapping yours withdraws it. `nextAction` owns that rule so
+it cannot be implemented twice, differently. The existing `ReactionPicker`
+anchors to the bubble rather than the composer.
+
+**Links** — highlighted, never fetched (D4). `segmentText` is deliberately
+conservative: a scheme or `www.` is required, so "see figure 1.a" and
+"report.pdf" stay plain. Trailing punctuation belongs to the sentence.
+Confirming shows the **host**, says what following it costs, and claims nothing
+about whether the site is safe. 18 checks in `npm run test:links`.
+
+**The relay control** (D9) — helper URL in Settings, validated shallowly here and
+properly in Rust, restart-scoped because the relay map is fixed when the
+endpoint binds.
+
+**Notifications** (D2) — `announceIncoming` now has a caller, inside the
+de-duplication guard so a replayed message on reconnect cannot ring twice. It
+takes a display name and never a body, resolved from the SDK rather than from
+React state, which would be stale inside that closure.
+
+---
+
 ## 2026-08-31 — SDK 0.8.1, ten decisions settled, and the briefing rewritten
+
 
 No phones available today. Everything below was done without them, and what
 needs them is listed at the end rather than guessed at.

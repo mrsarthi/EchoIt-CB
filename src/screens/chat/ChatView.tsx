@@ -13,6 +13,11 @@ import { PeerProfileSheet } from "../../components/profile/PeerProfileSheet";
 import type { PeerProfile } from "../../services/profile-format";
 import { ReadStatus } from "../../components/chat/ReadStatus";
 import { statusBoundaries, statusFor, type Watermarks } from "../../services/receipts";
+import { nextAction, describeReaction, type ReactionGroup } from "../../services/reactions";
+import { ReactionPicker } from "../../components/chat/ReactionPicker";
+import { segmentText, describeOpen } from "../../services/links";
+import { pushBackHandler } from "../../services/back-stack";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { countIncomingSince } from "../../services/unread";
 import { SelectionBar } from "../../components/chat/SelectionBar";
 import { NewMessagePill } from "../../components/chat/NewMessagePill";
@@ -92,6 +97,12 @@ export interface ChatViewProps {
   onDeleteForMe?: (ids: readonly string[]) => void;
   /** Hand these messages to the forward picker. */
   onForward?: (texts: readonly string[]) => void;
+  /** Reactions on each message, by message id. */
+  reactions?: Record<string, readonly ReactionGroup[]>;
+  /** Set our reaction, replacing any we already had. */
+  onReact?: (messageId: string, emoji: string) => void;
+  /** Withdraw ours. */
+  onUnreact?: (messageId: string) => void;
   /**
    * Bumped once a forward has actually been sent.
    *
@@ -157,6 +168,9 @@ export function ChatView({
   peerWatermarks,
   onDeleteForMe,
   onForward,
+  reactions = {},
+  onReact,
+  onUnreact,
   forwardsSent = 0,
 }: ChatViewProps) {
   /**
@@ -191,6 +205,8 @@ export function ChatView({
    */
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
   const selecting = selected.size > 0;
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
 
   const toggleSelected = (id: string) => {
     setSelected((previous) => {
@@ -202,6 +218,22 @@ export function ChatView({
   };
 
   const clearSelection = () => setSelected(new Set());
+
+  /*
+   * Hardware back while picking messages used to leave the conversation.
+   *
+   * AppShell is underneath on the back stack, and it treats the press as
+   * "close this chat". Selection is a mode inside the chat, so it has to
+   * claim the press first — the same stack MediaViewer uses, for the same
+   * reason. A ref, so toggling a message does not re-register the handler.
+   */
+  useEffect(() => {
+    return pushBackHandler(() => {
+      if (selectedRef.current.size === 0) return false;
+      clearSelection();
+      return true;
+    });
+  }, []);
 
   /** The picked messages, in the order they appear rather than picked order. */
   const selectedTexts = () =>
@@ -634,9 +666,10 @@ export function ChatView({
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
-    } else if (e.key === "Escape" && onBack) {
+    } else if (e.key === "Escape") {
       e.preventDefault();
-      onBack();
+      if (selecting) clearSelection();
+      else onBack?.();
     }
   };
 
@@ -668,6 +701,30 @@ export function ChatView({
         supplemented: the screen visibly changes, so the mode is obvious and
         hard to leave switched on by accident.
       */}
+      {/*
+        Reactions, offered only when exactly one message is selected.
+
+        Long press already means "select", and giving it a second meaning would
+        make the gesture ambiguous. Reacting to several at once has no sensible
+        answer -- a reaction belongs to one message -- so the row is simply not
+        offered then, rather than offered and refusing.
+
+        `ReactionPicker` parks itself against the bubble rather than sitting by
+        the composer, which is what keeps the two visibly connected when the
+        thread is long.
+      */}
+      {selected.size === 1 && onReact && (
+        <ReactionPicker
+          messageId={[...selected][0]!}
+          stream={streamRef.current}
+          onPick={(emoji) => {
+            const id = [...selected][0];
+            if (id) onReact(id, emoji);
+            clearSelection();
+          }}
+        />
+      )}
+
       {selecting && (
         <SelectionBar
           count={selected.size}
@@ -1101,7 +1158,47 @@ ${DELETE_WARNING}`)) return;
                     </div>
                   );
                 })}
-                {msg.text}
+                {/*
+                  Links are made readable and tappable, and nothing is fetched
+                  -- D4, 2026-08-31. A preview would mean asking a third-party
+                  server for a page, which is neither the update check nor
+                  "straight between your device and theirs".
+
+                  Opening asks first. A message is written by somebody else and
+                  a link is the one part of it that can act on you, so the
+                  dialog names the host -- link text can say anything.
+                */}
+                {segmentText(msg.text).map((seg, i) => (
+                  seg.kind === "link" ? (
+                    <a
+                      key={i}
+                      href={seg.href}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (!seg.href) return;
+                        if (!window.confirm(describeOpen(seg.href))) return;
+                        // Rust opens it in the system browser. Never in the
+                        // webview: a page loaded in here would sit inside the
+                        // app's own origin and CSP.
+                        void openUrl(seg.href).catch(() => {
+                          window.alert("Could not open that link.");
+                        });
+                      }}
+                      style={{
+                        color: msg.isOutgoing ? "var(--color-text)" : "var(--color-primary)",
+                        textDecoration: "underline",
+                        textUnderlineOffset: 2,
+                        overflowWrap: "anywhere",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {seg.value}
+                    </a>
+                  ) : (
+                    <span key={i}>{seg.value}</span>
+                  )
+                ))}
 
                 {/*
                   The time, inside the bubble at its bottom right.
@@ -1137,6 +1234,64 @@ ${DELETE_WARNING}`)) return;
                   {msg.timestamp}
                 </span>
               </div>
+
+              {/*
+                Reaction chips, under the bubble on the message's own side.
+
+                Outside the bubble rather than in it: a reaction is something
+                other people did to the message, not part of what was said, and
+                putting it inside would make it look like content the sender
+                wrote. Same reasoning as the delivery status below.
+
+                Tapping your own withdraws it; tapping anyone else's sets yours
+                to that -- `nextAction` owns that rule so it cannot be
+                implemented twice, differently.
+              */}
+              {(reactions[msg.id]?.length ?? 0) > 0 && (
+                <div
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: 4,
+                    marginTop: 3,
+                    padding: "0 2px",
+                    justifyContent: msg.isOutgoing ? "flex-end" : "flex-start",
+                  }}
+                >
+                  {reactions[msg.id]!.map((group) => (
+                    <button
+                      key={group.emoji}
+                      aria-label={describeReaction(group, peerName)}
+                      onClick={() => {
+                        const action = nextAction(group);
+                        if (action.kind === "unreact") onUnreact?.(msg.id);
+                        else onReact?.(msg.id, action.emoji);
+                      }}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 3,
+                        padding: "1px 7px",
+                        borderRadius: 999,
+                        fontSize: "0.8em",
+                        lineHeight: 1.6,
+                        cursor: "pointer",
+                        backgroundColor: group.mine
+                          ? "var(--color-primary-subtle)"
+                          : "var(--color-surface)",
+                        border: `1px solid ${group.mine ? "var(--color-primary)" : "var(--color-border)"}`,
+                        color: "var(--color-text)",
+                      }}
+                    >
+                      <span>{group.emoji}</span>
+                      {/* One reaction needs no count; a bare "1" is noise. */}
+                      {group.count > 1 && (
+                        <span style={{ color: "var(--color-text-muted)" }}>{group.count}</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
 
               {/*
                 The delivery status, below the bubble where it has always

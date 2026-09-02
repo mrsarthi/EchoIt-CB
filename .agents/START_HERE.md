@@ -263,8 +263,7 @@ the likelier drift.
 ### Not built
 
 Groups. MediaStore (a saved photo does not appear in the Android Gallery).
-Reactions UI (the SDK gained the API in 0.8.1; the app has not used it yet).
-Link highlighting. The foreground service.
+The foreground service.
 
 ### Two things that will confuse you otherwise
 
@@ -546,11 +545,17 @@ destroys their message history.
 - Rendering the first-run profile screen (D10 permits a wipe).
 - Finding 17, and the no-reconnect-after-freeze bug.
 
-**Does not need phones:**
-- Reactions UI on the 0.8.1 API (D3).
-- Link highlighting with a confirm prompt (D4).
-- Custom relay URL in Settings (D9) — service written, UI pending.
-- In-place desktop update, now that 0.4.0 has a predecessor.
+**Does not need phones (all done 2026-08-31):**
+- ~~Reactions UI on the 0.8.1 API (D3).~~ Built — quick-pick row on single
+  selection, chips under each bubble, wired through AppContext.
+- ~~Link highlighting with a confirm prompt (D4).~~ Built — `segmentText`
+  detection, underlined and tappable, `describeOpen` confirmation, system
+  browser via plugin-opener.
+- ~~Custom relay URL in Settings (D9).~~ Built — Input under CONNECTING, save/
+  validate/reset, "next time you open the app".
+- In-place desktop update — code exists (`installInPlace`); never tested end to
+  end. Requires 0.4.0 installed + a newer version published = release-time
+  verification.
 
 **Only the owner can do:**
 - Back up the four signing files off-machine.

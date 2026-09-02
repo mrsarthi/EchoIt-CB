@@ -5,6 +5,13 @@ import { Button } from "../../components/ui/Button";
 import { Badge } from "../../components/ui/Badge";
 import { Modal } from "../../components/ui/Modal";
 import { SettingsIcon, ShieldIcon, SunIcon, MoonIcon, LockIcon } from "../../components/ui/Icons";
+import { Input } from "../../components/ui/Input";
+import {
+  DEFAULT_RELAY,
+  loadRelayUrl,
+  saveRelayUrl,
+  describeRelayProblem,
+} from "../../services/relay";
 import {
   APP_VERSION,
   checkForUpdate,
@@ -29,6 +36,9 @@ export function SettingsTab() {
   const [updatesOn, setUpdatesOn] = useState(true);
   const [checking, setChecking] = useState(false);
   const [update, setUpdate] = useState<UpdateStatus | null>(null);
+  const [relayInput, setRelayInput] = useState(() => loadRelayUrl() ?? "");
+  const [relayNote, setRelayNote] = useState("");
+  const [relayError, setRelayError] = useState(false);
 
   // Read once on mount rather than during render: `updateChecksEnabled` touches
   // localStorage, which throws in some webview configurations, and a render
@@ -302,6 +312,63 @@ export function SettingsTab() {
               directly, the helper passes them along sealed — it can&apos;t read
               them, and it never stores one.
             </p>
+
+            {/*
+              D9, 2026-08-31. Since the app now ships with only our relay
+              rather than a third party's, "trust us instead" is the whole
+              claim -- and a default nobody can change is a claim, while a
+              default anyone can replace is a choice. This is what makes the
+              hosted default defensible.
+
+              It cannot apply live: the relay map is fixed when the endpoint
+              binds inside `iroh_start`, so the copy says restart rather than
+              appearing to take effect.
+            */}
+            <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
+              <Input
+                label="CONNECTION HELPER (OPTIONAL)"
+                placeholder={DEFAULT_RELAY}
+                value={relayInput}
+                onChange={(e) => { setRelayInput(e.target.value); setRelayNote(""); }}
+                hint="Leave blank to use the one EchoIt provides. Changing this takes effect next time you open the app."
+              />
+              {relayNote && (
+                <span style={{ fontSize: "var(--font-size-label)", color: relayError ? "var(--color-warning)" : "var(--color-text-muted)" }}>
+                  {relayNote}
+                </span>
+              )}
+              <div style={{ display: "flex", gap: "var(--space-sm)", flexWrap: "wrap" }}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    const problem = describeRelayProblem(relayInput);
+                    if (problem) { setRelayError(true); setRelayNote(problem); return; }
+                    saveRelayUrl(relayInput);
+                    setRelayError(false);
+                    setRelayNote(relayInput.trim()
+                      ? "Saved. EchoIt will use it next time you open the app."
+                      : "Saved. EchoIt will use its own helper next time you open the app.");
+                  }}
+                >
+                  Save helper
+                </Button>
+                {relayInput.trim() && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setRelayInput("");
+                      saveRelayUrl(undefined);
+                      setRelayError(false);
+                      setRelayNote("Back to the one EchoIt provides, next time you open the app.");
+                    }}
+                  >
+                    Use the default
+                  </Button>
+                )}
+              </div>
+            </div>
           </Card>
         </section>
 
