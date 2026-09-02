@@ -1,7 +1,8 @@
 # START HERE
 
 *Originally written 2026-08-21 when the project moved into this repository from
-a scratch folder. **Rewritten end to end on 2026-08-31** to carry everything
+a scratch folder. Rewritten end to end on 2026-08-31, **and brought current on
+2026-09-03** to carry everything
 known about EchoIt — every settled decision, every trap, every measurement and
 the reasoning behind each — so that someone arriving cold finishes this file
 knowing what the people who built it know.*
@@ -28,6 +29,7 @@ one.*
 12. [Releasing](#12-releasing)
 13. [Outstanding for 1.0.0](#13-outstanding-for-100)
 14. [Where everything lives](#14-where-everything-lives)
+15. [After 1.0.0 — delivery while closed](#15-after-100--delivery-while-closed)
 
 ---
 
@@ -216,7 +218,8 @@ the likelier drift.
 
 ## 5. Where things actually stand
 
-*Accurate as of 2026-08-31. Released version: **0.4.0**. SDK **0.8.1**.*
+*Accurate as of 2026-09-03. Released version: **0.4.0** — everything since is
+committed but unreleased. SDK **0.8.1**.*
 
 ### Proven on real hardware
 
@@ -254,16 +257,40 @@ the likelier drift.
 - **0.4.0 published** for Windows and Android; artifacts downloaded back and
   SHA-256 compared rather than trusting the upload.
 
-### Built but never rendered on a device
+### Background delivery — what is true, measured 2026-09-03
 
-- **The first-run profile screen** (`src/screens/ProfileSetupScreen.tsx`). The
-  gate `needsProfileSetup` is unit-tested and conservative, but showing it needs
-  an account that has never been named.
+| State | Delivered live | Notification | Lost |
+|---|---|---|---|
+| Both apps open | yes | n/a | no |
+| **Backgrounded** (open, not on screen) | **yes** — 4/4 at 10/30/90/180 s | **yes** | no |
+| **Closed** (swiped from recents) | no | no | **no — arrives on reopening** |
+
+The foreground service is what makes the middle row possible: without it the
+process accumulated **zero** CPU ticks by 90 s; with it, 279–476. The bottom row
+is architectural, not a bug — see §15.
+
+**Screen-off over minutes remains unmeasured.** The one run that tried was
+voided by Finding 21.
+
+### Built, committed, and never seen on a device
+
+All of this compiles, typechecks and is committed. **By this project's own rule
+none of it is done.** Walking through it is the first job when two phones are
+next available.
+
+- **Reactions** — chips, picker, the 0.8.1 API
+- **Link highlighting** and the confirm-before-opening dialog
+- **The connection-helper URL control** in Settings (D9)
+- **The Finding 17 fix** — a contact row that separates paired from present
+- **Our-relay-only (D8)** — *the risky one.* It changes the transport, the only
+  layer with real hardware proof behind it, and it has never run on two phones.
+  **Verify this before anything else.**
+- **The first-run profile screen** — needs an account that has never been named
 
 ### Not built
 
 Groups. MediaStore (a saved photo does not appear in the Android Gallery).
-The foreground service.
+Delivery while the app is closed (§15).
 
 ### Two things that will confuse you otherwise
 
@@ -366,13 +393,23 @@ Each was a real bug once. Removing any of them silently reintroduces it.
 
 ## 8. Findings — open
 
-### Finding 17 — a unilateral contact reports "Connected directly"
-A contact who added you but has not been added back still shows §5 **State 3**
-copy, which is reserved for bilateral pairing. Less dangerous since 0.4.0's
-reachability gate queues instead of pretending to send, but the words are still
-wrong. *Note: an earlier START_HERE claimed this was fixed 2026-08-22. That
-contradicts `PROGRESS.md`, which still lists it open. Treat it as open and
-re-test before claiming otherwise.*
+### Finding 21 — a message database was emptied 🟡
+Filed as a release blocker on 2026-09-03 and **downgraded within the hour.**
+
+`message_stream` went 76 → 0, `crdt_documents` 5 → 0, `blobs` 5 → 0 on a test
+phone after the OS killed it. The identity survived, because it lives in
+`localStorage` and the keychain.
+
+The downgrade: a **third phone, untouched for three days, kept everything.**
+That is the case the blocker claimed was at risk. What actually happened was on
+the one device that had taken ~8 `adb install -r` cycles, many force-stops,
+repeated `location.reload()` and finally a kill mid-write, all in one day. The
+observation stands; the inference — "a routine OS kill erases history" — did
+not.
+
+**Unsettled.** To close it: reinstall-and-kill in a loop against known contents
+and count the wipes. Until then, *"seen once, on a test device, under conditions
+no user reproduces"* — not a blocker, not dismissed.
 
 ### Finding 18 — infrastructure half
 Copy is fixed. **Address publishing still goes through Number 0's
@@ -387,10 +424,16 @@ only a restart recovered. Recorded, never fixed. This probably matters more than
 it looks, because the foreground service changes the conditions under which it
 happens.
 
-### Background delivery — root-caused, not fixed
-Measured across three runs: **zero CPU ticks at 90 s and 180 s**. The whole
-process is frozen, Rust included. That killed the "spool it natively" option and
-made the foreground service a precondition rather than an option.
+### Delivery while the app is closed — architectural, see §15
+Not a bug to fix in place. The protocol runs in the webview, the webview belongs
+to the activity, and both die when the task is removed.
+
+**Note the reversal:** an earlier entry here read *"the process is frozen, Rust
+included — this killed the native-spool option."* That measurement predates the
+foreground service. With it, Rust stays alive (279–476 ticks). **The native
+spool is back on the table**, and §15 describes it. A settled conclusion built
+on a measurement that no longer holds is worth re-checking whenever the
+conditions change.
 
 ### `test:knock` is flaky
 Two fresh Node peers over the real network with a **5-second** ceiling for the
@@ -432,6 +475,32 @@ thing it was written for.
 
 ---
 
+### Finding 17 — closed 2026-09-03
+*"A unilateral contact reports Connected directly"*, open since 2026-08-21.
+
+The row took its status from `contact.pairingState`, a flag written once when
+pairing completes and never revisited. It answered *"did we add each other"*
+while presenting as an answer to *"are we connected"*. A peer who turned their
+phone off, reinstalled, or **re-registered with a new identity** left a row
+claiming a live connection forever.
+
+`TwoStepsChecklist` takes an optional `lastHeardAt` and separates **paired**
+from **here**. Callers that only know about pairing omit it and keep the old
+wording.
+
+### POST_NOTIFICATIONS was never requested
+Android 13 made it a runtime permission and nothing asked. Measured:
+`granted=true` on one phone, **`granted=false` on the other** — and the denied
+one was the phone that reported notifications not working. Nothing fails loudly;
+the notification is posted and the system drops it.
+
+It also explains a second, apparently unrelated report — *"closing the app
+closes the service"*. With the permission denied the **foreground notification
+is not shown either**, so the only visible evidence the service is running
+disappears, and a running service is indistinguishable from a stopped one.
+
+`MainActivity` now asks on resume, once, without insisting.
+
 ## 10. Lessons this project paid for
 
 **A stub may return a value only when that value is one the caller is designed
@@ -462,6 +531,18 @@ viewport overflow or actual clipping.
 reported "0/4 delivered" when the sender was not in a conversation and when the
 receiver was reading the wrong screen. The drivers now check they can act before
 they measure.
+
+**A name is not an identifier.** Phone A re-registered, so the receiver held
+*two* contacts both beginning "Phone A" — one dead, one live. Every device
+driver opens a conversation by matching the peer's *name*, so hours of runs read
+the dead one and reported 0/4 for a peer that no longer existed. The refusal
+guards did not catch it: the run genuinely was in *a* conversation with *a*
+composer, just the wrong one. **Assert the peer DID.**
+
+**Check whether a settled conclusion still rests on a live measurement.**
+"Rust is frozen too, so a native spool is impossible" was true and became false
+the moment the foreground service existed — and would have stayed in the notes
+as settled if a question had not been asked about it.
 
 **Correlation is not causation, even at 3/3.** `test:knock` failed three runs
 with local changes and passed three with them stashed. The file imports only the
@@ -537,32 +618,46 @@ destroys their message history.
 
 ## 13. Outstanding for 1.0.0
 
-**Needs the two Android phones:**
-- Foreground service + notifications (D1, D2). iQOO/Realme skins kill foreground
-  services without a manual battery exemption; Android 13+ needs
-  `POST_NOTIFICATIONS`; 14+ needs a declared service type.
-- Verifying the relay switch (D8) — dropping Number 0's is untested.
-- Rendering the first-run profile screen (D10 permits a wipe).
-- Finding 17, and the no-reconnect-after-freeze bug.
+*Reviewed 2026-09-03. Everything below 0.4.0 is committed and unreleased.*
 
-**Does not need phones (all done 2026-08-31):**
-- ~~Reactions UI on the 0.8.1 API (D3).~~ Built — quick-pick row on single
-  selection, chips under each bubble, wired through AppContext.
-- ~~Link highlighting with a confirm prompt (D4).~~ Built — `segmentText`
-  detection, underlined and tappable, `describeOpen` confirmation, system
-  browser via plugin-opener.
-- ~~Custom relay URL in Settings (D9).~~ Built — Input under CONNECTING, save/
-  validate/reset, "next time you open the app".
-- In-place desktop update — code exists (`installInPlace`); never tested end to
-  end. Requires 0.4.0 installed + a newer version published = release-time
-  verification.
+### One device session, in this order
 
-**Only the owner can do:**
-- Back up the four signing files off-machine.
-- Decide whether the AWS relay's logging should be configured so the stronger
-  "keeps no record" sentence becomes true.
-- Stand up a pkarr endpoint, or accept that discovery stays with Number 0 and
-  keep saying so.
+1. **Verify D8 — our relay only.** First, because it changes the transport and
+   could invalidate everything after it. Two phones, ideally mobile data.
+2. **Walk the unverified UI**: reactions, link highlighting and its dialog, the
+   connection-helper field, and a contact row correctly reading "not connected"
+   for a dead peer.
+3. **Screen-off delivery over minutes.** The one attempt was voided by Finding
+   21. Use `KEYCODE_SLEEP`, never `KEYCODE_POWER` — power *toggles*, and a run
+   that starts with the screen off turns it on and measures the opposite of what
+   it claims.
+4. **Settle Finding 21**: reinstall-and-kill in a loop against known contents,
+   counting wipes.
+5. **Render the first-run profile screen.** Needs a wipe; already approved.
+
+### No phones required
+
+- **In-place desktop update.** `installInPlace` exists and has never run end to
+  end. Now testable — 0.4.0 has a predecessor.
+- Version bump and release.
+
+### Only the owner can do
+
+- **Back up the four signing files off that machine.** Highest consequence on
+  this list, five minutes of work. Lose them and no existing install can ever be
+  updated, and testers must uninstall — which destroys their history.
+- Decide whether the relay's logging is configured so the stronger "keeps no
+  record" sentence becomes true.
+- Stand up a pkarr endpoint, or accept discovery staying with Number 0 and keep
+  saying so.
+
+### Explicitly **not** blocking 1.0.0
+
+- **Delivery while the app is closed.** §15. The honest promise is *"messages
+  arrive whenever EchoIt is open, including backgrounded with the screen off; if
+  you swipe it away they arrive when you open it again."* True, measured, and
+  ordinary for a messenger without push.
+- **Groups, iOS, MediaStore.** Out of scope by decision, not oversight.
 
 ---
 
@@ -587,3 +682,71 @@ destroys their message history.
 *Deleted 2026-08-31: `ECHOIT_MIGRATION_PROMPT.md`, `SDK-REQUESTS.md`, and the
 three `UI_AGENT_PROMPT*.md` files — all spent, and their conclusions are folded
 into this document.*
+
+
+## 15. After 1.0.0 — delivery while closed
+
+*Design settled in discussion 2026-09-03. Not built.*
+
+### The problem, exactly
+
+The protocol — CRDT, sealing, message handling — is TypeScript in the webview.
+The webview belongs to the activity and dies with it. A foreground service keeps
+a **process** alive; it does not keep a **client** alive. Measured: after a
+recents-swipe the service can still be running while `/proc/net/unix` shows the
+webview devtools socket gone.
+
+### What is smaller than it looks
+
+`iroh_bridge.rs` **already reads every inbound byte** and forwards it with
+`app.emit("iroh://inbound", ...)`. Rust is not a dumb pipe that needs teaching
+the protocol — it already holds the connection and reads the frames, then
+forgets them.
+
+So the work is not "implement Dicsussion in Rust". It is: **when there is no
+webview to emit to, spool the bytes to disk and replay them when one appears.**
+The frames are sealed ciphertext; Rust never decrypts, never merges a CRDT,
+never reads a message. It needs a connection, an opaque byte store, and the
+peer's identity — which the transport already knows.
+
+Two things fall out of this for free. The only notification such a spool *can*
+produce is "message from X, no content", which is exactly D2 arrived at by
+architecture rather than discipline. And spooling sealed bytes on-device is
+neither server storage nor plaintext on disk, so it sits inside the rules.
+
+### The shape: one endpoint, two consumers
+
+**Not** two engines handing over. Iroh's endpoint key is derived from the
+identity key by domain-separated HKDF, so a second endpoint claiming the same
+identity produces the **same node id** — peers would see a drop and re-dial on
+every open/close transition.
+
+> One Rust endpoint that outlives the UI, with two consumers of its inbound
+> stream: forward to the webview when one is attached, spool to disk when not.
+
+The engine never stops. Only the consumer changes.
+
+### Where the parts may come from
+
+The owner is building **Chorrent** — a BitTorrent-style engine on iroh/QUIC,
+library-first, in Rust. Its transport ownership, reconnection and resumable
+byte storage are the same concerns. Its `ChunkStore` and `PeerDiscovery` traits
+are the seams EchoIt would fill (EchoIt already has a contact list, so it brings
+its own discovery).
+
+Sequencing agreed: **media sharing first**, message spool second. Attachments
+are chunked and resumable and failure is cheap — a slow photo. Messages are
+small and ordered and failure means someone believes they said something they
+did not.
+
+### Still to design
+
+- **The drain.** On reopen, spooled frames enter the SDK while live ones arrive.
+  CRDT merging is order-insensitive; display ordering is not.
+- **One writer, always.** Whatever owns the message store must be the only thing
+  touching it — the SDK holds its IndexedDB connection for the life of the page
+  and has no `close()`, so two live clients is corruption, not an error.
+- **Swarms later.** Group chat adds membership and discovery on top. Do not let
+  it shape the 1:1 spool.
+
+---

@@ -98,6 +98,68 @@ no-reconnect-after-freeze bug.
 
 ---
 
+## 2026-09-03 — where 1.0.0 stands, and the plan for what is blocking it
+
+Written at the end of the day's work, with both phones disconnected. Nothing
+below is new measurement; it is the consolidated position.
+
+### The honest promise for 1.0.0
+
+> Messages arrive whenever EchoIt is open — including backgrounded, screen off,
+> in your pocket. If you swipe it away, they arrive when you open it again.
+> Nothing is lost.
+
+Measured (4/4 at 10/30/90/180 s backgrounded), and ordinary for a messenger
+without push. **Delivery while closed is not a hole to apologise for**; it is
+§15 of `START_HERE.md` and it is post-1.0.0 work.
+
+### What is actually blocking release
+
+**Not** the architecture. **Not** Finding 21, which a third untouched phone
+argues against. What blocks it is that a great deal of code went in today that
+**nobody has looked at on a phone**:
+
+- Reactions, link highlighting and its dialog, the connection-helper field
+- The Finding 17 fix
+- **Our-relay-only (D8)** — the transport change, the one layer with real
+  hardware proof behind it, and completely unverified
+
+By this project's own first rule, none of that is done. It is roughly one
+focused device session, ordered in `START_HERE.md` §13 with D8 first, because a
+regression there invalidates everything measured after it.
+
+### The post-1.0.0 architecture, now specified rather than remembered
+
+`START_HERE.md` gained **§15 — After 1.0.0: delivery while closed**. The
+substance:
+
+- The problem is that the protocol lives in the webview, which belongs to the
+  activity. A service keeps a *process* alive, not a *client*.
+- The work is **much smaller than porting the protocol**. `iroh_bridge.rs`
+  already reads every inbound byte and forwards it. The change is: when there is
+  no webview, spool the sealed bytes to disk and replay them when one appears.
+  Rust never decrypts anything.
+- The shape is **one endpoint, two consumers** — not two engines handing over.
+  The endpoint key derives from the identity key, so a second endpoint claiming
+  it produces the same node id and churns the connection on every transition.
+- The owner is building **Chorrent**, a library-first iroh/QUIC transfer engine
+  in Rust. Its transport ownership, reconnection and resumable byte storage are
+  the same concerns, and its `ChunkStore` / `PeerDiscovery` traits are the seams
+  EchoIt fills. **Media sharing first, message spool second** — a failed photo
+  is cheap, a failed message is not.
+
+### Two corrections that outlived the day
+
+- *"Rust is frozen too, so a native spool is impossible"* was true and stopped
+  being true the moment the foreground service existed. It would still be sitting
+  in the notes as settled if it had not been questioned. **A conclusion is only
+  as live as the measurement under it.**
+- *"A name is not an identifier."* Two contacts called "Phone A", one dead, cost
+  hours of measurement and produced a wrong release-blocker call. Drivers must
+  assert the peer DID.
+
+---
+
 ## 2026-09-03 — 🟡 **Finding 21 — a message database was emptied on a heavily-abused test phone**
 
 *Filed as a release blocker; **downgraded within the hour** by a data point I
