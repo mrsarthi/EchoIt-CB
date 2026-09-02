@@ -98,6 +98,60 @@ no-reconnect-after-freeze bug.
 
 ---
 
+## 2026-09-03 — the foreground service is done; a stale contact was poisoning every measurement
+
+### Settled, and measured
+
+- **The process is no longer frozen.** Zero CPU ticks at 90 s and 180 s before;
+  **~300 ticks** over the same window with `EchoItService` running.
+- **The webview keeps executing.** A 1 s counter reached **59 in 60 seconds**
+  backgrounded. The "TauriActivity suspends the webview" theory is dead.
+- **The service survives the app being closed** — the reported bug.
+  `android:stopWithTask="false"` plus `onTaskRemoved`. The applier also stopped
+  triplicating the declaration; a device was found with three.
+- **Messages are received while backgrounded.** A notification is posted on
+  `echoit_messages` (logcat, cleared before the send), and the row lands in
+  `message_stream`. D2's sender-name-only notification works.
+- `OplusHansManager: cannot transition from R to M, importance=fg-service` —
+  on this hardware the service is what holds the app out of Oplus's reaper.
+
+### The measurement error, which mattered more than any of it
+
+**Phone A re-registered at some point and has a new identity.** Phone B now
+holds *two* contacts whose names both begin "Phone A":
+
+| row | did | state |
+|---|---|---|
+| `Phone A` | …Q2gp1jRYnL | **dead** — the old identity |
+| `Phone A (Mutual)` | …euM8Gf7Sox | live |
+
+Every driver opened the conversation by matching text that starts with the
+peer's name, so every run for hours was reading the **dead** conversation, and
+reporting 0/4 for a peer that no longer exists. The refusal guards in
+`measure-background-real.mjs` did not catch it because the run genuinely was in
+*a* conversation with *a* composer — just the wrong one.
+
+This is the third time a driver has confidently reported a number about work it
+had not done. The guard that would have caught it is asserting the **peer did**,
+not the peer's name; a name is not an identifier and two contacts may share one.
+
+### Still unexplained, and the one thing left
+
+Today's messages are in `message_stream` under the **live** channel, authored by
+the live DID — and they still do not appear in that conversation, which renders
+only up to 20:40. So the remaining gap is between a row existing in storage and
+`chat.getHistory()` returning it. Not transport, not the freezer, not the
+webview, not delivery, and not — now — the wrong conversation.
+
+Two candidates worth trying first: the message reaching `message_stream` without
+being integrated into the CRDT document that `getHistory` reads, or the history
+window filtering on a timestamp that does not mean what the caller thinks.
+**Every row in `message_stream` is seconds-like** (`1788373854`), including rows
+from 2026-08-22, so any code treating them as milliseconds places them in
+January 1970.
+
+---
+
 ## 2026-09-02 — background reception works; the message does not survive the trip
 
 ### The service now survives the app being closed
