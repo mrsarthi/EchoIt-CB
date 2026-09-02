@@ -98,6 +98,49 @@ no-reconnect-after-freeze bug.
 
 ---
 
+## 2026-09-03 (evening) — the service stops with the app, deliberately
+
+Asked: why not keep the notification alive the way uTorrent does, so it works
+with the app closed?
+
+**We can, and did.** The notification carries `ONGOING_EVENT|NO_CLEAR` and is
+not dismissible, and with `stopWithTask="false"` plus `onTaskRemoved` the
+service genuinely survived a recents-swipe — measured: 3 service records and
+its notification still posted after the task was gone.
+
+**Surviving turned out to be worse than stopping.** In the same measurement,
+`/proc/net/unix` showed the webview devtools socket **gone**. uTorrent's
+downloader is native code living in the service, so it keeps working; EchoIt's
+protocol is JavaScript in the activity's webview, which dies with the activity.
+What survived was a service that could receive nothing, sitting behind a
+notification reading *"Connected — messages will arrive"*.
+
+That is a false statement in shipped UI — the exact class of thing the audits
+keep catching — and it costs battery to keep telling it.
+
+So the service now stops with the task (`stopWithTask="true"`, `onTaskRemoved`
+calls `stopSelf`), and its text says what is true: *"Open — you will get
+messages while EchoIt is running"*. Verified: open → service and notification
+present; swiped away → both gone.
+
+### What would make a surviving service worth having
+
+The uTorrent shape: the engine in the service rather than in the activity. For
+EchoIt that means running the client in a **service-owned headless WebView**.
+The obstacle is not the WebView — a `Service` can create one from the
+application context and run JS in it. It is that the transport reaches Rust
+through **Tauri's IPC**, which exists only for the WebView Tauri itself
+created. A service-hosted WebView has no `invoke`, so no `iroh_start`, no
+transport events. That bridge would have to be reimplemented against a
+`@JavascriptInterface`, and the single-client invariant enforced by hand — the
+SDK holds its IndexedDB connection for the life of the page and has no
+`close()`, so two live WebViews is data corruption rather than an error.
+
+Post-1.0.0, and specified rather than hand-waved. Until it exists, a surviving
+service has nothing to do.
+
+---
+
 ## 2026-09-03 (later) — notifications were never requested; and what "closed" costs
 
 ### The bug behind both reports: POST_NOTIFICATIONS was never asked for

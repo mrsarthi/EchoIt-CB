@@ -102,7 +102,7 @@ manifest = manifest.replace(
         <service
             android:name=".EchoItService"
             android:foregroundServiceType="dataSync"
-            android:stopWithTask="false"
+            android:stopWithTask="true"
             android:exported="false" />
 
     </application>`,
@@ -226,7 +226,11 @@ class EchoItService : Service() {
         val notification = Notification.Builder(this, CHANNEL_SERVICE)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle("EchoIt")
-            .setContentText("Connected — messages will arrive")
+            // Says what it does, not what we would like it to do. The
+            // service keeps EchoIt receiving while it is open but not on
+            // screen -- it does nothing once the app is closed, and it stops
+            // then, so this never sits over a closed app claiming otherwise.
+            .setContentText("Open — you will get messages while EchoIt is running")
             .setContentIntent(pi)
             .setOngoing(true)
             .build()
@@ -252,19 +256,34 @@ class EchoItService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     /**
-     * Swiping EchoIt out of the recents list must not stop the service.
+     * Go when the app goes.
      *
-     * Reported on a device: closing the app closed the service, which is the
-     * one thing it exists not to do -- a messenger that only receives while
-     * you are looking at it is the problem, not the feature.
+     * This deliberately does the opposite of what it did for one afternoon,
+     * and the reason is worth keeping.
      *
-     * android:stopWithTask="false" in the manifest is the declaration; this
-     * is the belt to its braces, because several OEM builds stop the service
-     * anyway and then honour an explicit restart.
+     * Making the service survive a recents-swipe works -- measured, it stays
+     * up with its notification. But EchoIt's protocol runs in the **webview**,
+     * which belongs to the activity and dies with it: /proc/net/unix shows
+     * the devtools socket gone straight after the swipe. So what survived was
+     * a service that could not receive anything, sitting behind a
+     * notification reading "Connected -- messages will arrive".
+     *
+     * That is a false statement in shipped UI, which is the one thing this
+     * project's audits keep catching, and it costs battery to tell the lie.
+     * Better to stop: the service is honest about existing only while EchoIt
+     * does.
+     *
+     * **What would make surviving worthwhile** is the uTorrent shape -- the
+     * engine living in the service rather than in the activity. For a torrent
+     * client that is a native downloader; for EchoIt it means running the
+     * client in a service-owned headless WebView, which needs Tauri's IPC
+     * bridge reimplemented for a WebView that Tauri did not create. That is
+     * architecture, not a flag, and until it exists a surviving service has
+     * nothing to do.
      */
     override fun onTaskRemoved(rootIntent: Intent?) {
-        val restart = Intent(applicationContext, EchoItService::class.java)
-        startForegroundService(restart)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
         super.onTaskRemoved(rootIntent)
     }
 
