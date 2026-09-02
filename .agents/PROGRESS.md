@@ -98,9 +98,39 @@ no-reconnect-after-freeze bug.
 
 ---
 
-## 2026-09-03 — 🔴 **Finding 21 — an OS kill emptied the message database.** Release blocker
+## 2026-09-03 — 🟡 **Finding 21 — a message database was emptied on a heavily-abused test phone**
 
-Found while testing screen-off delivery. **This outranks everything else open.**
+*Filed as a release blocker; **downgraded within the hour** by a data point I
+did not have. Kept in full, including the over-claim, because the reasoning
+error is the useful part.*
+
+**The correction.** A third phone — EchoIt installed, untouched, nobody messaged
+for three days — has **all of its history**. That is the case I claimed was at
+risk, and it is fine.
+
+So "a routine OS kill erases history" is **not supported**. What was actually
+observed is narrower: a database was emptied on the one phone that had, in a
+single day, taken roughly eight `adb install -r` cycles, many `am force-stop`s,
+repeated `location.reload()` over CDP, and finally an OS kill mid-write. None
+of that happens to anyone's real phone.
+
+The conclusion outran the evidence: one wipe on an abused device was
+generalised to normal use, on a machine where every unusual thing that happened
+to it that day was something *I* did. The observation stands; the inference did
+not.
+
+**Still to settle, and cheap:** reinstall-and-kill in a loop on a phone with
+known contents and count how often the store comes back empty. Until then the
+honest line is *"seen once, on a test device, under conditions no user
+reproduces"* — not a blocker, and not dismissed either.
+
+Below is the original entry, unedited.
+
+---
+
+### Original entry, as filed
+
+Found while testing screen-off delivery.
 
 ### What happened
 
