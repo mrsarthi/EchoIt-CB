@@ -98,6 +98,58 @@ no-reconnect-after-freeze bug.
 
 ---
 
+## 2026-09-03 (later) — notifications were never requested; and what "closed" costs
+
+### The bug behind both reports: POST_NOTIFICATIONS was never asked for
+
+Android 13 made it a runtime permission and **nothing in the app ever
+requested it**. Measured across the two phones: `granted=true` on one and
+`granted=false` on the other — and the denied one is the phone that reported
+notifications not working. Nothing fails loudly; the notification is posted and
+the system drops it.
+
+It explains the second report too. With the permission denied the **foreground
+notification is not shown either**, so the only visible evidence the service is
+running disappears — and a running service is indistinguishable from a stopped
+one.
+
+`MainActivity` now asks on resume, once, and never insists: Android stops
+showing the dialog after two refusals, and a messenger that nags about
+notifications has already lost the argument. Verified — the dialog appeared,
+Allow was tapped, `granted=true`, and the service notification became visible.
+
+### What actually works, measured on the live contacts
+
+| State | Delivered live | Notification | Lost |
+|---|---|---|---|
+| Both apps open | yes | n/a (on screen) | no |
+| **B backgrounded** (app open, not on screen) | **yes** | **yes, on the shade** | no |
+| **B closed** (swiped from recents) | **no** | **no** | **no — arrives on reopening** |
+
+The backgrounded row is the one that was previously reported as 0/4 and is
+simply not true: message sent, notification posted and visible, message present
+in the conversation.
+
+### What closing the app costs, and why
+
+Swiping EchoIt out of recents removes the task. `onTaskRemoved` and
+`START_STICKY` do restart the process — measured, the pid changes and the
+service comes back with its notification. **But the protocol does not.**
+
+`/proc/net/unix` after the swipe: the webview devtools socket is **gone**. The
+whole protocol runs in the webview, and the webview dies with the activity. The
+service keeps a *process* alive; it does not keep a *client* alive. Nothing is
+lost — the sender holds the message and it arrives on the next open, verified —
+but there is no live delivery and no notification while the app is closed.
+
+**Closing that gap means running the protocol outside the webview**, natively in
+Rust. That is an architectural change, not a patch, and it is not a 1.0.0 job.
+The honest promise for beta is: messages arrive while EchoIt is open, including
+in the background and with the screen off; if you swipe it away they arrive when
+you open it again.
+
+---
+
 ## 2026-09-03 — the foreground service is done; a stale contact was poisoning every measurement
 
 ### Settled, and measured

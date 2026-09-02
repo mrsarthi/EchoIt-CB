@@ -319,7 +319,36 @@ const SVC_BODY = `${SVC_BEGIN}
    */
   override fun onResume() {
     super.onResume()
+    askForNotificationsOnce()
     EchoItService.start(this)
+  }
+
+  /**
+   * Ask for permission to post notifications.
+   *
+   * Android 13 made POST_NOTIFICATIONS a runtime permission, and nothing was
+   * ever requesting it. Measured on two phones: granted on one, **denied on
+   * the other**, and the denied one is the phone that reported "notifications
+   * do not work". Nothing failed loudly -- the notification is posted and the
+   * system drops it.
+   *
+   * It also explains the other report, that closing the app stops the service.
+   * With the permission denied the foreground notification is not shown, so
+   * the only visible evidence that the service is running disappears, and a
+   * running service is indistinguishable from a stopped one.
+   *
+   * Asked once per launch and never insisted on: Android itself stops showing
+   * the dialog after two refusals, and a messenger that nags for notifications
+   * has already lost the argument. If it is refused, everything else still
+   * works -- messages arrive, the badge counts them -- and Settings offers the
+   * way back.
+   */
+  private fun askForNotificationsOnce() {
+    if (android.os.Build.VERSION.SDK_INT < 33) return
+    val granted = checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+      android.content.pm.PackageManager.PERMISSION_GRANTED
+    if (granted) return
+    requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001)
   }
 
   private fun wireNotifyBridge(webView: android.webkit.WebView) {
